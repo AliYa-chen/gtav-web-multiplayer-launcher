@@ -693,6 +693,87 @@ test('新页面的有效恢复位置用于首次放置，非法恢复位置回�
   assert.ok(Math.abs(invalid.position()[1] + 1088.1) < .001);
 });
 
+test('刷新恢复完整外观、模型、位置与朝向，后续快照不再次随机换装', () => {
+  const appearance = { ...captureFixture(),
+    overlays: Array.from({ length: 13 }, () => [255, 0, 0, 0, 0]), hair: [7, 12] };
+  const state = peerState({ position: [735, -1075, 23], heading: 220, model: 0x9c9effd8, appearance });
+  const restored = packet({ peers: [], model: 0x0d7114c9,
+    resumed: true, resume_state_ready: true, resume_state: state });
+  const bridge = engine({ localModel: 0x0d7114c9 }); bridge.connect(restored);
+  const ped = bridge.localPed();
+  assert.deepEqual(bridge.position(), state.position);
+  assert.deepEqual(bridge.calls.filter((call) => call.name === 'mpSetHeading').at(-1).arguments, [ped, 220]);
+  assert.equal(bridge.calls.filter((call) => call.name === 'mpSetPlayerModel').length, 1);
+  assert.equal(bridge.calls.filter((call) => call.name === 'mpRandomComponents').length, 0);
+  assert.equal(bridge.calls.filter((call) => call.name === 'mpRandomProps').length, 0);
+  assert.deepEqual(bridge.calls.filter((call) => call.name === 'mpSetComponent').map((call) => call.arguments),
+    appearance.components.map((part, index) => [ped, index, ...part]));
+  assert.deepEqual(bridge.calls.filter((call) => call.name === 'mpSetHairTint').at(-1).arguments, [ped, 7, 12]);
+  const published = bridge.messages.find((message) => message.multiplayer?.type === 'local_state').multiplayer.state;
+  assert.deepEqual(JSON.parse(JSON.stringify(published.appearance)), appearance);
+  bridge.setPosition([737, -1075, 23]);
+  for (let index = 0; index < 8; index++) { bridge.publish(restored); bridge.tick(); }
+  assert.deepEqual(bridge.position(), [737, -1075, 23]);
+  assert.equal(bridge.calls.filter((call) => call.name === 'mpSetComponent').length, 12);
+});
+
+test('恢复首份世界快照前不随机服饰、不放置或上报初始坐标', () => {
+  const bridge = engine();
+  bridge.connect(packet({ peers: [], resumed: true, resume_state_ready: false }));
+  assert.equal(bridge.calls.filter((call) => call.name === 'mpRandomComponents').length, 0);
+  assert.equal(bridge.calls.filter((call) => call.name === 'mpSetCoordsNoOffset').length, 0);
+  assert.equal(bridge.messages.filter((message) => message.multiplayer?.type === 'local_state').length, 0);
+  bridge.publish(packet({ peers: [], resumed: true, resume_state_ready: true, resume_state: null }));
+  bridge.tick();
+  assert.equal(bridge.calls.filter((call) => call.name === 'mpRandomComponents').length, 1);
+  assert.ok(bridge.messages.some((message) => message.multiplayer?.type === 'local_state'));
+});
+
+test('主动新加入忽略旧恢复外观，使用新的角色选择', () => {
+  const bridge = engine(); bridge.connect(packet({ peers: [], resumed: false,
+    resume_state_ready: true, resume_state: peerState({ model: 0x9c9effd8, appearance: captureFixture() }) }));
+  assert.equal(bridge.calls.filter((call) => call.name === 'mpSetPlayerModel').length, 0);
+  assert.equal(bridge.calls.filter((call) => call.name === 'mpRandomComponents').length, 1);
+});
+
+test('刷新加载期间收到权威重生或位置纠正，不再被旧恢复坐标覆盖', () => {
+  for (const type of ['respawn', 'correction']) {
+    const destination = [713.5, -1088.1, 22.4];
+    const bridge = engine(); bridge.connect(packet({ peers: [], resumed: true, resume_state_ready: true,
+      resume_state: peerState({ position: [800, -900, 25] }),
+      controls: [{ id: 1, event: { type, player_id: 'LOCAL', position: destination, heading: 175,
+        health: 200, revision: 2 } }] }));
+    assert.ok(bridge.position().every((number, index) => Math.abs(number - destination[index]) < .001));
+    assert.equal(bridge.calls.filter((call) => call.name === 'mpSetCoordsNoOffset').length, 1);
+    const local = bridge.messages.find((message) => message.multiplayer?.type === 'local_state').multiplayer.state;
+    assert.ok(local.position.every((number, index) => Math.abs(number - destination[index]) < .001));
+  }
+});
+
+test('刷新本地角色需复活而服务器玩家仍存活时，在原位置恢复而不送回出生点', () => {
+  const destination = [735, -1075, 23];
+  const bridge = engine({ localHealth: 0 });
+  bridge.dead.add(bridge.localPed());
+  bridge.connect(packet({ peers: [], resumed: true, resume_state_ready: true,
+    resume_state: peerState({ position: destination, heading: 220 }),
+    combat: [{ id: 'LOCAL', alive: true, health: 170, revision: 3, spawn: [713.5, -1088.1, 22.4] }] }));
+  assert.deepEqual(bridge.position(), destination);
+  assert.equal(bridge.health.get(bridge.localPed()), 185);
+  assert.equal(bridge.calls.filter((call) => call.name === 'mpResurrectLocalPlayer').length, 1);
+  assert.equal(bridge.calls.filter((call) => call.name === 'mpSetCoordsNoOffset').length, 1);
+  assert.deepEqual(bridge.calls.filter((call) => call.name === 'mpSetHeading').at(-1).arguments, [bridge.localPed(), 220]);
+});
+
+test('适配器将恢复标志及完整服务器角色状态交给当前引擎', () => {
+  const page = adapter(directNetwork());
+  const state = peerState({ seq: 42, position: [735, -1075, 23], appearance: captureFixture() });
+  page.receive({ type: 'session', connected: true, client_id: 'LOCAL', members: [{ id: 'LOCAL' }],
+    resumed: true, resume_state_ready: true, resume_state: state }); page.flush();
+  assert.equal(page.read().resumed, true);
+  assert.equal(page.read().resume_state_ready, true);
+  assert.deepEqual(page.read().resume_state, state);
+});
+
 test('离线成员的旧 peer 状态不得创建或反复重建实体，再上线才允许重新创建', () => {
   const members = [{ id: 'LOCAL', connected: true }, { id: 'REMOTE', connected: false }];
   const fresh = engine(); fresh.connect(packet({ members }));

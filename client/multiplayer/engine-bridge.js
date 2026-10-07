@@ -190,6 +190,8 @@ self.prepareMultiplayerBridge = function (imports) {
       lifeOverride = { id: packet.client_id, health, alive: true, revision, spawn: [...position] };
       lastRespawnRevision = Math.max(lastRespawnRevision, revision);
       lastAuthorityAlive = true;
+      // 加载期间缓存的重生位置优先于刷新时较早的世界快照。
+      initialPlacement = true;
       avatarInitialized = false; avatarChangeRequested = false;
       avatarRequestedAt = 0; avatarAttempts = 0;
       lastRecoveryAt = lastRecoveryFadeAt = now;
@@ -372,6 +374,9 @@ self.prepareMultiplayerBridge = function (imports) {
           appearancePed = 0; localAppearance = null;
           lifeOverride = null; lastAuthorityAlive = null; lastRespawnRevision = -1;
         }
+        // 等待服务器恢复快照，避免刷新时先随机换装或上报单机出生坐标。
+        if (packet.resumed && !packet.resume_state_ready) return;
+        const resumeState = packet.resumed ? packet.resume_state : null;
         if (!deathRestartPaused && ex.mpPauseDeathRestart) {
           ex.mpPauseDeathRestart(1); deathRestartPaused = true;
         }
@@ -392,6 +397,7 @@ self.prepareMultiplayerBridge = function (imports) {
             if (completed) {
               ex.mpSetCoordsNoOffset(ped, vector(0, event.position), 1, 1, 1);
               ex.mpSetHeading(ped, event.heading ?? 90);
+              initialPlacement = true;
             }
           }
           if (completed) {
@@ -409,9 +415,12 @@ self.prepareMultiplayerBridge = function (imports) {
           if (authority.alive) {
             const revision = Number.isSafeInteger(authority.revision) ? authority.revision : 0;
             if (lastAuthorityAlive === false || ex.mpIsDead(localPed, 0)) {
-              const destination = validPosition(authority.spawn) ? authority.spawn
+              const restoring = !initialPlacement && validPosition(resumeState?.position);
+              const destination = restoring ? resumeState.position
+                : validPosition(authority.spawn) ? authority.spawn
                 : validPosition(packet.spawn) ? packet.spawn : TEST_SPAWN;
-              const restored = recoverLocal(destination, 90, authority.health, revision, now);
+              const restored = recoverLocal(destination, restoring && Number.isFinite(resumeState.heading)
+                ? resumeState.heading : 90, authority.health, revision, now);
               if (!restored) return;
               localPed = restored;
               authority = lifeOverride;
@@ -434,7 +443,8 @@ self.prepareMultiplayerBridge = function (imports) {
         // 公共战局使用 GTA 的多人自由模式角色；不替换单机三位主角。
         if (ex.mpSetPlayerModel && ex.mpPlayerId && ex.mpDefaultVariation) {
           const fallback = packet.avatar === 'female' ? 0x9c9effd8 : 0x705e61f2;
-          const avatar = ONLINE_MODELS.has(packet.model) ? packet.model : fallback;
+          const avatar = ONLINE_MODELS.has(resumeState?.model) ? resumeState.model
+            : ONLINE_MODELS.has(packet.model) ? packet.model : fallback;
           if (avatarTarget !== avatar) {
             avatarTarget = avatar; avatarInitialized = false; avatarChangeRequested = false;
             avatarRequestedAt = 0; avatarAttempts = 0;
@@ -480,6 +490,8 @@ self.prepareMultiplayerBridge = function (imports) {
           }
         }
         if (appearancePed !== localPed) {
+          if (!localAppearance && resumeState?.model === (ex.mpGetModel(localPed) >>> 0)
+              && validAppearance(resumeState.appearance)) localAppearance = resumeState.appearance;
           if (localAppearance) applyAppearance(localPed, localAppearance, ex.mpGetModel(localPed) >>> 0);
           else localAppearance = randomizeAndCapture(localPed, ex.mpGetModel(localPed) >>> 0, packet.appearance_spec);
           appearancePed = localPed;
@@ -489,11 +501,12 @@ self.prepareMultiplayerBridge = function (imports) {
         // 测试阶段固定出生区，既不使用随机点，也不依赖对方状态是否已经到达。
         if (!initialPlacement) {
           const index = Math.max(0, (packet.members || []).findIndex((member) => member.id === packet.client_id));
-          position = validPosition(packet.resume_position) ? [...packet.resume_position]
+          position = validPosition(resumeState?.position) ? [...resumeState.position]
+            : validPosition(packet.resume_position) ? [...packet.resume_position]
             : validPosition(packet.spawn) ? [...packet.spawn]
             : [TEST_SPAWN[0] + (index % 8) * 2, TEST_SPAWN[1] + Math.floor(index / 8) * 2, TEST_SPAWN[2]];
           ex.mpSetCoordsNoOffset(localPed, vector(0, position), 1, 1, 1);
-          ex.mpSetHeading(localPed, 90);
+          ex.mpSetHeading(localPed, Number.isFinite(resumeState?.heading) ? resumeState.heading : 90);
           initialPlacement = true;
           post({ type: 'game_status', connected: true, peer_count: replicas.size, spawned: true });
         }

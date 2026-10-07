@@ -4,6 +4,9 @@ import { modelForPreset, normalizeAppearance, randomAppearance } from './appeara
 const coordinates = (value) => Array.isArray(value) && value.length === 3
   && value.every((number) => typeof number === 'number' && Number.isFinite(number) && Math.abs(number) <= 16000);
 const unsignedHash = (value) => Number.isInteger(value) && value >= 0 && value <= 0xffffffff;
+const validResumeIdentity = (value) => value && typeof value.client_id === 'string'
+  && value.client_id.length > 0 && value.client_id.length <= 128
+  && typeof value.resume_token === 'string' && value.resume_token.length > 0 && value.resume_token.length <= 512;
 function cleanPlayerState(value) {
   if (!value || !coordinates(value.position) || !Number.isFinite(value.heading) || value.heading < 0 || value.heading > 360
     || !unsignedHash(value.model) || !unsignedHash(value.weapon) || !Number.isInteger(value.health)
@@ -19,7 +22,7 @@ function cleanShotEvent(value) {
 }
 
 // 游戏页直接持有连接。关闭大厅不会影响战局，也不需要另开浏览器标签页。
-export async function startPublicSession(preferences, onStatus = () => {}) {
+export async function startPublicSession(preferences, onStatus = () => {}, options = {}) {
   const address = normalizeServerAddress(preferences.server, location.href);
   const peers = new Map();
   const combat = new Map();
@@ -28,8 +31,14 @@ export async function startPublicSession(preferences, onStatus = () => {}) {
   const pendingControls = [];
   const identityKey = 'gta5.public.identity:' + address + ':' + preferences.name;
   let savedIdentity = null;
-  try { savedIdentity = JSON.parse(sessionStorage.getItem(identityKey)); } catch { /* 不支持存储时可正常加入。 */ }
+  // 主页主动选择角色属于新加入；刷新游戏页才读取上一身份。当前连接的自动重连仍使用之后保存的身份。
+  if (options.reconnect === true) {
+    try { savedIdentity = JSON.parse(sessionStorage.getItem(identityKey)); } catch { /* 不支持存储时可正常加入。 */ }
+    if (!validResumeIdentity(savedIdentity)) savedIdentity = null;
+  }
   let socket = null, clientId = null, room = null, welcomed = false, profiled = false, stopped = false;
+  let attemptedResumeId = null, resumed = false, resumeStateReady = false;
+  let identityLock = null, lockGeneration = 0;
   let supportsAppearance = false;
   let supportsCombat = false, supportsResume = false, supportsHeartbeat = false, supportsSnapshot = false;
   let spawn = null;
@@ -44,6 +53,36 @@ export async function startPublicSession(preferences, onStatus = () => {}) {
   const firstTimer = setTimeout(() => {
     if (!initialDone) { initialDone = true; readyReject(new Error('连接超时，请检查服务器地址及端口后重试。')); }
   }, 12000);
+  function releaseIdentityLock() {
+    lockGeneration++;
+    identityLock?.release();
+    identityLock = null;
+  }
+  function acquireIdentityLock(id) {
+    const locks = globalThis.navigator?.locks;
+    if (!locks?.request) return Promise.resolve(true);
+    if (identityLock?.id === id) return Promise.resolve(true);
+    releaseIdentityLock();
+    const generation = lockGeneration;
+    return new Promise((resolve) => {
+      let release;
+      const held = new Promise((done) => { release = done; });
+      try {
+        const requested = locks.request('gta5.public.identity:' + address + ':' + id, { ifAvailable: true }, (lock) => {
+          if (!lock || stopped || generation !== lockGeneration) { resolve(false); return; }
+          identityLock = { id, generation, release };
+          resolve(true);
+          return held.finally(() => {
+            if (identityLock?.generation === generation) identityLock = null;
+          });
+        });
+        Promise.resolve(requested).catch(() => {
+          // 浏览器禁用 Web Locks 时继续使用已有的单标签身份恢复。
+          resolve(!stopped && generation === lockGeneration);
+        });
+      } catch { resolve(!stopped && generation === lockGeneration); }
+    });
+  }
   function emit(data) {
     if (receiver) {
       // 渲染器失败不能被当作网络错误，从而反复注销和重建服务端身份。
@@ -68,11 +107,17 @@ export async function startPublicSession(preferences, onStatus = () => {}) {
   }
   function postSession() {
     const connected = Boolean(room && profiled);
+    const ownState = connected && resumed ? peers.get(clientId)?.state : null;
+    const cleanResumeState = ownState ? cleanPlayerState(ownState) : null;
+    const resumeState = cleanResumeState ? { seq: ownState.seq, ...cleanResumeState } : null;
     emit({ type: 'session', connected, client_id: connected ? clientId : null,
       members: connected ? room.members.map(({ id, name, connected }) => ({ id, name, connected: connected !== false })) : [],
       peers: connected ? [...peers.values()] : [],
       combat: connected ? [...combat.values()] : [],
-      resume_position: connected ? peers.get(clientId)?.state?.position : null,
+      resumed: connected && resumed,
+      resume_state_ready: connected && (!resumed || resumeStateReady),
+      resume_state: resumeState,
+      resume_position: resumeState?.position || null,
       spawn: connected ? spawn : null,
       avatar: preferences.preset.endsWith('_female') ? 'female' : 'male', preset: preferences.preset, seed: preferences.seed,
       model: modelForPreset(preferences), appearance_spec: randomAppearance(preferences) });
@@ -111,6 +156,7 @@ export async function startPublicSession(preferences, onStatus = () => {}) {
     const previous = socket; socket = null;
     if (previous) { previous.onopen = previous.onmessage = previous.onerror = previous.onclose = null; try { previous.close(); } catch {} }
     clientId = null; room = null; welcomed = profiled = false;
+    attemptedResumeId = null; resumed = resumeStateReady = false;
     supportsAppearance = false;
     supportsCombat = supportsResume = supportsHeartbeat = supportsSnapshot = false;
     peers.clear(); combat.clear(); pendingState = null;
@@ -129,9 +175,19 @@ export async function startPublicSession(preferences, onStatus = () => {}) {
       ...(supportsCombat ? ['combat'] : []), ...(supportsResume ? ['resume'] : []),
       ...(supportsHeartbeat ? ['heartbeat'] : []), ...(supportsSnapshot ? ['snapshot'] : []),
     ];
-    send('hello', { name: preferences.name, ...(capabilities.length ? { capabilities } : {}),
-      ...(includeResume && supportsResume && savedIdentity?.client_id && savedIdentity?.resume_token
-        ? { client_id: savedIdentity.client_id, resume_token: savedIdentity.resume_token } : {}) });
+    const identity = includeResume && supportsResume && validResumeIdentity(savedIdentity) ? savedIdentity : null;
+    attemptedResumeId = null;
+    if (send('hello', { name: preferences.name, ...(capabilities.length ? { capabilities } : {}),
+      ...(identity ? { client_id: identity.client_id, resume_token: identity.resume_token } : {}) })) {
+      attemptedResumeId = identity?.client_id || null;
+    }
+  }
+  function completeInitialJoin() {
+    // 刷新后必须先取得服务器原角色快照，不能在 world_state 到达前随机初始化服装和出生点。
+    if (room && profiled && (!resumed || resumeStateReady)) {
+      clearTimeout(connectionTimer); connectionTimer = 0;
+      if (!initialDone) { initialDone = true; clearTimeout(firstTimer); readyResolve(); }
+    }
   }
   function heartbeat() {
     heartbeatTimer = 0;
@@ -181,6 +237,7 @@ export async function startPublicSession(preferences, onStatus = () => {}) {
       case 'profile':
         if (typeof message.client_id !== 'string' || typeof message.name !== 'string'
           || (!supportsResume && message.client_id !== clientId)) throw new Error('服务器玩家信息无效。');
+        resumed = attemptedResumeId !== null && message.client_id === attemptedResumeId;
         clientId = message.client_id;
         spawn = coordinates(message.spawn) ? message.spawn.slice() : null;
         stateSequence = Math.max(0, Number.isSafeInteger(message.last_state_seq) ? message.last_state_seq : 0);
@@ -188,6 +245,8 @@ export async function startPublicSession(preferences, onStatus = () => {}) {
         if (supportsResume && typeof message.resume_token === 'string') {
           savedIdentity = { client_id: clientId, resume_token: message.resume_token };
           try { sessionStorage.setItem(identityKey, JSON.stringify(savedIdentity)); } catch { /* 存储限制不影响当前连接。 */ }
+          // 新加入的服务端 ID 同样持锁；网络中断时保留到页面真正退出。
+          acquireIdentityLock(clientId);
         }
         profiled = true;
         break;
@@ -197,10 +256,10 @@ export async function startPublicSession(preferences, onStatus = () => {}) {
         if (!profiled) throw new Error('服务器尚未确认玩家身份。');
         const members = new Set(room.members.map(({ id }) => id));
         for (const id of peers.keys()) if (!members.has(id)) peers.delete(id);
-        attempts = 0; clearTimeout(connectionTimer); connectionTimer = 0;
+        attempts = 0;
         startRecoveryTimers();
         postSession(); status(initial ? 'joined' : 'membership', '已加入公共战局');
-        if (!initialDone) { initialDone = true; clearTimeout(firstTimer); readyResolve(); }
+        completeInitialJoin();
         break;
       }
       case 'world_state': {
@@ -214,13 +273,15 @@ export async function startPublicSession(preferences, onStatus = () => {}) {
             peers.set(entry.player_id, { player_id: entry.player_id, state: { seq: entry.state.seq, ...state } });
           }
         }
-        postSession(); status('sync', '正在同步公共战局玩家'); break;
+        resumeStateReady = true;
+        postSession(); status('sync', '正在同步公共战局玩家'); completeInitialJoin(); break;
       }
       case 'player_state': {
         if (message.room_id !== room?.id || !room.members.some(({ id }) => id === message.player_id)) return;
         const state = cleanPlayerState(message.state);
         if (!state || !Number.isSafeInteger(message.state.seq) || message.state.seq < 0) throw new Error('服务器角色状态格式无效。');
         peers.set(message.player_id, { player_id: message.player_id, state: { seq: message.state.seq, ...state } });
+        if (resumed && message.player_id === clientId) postSession();
         emit(message); status('sync', '正在同步公共战局玩家'); break;
       }
       case 'shot_event':
@@ -309,12 +370,16 @@ export async function startPublicSession(preferences, onStatus = () => {}) {
     removeEventListener('pagehide', close);
     removeEventListener('online', checkConnection);
     document.removeEventListener('visibilitychange', onVisibilityChange);
+    releaseIdentityLock();
     receiver = null; pendingControls.length = 0;
     if (!initialDone) { initialDone = true; readyReject(new Error('已取消连接。')); }
   }
   addEventListener('pagehide', close, { once: true });
   addEventListener('online', checkConnection);
   document.addEventListener('visibilitychange', onVisibilityChange);
+  if (savedIdentity) {
+    if (!await acquireIdentityLock(savedIdentity.client_id)) savedIdentity = null;
+  }
   connect();
   return { ready, close, setReceiver, onWorkerMessage };
 }

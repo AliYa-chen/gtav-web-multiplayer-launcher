@@ -28,10 +28,17 @@ export function normalizeServerAddress(value, pageUrl = 'http://localhost:8000/'
   if (page.protocol === 'https:' && url.protocol === 'ws:') {
     throw new Error('HTTPS 页面需要 wss:// 服务器地址，请使用加密连接。');
   }
-  // URL 会移除显式的标准端口 80/443，需区分它们与未填写端口的情况。
+  // 完整协议地址使用协议标准端口，裸主机使用战局默认端口。
+  // URL 会移除显式的 80/443；再次读取缓存地址时必须保持同一端口。
   const authority = address.split('://')[1].split(/[/?#]/)[0];
   const explicitPort = authority.startsWith('[') ? /\]:\d+$/.test(authority) : /:\d+$/.test(authority);
-  if (!url.port && !explicitPort) url.port = DEFAULT_PORT;
+  if (!url.port && !explicitPort && !hasScheme) url.port = DEFAULT_PORT;
   if (!url.pathname || url.pathname === '/') url.pathname = '/ws';
   return url.href;
+}
+
+// 输入框显示用户关心的主机和端口；连接协议与 /ws 路径仅在内部使用。
+export function displayServerAddress(value, pageUrl = 'http://localhost:8000/') {
+  const url = new URL(normalizeServerAddress(value, pageUrl));
+  return url.hostname + ':' + (url.port || (url.protocol === 'wss:' ? '443' : '80'));
 }

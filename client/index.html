@@ -50,7 +50,7 @@
 <div id="fps"></div>
 <script type="module">
 import { installGameAdapter } from '/multiplayer/game-adapter.js';
-import { installJoinModal, readPublicPreferences } from '/multiplayer/join-modal.js';
+import { installJoinModal, readPublicPreferences, consumePublicEntryIntent } from '/multiplayer/join-modal.js';
 import { startPublicSession } from '/multiplayer/public-session.js';
 // 浏览器版本的入口页。引擎在专用工作线程中运行（loader.js，相当于引擎的“主线程”，静态构造函数和
 // main() 在此执行，可能阻塞该线程）。页面仅持有 canvas，并将其交给该线程，再转交 GPU 工作线程。
@@ -59,6 +59,10 @@ import { startPublicSession } from '/multiplayer/public-session.js';
 const ROOM_GAME = location.pathname === '/play/';
 const q = new URLSearchParams(ROOM_GAME ? 'mode=sandbox' : location.search);
 const onlinePreferences = ROOM_GAME ? readPublicPreferences() : null;
+const ONLINE_RECONNECT = ROOM_GAME && consumePublicEntryIntent(performance.getEntriesByType('navigation')[0]?.type);
+const ONLINE_LOADING = ONLINE_RECONNECT ? '恢复战局中' : '加入战局中';
+// 浏览器从页面快照恢复时，旧连接和工作线程已在 pagehide 关闭，需要重新初始化。
+if (ROOM_GAME) addEventListener('pageshow', (event) => { if (event.persisted) location.reload(); });
 let onlineConnectionReady = !ROOM_GAME;
 const joinModal = installJoinModal({ onJoin: () => location.assign('/play/') });
 const editingInput = (event) => joinModal.isOpen || Boolean(event.target?.closest?.('input,textarea,select,[contenteditable="true"]'));
@@ -258,7 +262,7 @@ const showModes = () => {
 	for (const b of modeButtons) {
 		const act = b.dataset.act, loading = !pickingMap && (ROOM_GAME ? act === 'online' : (act === 'story' ? startMode === 1 : act === 'sandbox' && startMode >= 2));
 		const text = document.createElement('span');
-		text.textContent = loading ? (ROOM_GAME ? '加入战局中' : LOADING[startMode]) : ACTS[act][0];
+		text.textContent = loading ? (ROOM_GAME ? ONLINE_LOADING : LOADING[startMode]) : ACTS[act][0];
 		if (loading) b.replaceChildren(text);
 		else {
 			const icon = document.createElement('span');
@@ -416,10 +420,10 @@ if (ROOM_GAME && onlinePreferences) {
 	try {
 		publicSession = await startPublicSession(onlinePreferences, ({ phase, text }) => {
 			const label = document.getElementById('label');
-			if (label && !onlineConnectionReady) label.textContent = phase === 'joined' ? '加入战局中' : text;
+			if (label && !onlineConnectionReady) label.textContent = phase === 'joined' ? ONLINE_LOADING : text;
 			if (onlineConnectionReady && phase === 'reconnecting') { hud.textContent = text; hud.style.color = '#f2b178'; }
 			else if (onlineConnectionReady && phase === 'joined') { hud.textContent = '公共战局连接已恢复'; hud.style.color = ''; }
-		});
+		}, { reconnect: ONLINE_RECONNECT });
 		await publicSession.ready;
 		onlineConnectionReady = true;
 	} catch (error) {

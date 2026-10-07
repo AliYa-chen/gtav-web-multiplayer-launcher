@@ -75,6 +75,7 @@ python3 serve_local.py --instances 2 --multiplayer --room-server 127.0.0.1:8787 
 
 默认连接公网战局 `183.66.27.21:47485`，客户端不需要本地 Java 或 WebSocket 服务。
 从主页点击“加入在线战局”或按 `O`，填写昵称、服务器地址和角色预设，连接成功后在同一页面进入游戏。
+地址框只显示 `IP:端口`，连接协议与路径在内部处理；昵称、地址和角色预设会自动保存在浏览器本地存储。
 右上角战局跳转和独立大厅页面已移除。在线加载显示“加入战局中”，只有一个旋转图标。
 在线角色可选随机男女 NPC 或男女自由模式角色；随机服饰只生成一次，随后同步相同的外观。
 输入模态框时不会触发游戏操作，在线入口屏蔽 Shift+P、帧率及调试按键。
@@ -82,6 +83,8 @@ python3 serve_local.py --instances 2 --multiplayer --room-server 127.0.0.1:8787 
 多开测试使用不同 localhost 端口，隔离缓存、存档和引擎广播频道。
 测试出生点仍在 `(711.5, -1088.1, 22.4)` 附近，间距两米；服务端分配位置并校验移动。
 断线在 60 秒内可恢复相同身份、生命值、计分、位置和服饰，不再重新生成玩家。
+刷新 `/play/` 会显示“恢复战局中”，先恢复服务器身份及完整角色快照再启动游戏，保留原模型、服装和朝向。
+从主页重新提交角色选择属于新加入；恢复凭据仅保存在当前标签页，不与其他页面共享。
 每个游戏页独占远程连接和桥接，避免同端口多标签页串用角色状态。
 新版采用五秒应用心跳、二十五秒无响应自动重连、十秒完整战局快照；
 网络恢复或标签页重新显示时会及时重连，过期身份凭据会自动重新加入。
@@ -138,6 +141,7 @@ python3 tools/build_multiplayer_client.py
 python3 -B tools/tests/test_multiplayer.py
 python3 -B tools/tests/test_combat_world.py
 node tools/tests/test_game_adapter.cjs
+node --test tools/tests/test_public_session.cjs tools/tests/test_join_modal.cjs
 ```
 
 服务器只需要 JAR；客户端的构建命令必须在已有完整游戏项目内执行。

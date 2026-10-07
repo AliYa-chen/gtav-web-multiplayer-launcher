@@ -1,5 +1,4 @@
-// 游戏页面与同一浏览器实例的公共战局大厅之间传递状态。
-// 网络连接由大厅持有；引擎线程通过共享内存读取最新快照，避免阻塞其帧循环。
+// 游戏页直接持有公共战局连接；引擎线程通过共享内存读取最新快照，避免阻塞帧循环。
 export function installGameAdapter(worker, network = null) {
   // 正常在线游戏直接连接本页网络会话，避免同一端口多个标签页串用身份和外观。
   // 广播频道仅保留给独立探针或旧测试入口。
@@ -69,6 +68,9 @@ export function installGameAdapter(worker, network = null) {
         seed: Number.isInteger(data.seed) ? data.seed >>> 0 : 0,
         model: Number.isInteger(data.model) ? data.model >>> 0 : undefined,
         appearance_spec: data.appearance_spec || {},
+        resumed: data.resumed === true,
+        resume_state_ready: data.resume_state_ready === true,
+        resume_state: data.resume_state || null,
         resume_position: data.resume_position || null, spawn: data.spawn || null };
       peers.clear();
       for (const peer of data.peers || []) {
