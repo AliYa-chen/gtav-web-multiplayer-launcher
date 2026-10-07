@@ -1,4 +1,8 @@
-# GTA V 公共战局服务端 0.2.4-public
+# GTA V 公共战局服务端 0.2.5-public
+
+本版增加统一实体内核和只读 `GET /world` 快照，保存全局实体 ID、组件、版本、所有权租约、重生代次和删除记录。
+当前实际接入的是服务端已确认的玩家结果；快照明确标记 `shared_population=false` 与 `native_clone_transport=false`。
+车辆座位及对象归属事务已在内核中验证，但未暴露未验证的客户端创建／控制接口，NPC 与车辆的引擎复制仍未接通。
 
 所有玩家连接同一台服务器后，输入昵称就会自动进入唯一的 `PUBLIC` 公共战局。战局常驻，即使没有玩家也保留；无需创建房间、输入房间码、准备或等待房主开始。地图固定为 GTA V，游戏使用沙盒模式。
 
@@ -89,6 +93,7 @@ runtime\python.exe serve_local.py --start-room-server --room-server 127.0.0.1:87
 | --- | --- |
 | `GET /` | 中文服务状态页面 |
 | `GET /health`、`GET /api/multiplayer` | 健康统计和能力 |
+| `GET /world` | 统一实体的一致只读快照，含 epoch、版本、组件、租约和删除记录 |
 | `GET /ws` | RFC 6455 WebSocket，UTF-8 JSON 文本协议版本 1 |
 
 健康统计包含：
@@ -107,7 +112,7 @@ runtime\python.exe serve_local.py --start-room-server --room-server 127.0.0.1:87
 | `game_sync: false` | 真实游戏同步尚未完成稳定验证 |
 | `idle_timeout_seconds`、`hello_timeout_seconds` | 当前应用消息空闲超时与初次加入期限 |
 
-这些统计不包含姓名或角色位置。`capabilities` 为 `public_session`、`chat`、`player_state`、`shoot_events`、`appearance`、`combat`、`resume`、`heartbeat`、`snapshot`、`actions`、`combat_feedback`、`weapon_rules`。
+健康统计不包含姓名或角色位置。`capabilities` 为 `public_session`、`chat`、`player_state`、`shoot_events`、`appearance`、`combat`、`resume`、`heartbeat`、`snapshot`、`actions`、`combat_feedback`、`weapon_rules`、`world_registry`。`/world` 的游戏实体坐标来自已经确认的公共战局状态，不包含恢复凭据；本版仍是已确认玩家的投影视图。
 
 ## 公共战局协议
 

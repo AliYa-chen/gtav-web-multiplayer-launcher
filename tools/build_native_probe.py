@@ -42,6 +42,10 @@ ADDITIONAL_EXPORTS = {
     "mpFree": (91002, "emscripten_builtin_free", ["i64"], []),
 }
 ENTITY_EXPORTS = {
+    # 只观察原同步树及脚本上下文是否初始化；getter 不解引用传入 this。
+    "mpPedSyncTree": (88346, "CNetObjPed::GetSyncTree()", ["i64"], ["i64"]),
+    "mpPlayerSyncTree": (88355, "CNetObjPlayer::GetSyncTree()", ["i64"], ["i64"]),
+    "mpNetworkScriptHandler": (63797, "CTheScripts::GetCurrentGtaScriptHandlerNetwork()", [], ["i64"]),
     "mpForcePlaying": (18890, "CGameLogic::ForceStatePlaying()", [], []),
     "mpResurrectLocalPlayer": (54881, "network_commands::CommandNetworkResurrectLocalPlayer(rage::scrVector const&, float, int, bool, bool, int, int)", ["i64", "f32", "i32", "i32", "i32", "i32", "i32"], []),
     "mpPauseDeathRestart": (52750, "misc_commands::CommandPauseDeathArrestRestart(bool)", ["i32"], []),

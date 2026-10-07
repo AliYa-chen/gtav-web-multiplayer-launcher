@@ -23,6 +23,20 @@ from inspect_native_bridge import WasmAudit
 
 
 class PublicEnginePatchTests(unittest.TestCase):
+    def test_world_readiness_getters_only_read_initialized_pointers(self):
+        for name, index, address in (("mpPedSyncTree", 88346, 29559952),
+                                     ("mpPlayerSyncTree", 88355, 29561200)):
+            self.assertIn(name, self.audits["public"].exports[index])
+            self.assertEqual(self.original.descriptor(index)["signature"],
+                             {"parameters": ["i64"], "results": ["i64"]})
+            instructions = self.original.instructions(index)["instructions"]
+            self.assertEqual([item["operation"] for item in instructions], ["i64.const", "i64.load", "end"])
+            self.assertEqual(instructions[0]["value"], address)
+            self.assertEqual(self.body(self.original, index), self.body(self.audits["public"], index))
+        index = 63797
+        self.assertIn("mpNetworkScriptHandler", self.audits["public"].exports[index])
+        self.assertEqual(self.body(self.original, index), self.body(self.audits["public"], index))
+
     @classmethod
     def setUpClass(cls):
         cls.source_digest = hashlib.sha256(DEFAULT_WASM.read_bytes()).hexdigest()

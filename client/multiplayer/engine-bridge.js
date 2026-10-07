@@ -54,6 +54,7 @@ self.prepareMultiplayerBridge = function (imports) {
     let modelDefaultsPending = false;
     let noticeBuffer = 0, lastNoticeAttempt = -Infinity, nativeHudAvailable = null;
     let shotBuffer = 0, shotSampleAt = -Infinity, weaponSample = null, pendingShots = [];
+    let worldReadinessAt = -Infinity, worldReadinessSignature = '';
 
     const post = (value) => self.postMessage({ multiplayer: value });
     const validPosition = (position) => Array.isArray(position) && position.length === 3 &&
@@ -70,6 +71,21 @@ self.prepareMultiplayerBridge = function (imports) {
     function readVector(offset) {
       const data = view();
       return [0, 8, 16].map((part) => data.getFloat32(scratch + offset + part, true));
+    }
+    function observeWorldReadiness(now) {
+      if (now - worldReadinessAt < 5000 || !ex.mpPedSyncTree || !ex.mpPlayerSyncTree || !ex.mpNetworkScriptHandler) return;
+      worldReadinessAt = now;
+      try {
+        const inMemory = (pointer) => pointer > 0n && pointer < BigInt(memory.buffer.byteLength);
+        const report = { type: 'world_readiness',
+          ped_tree_initialized: inMemory(ex.mpPedSyncTree(0n)),
+          player_tree_initialized: inMemory(ex.mpPlayerSyncTree(0n)),
+          network_script_context: Boolean(ex.mpNetworkScriptHandler()),
+          // 此观测不创建网络对象，不发送原网络包，也不能证明同步树已可应用。
+          mode: 'read_only' };
+        const signature = JSON.stringify(report);
+        if (signature !== worldReadinessSignature) { worldReadinessSignature = signature; post(report); }
+      } catch { /* 整体引擎审计的观测失败不能中断现有角色同步。 */ }
     }
     function mergeAuthority(value) {
       if (!value || typeof value.id !== 'string') return;
@@ -588,6 +604,7 @@ self.prepareMultiplayerBridge = function (imports) {
         sampleShots(now);
         if (now - lastTick < 40) return;
         lastTick = now;
+        observeWorldReadiness(now);
         processNotices(now);
         if (!packet?.connected) {
           for (const replica of replicas.values()) erase(replica);

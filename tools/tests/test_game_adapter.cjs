@@ -77,6 +77,9 @@ function engine(options = {}) {
   const implementations = {
     mpGetActiveThread: () => { if (options.throwActive) throw new Error('活动线程读取失败'); return state.active; },
     mpGetCurrentHandler: () => { if (options.throwHandler) throw new Error('handler 读取失败'); return state.handler; },
+    mpPedSyncTree: () => options.pedSyncTree || 0n,
+    mpPlayerSyncTree: () => options.playerSyncTree || 0n,
+    mpNetworkScriptHandler: () => options.networkScriptHandler || 0n,
     mpGetPlayerPed: () => localPed,
     mpAlloc: (size) => { const pointer = allocated; allocated += Number(size); return BigInt(pointer); },
     mpGetEntityCoords: (pointer) => vector(pointer, localPosition),
@@ -432,6 +435,21 @@ test('桥调用的 native 名称与实际构建器导出 manifest 一致', () =>
   const exports = new Set(nativeManifest.additional_exports.map((entry) => entry.export_name));
   for (const match of engineSource.matchAll(/\bex\.([A-Za-z_]\w*)/g)) {
     assert.ok(exports.has(match[1]), `缺少真实 WASM 导出 ${match[1]}`);
+  }
+});
+
+test('统一网络层就绪观测只报告初始化状态，不创建网络对象或公开原始指针', () => {
+  for (const options of [{}, { pedSyncTree: 12000n, playerSyncTree: 14000n, networkScriptHandler: 16000n }]) {
+    const bridge = engine(options); bridge.connect(packet({ peers: [] }));
+    const reports = bridge.messages.filter((entry) => entry.multiplayer?.type === 'world_readiness');
+    assert.equal(reports.length, 1);
+    const value = reports[0].multiplayer;
+    assert.equal(value.mode, 'read_only');
+    assert.equal(value.ped_tree_initialized, Boolean(options.pedSyncTree));
+    assert.equal(value.network_script_context, Boolean(options.networkScriptHandler));
+    assert.ok(!JSON.stringify(value).includes('12000'));
+    for (let index = 0; index < 60; index++) bridge.tick();
+    assert.equal(bridge.messages.filter((entry) => entry.multiplayer?.type === 'world_readiness').length, 1);
   }
 });
 

@@ -265,7 +265,7 @@ class MultiplayerIntegrationTests(unittest.TestCase):
         client = WebSocketClient(self.port)
         self.clients.append(client)
         welcome = client.expect("welcome")
-        self.assertEqual(welcome["server_version"], "0.2.4-public")
+        self.assertEqual(welcome["server_version"], "0.2.5-public")
         self.assertTrue({"heartbeat", "snapshot"}.issubset(welcome["capabilities"]))
         for nonce in (0, 123456, 9007199254740991):
             client.send({"type": "ping", "nonce": nonce})

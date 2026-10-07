@@ -35,8 +35,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** 独立公共战局服务：鉴权恢复、权威移动校验、伤害、死亡、重生及状态分发。 */
 public final class Main {
-    private static final String VERSION = "0.2.4-public";
-    private static final List<String> CAPABILITIES = List.of("public_session", "chat", "player_state", "shoot_events", "appearance", "combat", "resume", "heartbeat", "snapshot", "actions", "combat_feedback", "weapon_rules");
+    private static final String VERSION = "0.2.5-public";
+    private static final List<String> CAPABILITIES = List.of("public_session", "chat", "player_state", "shoot_events", "appearance", "combat", "resume", "heartbeat", "snapshot", "actions", "combat_feedback", "weapon_rules", "world_registry");
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final int MAX_MESSAGE_BYTES = 64 * 1024;
 
@@ -177,6 +177,11 @@ public final class Main {
                 String path = request.target().split("\\?", 2)[0];
                 if (path.equals("/health") || path.equals("/api/multiplayer")) {
                     http(socket, 200, "OK", "application/json; charset=utf-8", Json.stringify(lobby.snapshot()),
+                        Map.of("Access-Control-Allow-Origin", "*"));
+                    return;
+                }
+                if (path.equals("/world")) {
+                    http(socket, 200, "OK", "application/json; charset=utf-8", Json.stringify(lobby.worldSnapshot()),
                         Map.of("Access-Control-Allow-Origin", "*"));
                     return;
                 }
@@ -349,6 +354,7 @@ public final class Main {
         private final int helloTimeoutSeconds;
         private final long helloTimeoutNanos;
         private final CombatWorld combat = new CombatWorld();
+        private final WorldProjection world = new WorldProjection();
         private long shotEventsReceived;
         private boolean closed;
         private static final long SESSION_TTL_MILLIS = 60_000;
@@ -381,12 +387,23 @@ public final class Main {
         Map<String, Object> snapshot() {
             synchronized (lock) {
                 long connected = sessions.values().stream().filter(Session::connected).count();
+                Map<String, Object> view = world.snapshot();
                 return object("protocol", 1, "server_version", VERSION, "clients", clients.size(), "players", connected,
                     "retained_players", sessions.size(), "state_players", combat.statePlayers(),
                     "shot_events_received", shotEventsReceived, "rooms", 1, "public_session", true,
                     "capabilities", CAPABILITIES, "map", "gta5", "game_sync", false, "state_transport", true,
                     "combat_authoritative", true, "transport", "websocket", "resume_ttl_seconds", 60,
-                    "idle_timeout_seconds", idleTimeoutSeconds, "hello_timeout_seconds", helloTimeoutSeconds);
+                    "idle_timeout_seconds", idleTimeoutSeconds, "hello_timeout_seconds", helloTimeoutSeconds,
+                    "world_epoch", view.get("world_epoch"), "world_revision", view.get("cut_revision"),
+                    "world_entities", ((List<?>) view.get("entities")).size(), "shared_population", false);
+            }
+        }
+
+        Map<String, Object> worldSnapshot() {
+            synchronized (lock) {
+                Map<String, Object> snapshot = world.snapshot();
+                snapshot.put("type", "world_snapshot");
+                return snapshot;
             }
         }
 
@@ -668,6 +685,8 @@ public final class Main {
         }
 
         private void broadcast(Map<String, Object> message) {
+            // 只投影已由规则生成的结果，原始客户端 JSON 不能调用 Trusted 入口。
+            world.acceptTrusted(message);
             boolean combatOnly = COMBAT_EVENTS.contains(message.get("type"));
             byte[] bytes = textFrame(message);
             for (Session session : sessions.values()) {
@@ -693,6 +712,7 @@ public final class Main {
                 }
                 if (changed) { broadcast(roomState()); broadcast(combat.combatState()); }
                 combat.maintain(now).forEach(this::broadcast);
+                world.expireLeases();
                 current = new ArrayList<>(clients.values());
             }
             long now = System.nanoTime();

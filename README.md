@@ -136,6 +136,17 @@ python3 serve_local.py --host 0.0.0.0 --port 8010 --instances 2 --room-server 12
 
 ### 共同世界的后续范围
 
+服务端 `0.2.5-public` 已接入 `WorldRegistry`，统一登记实体 ID、组件、版本、重生代次、所有权租约及删除记录。
+当前已确认的玩家状态经 `WorldProjection` 进入同一份 `/world` 只读一致快照，断线撤销租约、重连保留实体 ID。
+这份快照明确标记 `shared_population=false`、`native_clone_transport=false`，当前没有声称 NPC、交通或原生克隆已接通。
+内核的车辆座位事务、租约迁移与删除机制已通过独立 Java 场景测试；客户端的原生车辆／NPC 适配仍待实现和实测。
+
+系统级审计见 [原生网络复制可行性](docs/原生网络复制可行性审计.md)、
+[游戏世界状态与资源](docs/游戏世界状态与资源审计.md) 与 [统一世界服务端设计](docs/统一世界服务端设计.md)。
+原同步树、角色任务树、车辆控制节点、克隆创建／更新／删除及原生网络事件编码仍存在，
+但原 peer I/O 有空实现、网络脚本上下文与对象初始化尚待验证，不能只换 Java 服务器地址恢复 GTA Online。
+客户端新增只读的同步树／网络脚本上下文就绪观测，结果写入本地日志；不创建假网络对象或调用未验证的树应用函数。
+
 目前玩家和基础战斗使用共同战局，但各客户端的环境 NPC、交通车辆仍各自生成。
 要同步 NPC 交互、抢车、上下车和交通，需要服务端维护全局实体 ID、模拟权归属、版本化事件、
 加入时快照、断线移交以及按玩家附近范围订阅。客户端负责渲染和分配给它的 AI/物理模拟，
@@ -154,6 +165,8 @@ python3 tools/build_multiplayer_client.py
 python3 -B tools/tests/test_multiplayer.py
 python3 -B tools/tests/test_combat_world.py
 python3 -B tools/tests/test_connection_timeout.py
+python3 -B tools/tests/test_world_registry.py
+python3 -B tools/tests/test_world_projection.py
 node tools/tests/test_game_adapter.cjs
 node --test tools/tests/test_public_session.cjs tools/tests/test_join_modal.cjs
 ```
@@ -225,6 +238,7 @@ python3 serve_local.py --help
 ```
 
 `memory access out of bounds` 本身不能证明内存不足，请结合崩溃前的引擎日志判断。
+可以运行 `python3 -B tools/audit_online_world.py` 重新生成系统级只读证据，结果写入被 Git 忽略的 `docs/snapshot/`。
 
 ## 打包与维护
 

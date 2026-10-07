@@ -224,6 +224,8 @@ export function installGameAdapter(worker, network = null) {
       reportStatus({ phase: 'lifecycle', ...message });
     } else if (message.type === 'life_reconcile') {
       reportStatus({ phase: 'life_reconcile', ...message });
+    } else if (message.type === 'world_readiness') {
+      reportStatus({ phase: 'world_readiness', ...message });
     } else if (message.type === 'bridge_error') {
       nativeHud = false;
       const hud = document.getElementById('hud');
