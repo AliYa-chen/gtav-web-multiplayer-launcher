@@ -223,6 +223,8 @@ class CombatWorldIntegrationTests(unittest.TestCase):
         hit = first.expect("shot_result", lambda event: event.get("seq") == 2)
         self.assertEqual({key: hit[key] for key in ("accepted", "hit", "victim_id", "damage", "health")},
                          {"accepted": True, "hit": True, "victim_id": second.player_id, "damage": 35, "health": 165})
+        damage = first.expect("damage", lambda event: event.get("shot_seq") == 2)
+        self.assertEqual(hit["revision"], damage["revision"])
         first.send({"type": "shot_event", "seq": 3, "origin": self.body(first.position),
                     "target": self.body(second.position), "weapon": RIFLE, "victim_id": second.player_id,
                     "shot_count": 20})
@@ -233,6 +235,48 @@ class CombatWorldIntegrationTests(unittest.TestCase):
         first.send({"type": "chat", "text": "回执验证完成"})
         second.expect("chat", lambda event: event.get("text") == "回执验证完成")
         self.assertFalse(any(event.get("type") == "shot_result" for event in second.pending))
+
+    def test_weapon_rules_are_authoritative_and_cooldown_stays_strict(self):
+        """公开枪械规则与实际伤害相同，冷却拒绝带剩余时间且不能注入自选规则。"""
+        first = self.client("规则射手", feedback=True)
+        second = self.client("规则目标")
+        self.assertIn("weapon_rules", first.welcome["capabilities"])
+        rules = first.welcome["weapon_rules"]
+        self.assertEqual(len(rules), 22)
+        self.assertEqual(len({rule["weapon"] for rule in rules}), len(rules))
+        for rule in rules:
+            self.assertEqual(set(rule), {"weapon", "cooldown_ms", "damage"})
+            self.assertIsInstance(rule["weapon"], int)
+            self.assertGreater(rule["cooldown_ms"], 0)
+            self.assertGreater(rule["damage"], 0)
+        catalog = {rule["weapon"]: rule for rule in rules}
+        self.assertEqual(catalog[MINIGUN], {"weapon": MINIGUN, "cooldown_ms": 20, "damage": 25})
+        # 慢枪可稳定验证公网消息突发也不能绕过严格服务端冷却。
+        shotgun = 0x1D073A89
+        self.state(first, weapon=shotgun)
+        self.state(second, position=[first.spawn[0] + 6, first.spawn[1], first.spawn[2]])
+        self.shot(first, 1, self.body(second.position), weapon=shotgun)
+        result = first.expect("shot_result", lambda event: event.get("seq") == 1)
+        self.assertEqual(result["damage"], catalog[shotgun]["damage"])
+        self.assertEqual(result["health"], 200 - catalog[shotgun]["damage"])
+        self.shot(first, 2, self.body(second.position), weapon=shotgun)
+        rejected = first.expect("shot_result", lambda event: event.get("seq") == 2)
+        self.assertFalse(rejected["accepted"])
+        self.assertEqual(rejected["reason"], "rate_limited")
+        self.assertGreater(rejected["retry_after_ms"], 0)
+        self.assertLessEqual(rejected["retry_after_ms"], catalog[shotgun]["cooldown_ms"])
+        error = self.error(first, "rate_limited")
+        self.assertEqual(error["retry_after_ms"], rejected["retry_after_ms"])
+        first.send({"type": "shot_event", "seq": 3, "origin": self.body(first.position),
+                    "target": self.body(second.position), "weapon": shotgun, "cooldown_ms": 0, "damage": 200})
+        self.error(first, "invalid_message")
+        time.sleep(rejected["retry_after_ms"] / 1000 + .05)
+        self.shot(first, 4, self.body(second.position), weapon=shotgun)
+        final = first.expect("shot_result", lambda event: event.get("seq") == 4)
+        self.assertTrue(final["accepted"])
+        self.assertEqual(final["damage"], catalog[shotgun]["damage"])
+        self.assertGreater(final["revision"], result["revision"])
+        self.assertEqual(final["health"], 200 - 2 * catalog[shotgun]["damage"])
 
     def test_client_without_feedback_capability_receives_no_shot_result(self):
         """原客户端仍收到射击和伤害广播，不额外接收新回执类型。"""

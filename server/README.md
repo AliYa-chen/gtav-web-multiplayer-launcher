@@ -1,4 +1,4 @@
-# GTA V 公共战局服务端 0.2.3-public
+# GTA V 公共战局服务端 0.2.4-public
 
 所有玩家连接同一台服务器后，输入昵称就会自动进入唯一的 `PUBLIC` 公共战局。战局常驻，即使没有玩家也保留；无需创建房间、输入房间码、准备或等待房主开始。地图固定为 GTA V，游戏使用沙盒模式。
 
@@ -107,7 +107,7 @@ runtime\python.exe serve_local.py --start-room-server --room-server 127.0.0.1:87
 | `game_sync: false` | 真实游戏同步尚未完成稳定验证 |
 | `idle_timeout_seconds`、`hello_timeout_seconds` | 当前应用消息空闲超时与初次加入期限 |
 
-这些统计不包含姓名或角色位置。`capabilities` 为 `public_session`、`chat`、`player_state`、`shoot_events`、`appearance`、`combat`、`resume`、`heartbeat`、`snapshot`、`actions`、`combat_feedback`。
+这些统计不包含姓名或角色位置。`capabilities` 为 `public_session`、`chat`、`player_state`、`shoot_events`、`appearance`、`combat`、`resume`、`heartbeat`、`snapshot`、`actions`、`combat_feedback`、`weapon_rules`。
 
 ## 公共战局协议
 
@@ -297,3 +297,15 @@ python3 -B tools/tests/test_connection_timeout.py
 项目自带的普通加特林 `WEAPON_MINIGUN`（`0x42bf8a85`）现支持即时命中，每条射击消息只计算一条射线、最多 25 点伤害。原枪冷却为 20 毫秒，现有射击消息限流仍生效；客户端较低采样频率不会触发补算多发。
 
 未支持的武器返回明确的 `unsupported_weapon`，文案含十六进制武器哈希，不再静默广播零伤害。爆炸、近战、载具武器和未知枪型仍未扩展为完整权威玩法。回执可以区分消息被拒绝、合法射线未命中和真正命中，但当前判定仍没有地图遮挡。
+
+## 服务端武器规则（0.2.4）
+
+`welcome.weapon_rules` 提供服务端支持的完整普通枪械规则数组：
+
+```json
+[{"weapon":324215364,"cooldown_ms":100,"damage":35}]
+```
+
+数组中的武器哈希、最低射击间隔和单条射线伤害来自同一份服务端只读目录，与实际权威判定一致。客户端可以按 `cooldown_ms` 加少量网络发送余量安排射击，避免每把枪都用统一发送间隔。服务器仍严格检查枪械冷却、消息限流及射线，没有放宽几何或接受客户端自选的伤害和冷却。
+
+命中的 `shot_result` 增加受害者战斗状态的 `revision`，与相应 `damage` 广播一致。因枪械冷却被拒绝时，`error` 和射手专属回执提供 `retry_after_ms`，表示服务端当前还需等待的毫秒数。其他拒绝原因不保证包含该字段。原客户端可以忽略 `welcome` 中新增的规则数组，不会收到额外的武器规则消息类型。

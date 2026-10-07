@@ -288,6 +288,45 @@ class PublicEnginePatchTests(unittest.TestCase):
         self.assertTrue(any(item["operation"] == "call" and item["target"]["function_index"] == 45905
                             for item in implementation["instructions"]), "站起仍遵守原生 CanPedStandUp 判断")
 
+    def test_replica_ragdoll_exports_abis_and_original_bodies(self):
+        expected = {
+            "mpSetCanRagdoll": (57471, "ped_commands::CommandSetPedCanRagdoll(int, bool)", ["i32", "i32"], []),
+            "mpIsRagdoll": (57464, "ped_commands::CommandIsPedRagdoll(int)", ["i32"], ["i32"]),
+        }
+        for name, (index, expected_name, parameters, results) in expected.items():
+            self.assertEqual(export_map(True)[name], (index, expected_name, parameters, results))
+            descriptor = self.original.descriptor(index)
+            self.assertEqual(descriptor["name"], expected_name, name)
+            self.assertEqual(descriptor["signature"], {"parameters": parameters, "results": results}, name)
+            self.assertNotIn(name, self.audits["probe"].exports.get(index, []))
+            for result in (self.audits["replica"], self.audits["public"]):
+                self.assertIn(name, result.exports[index])
+                self.assertEqual(self.body(self.original, index), self.body(result, index), name)
+
+    def test_disabling_ragdoll_restores_animation_using_original_defaults(self):
+        decoded = self.original.instructions(57471)
+        self.assertTrue(decoded["decode_complete"])
+        items = decoded["instructions"]
+        animation = next(index for index, item in enumerate(items)
+                         if item["operation"] == "call" and item["target"]["function_index"] == 45834)
+        arguments = items[animation - 8:animation]
+        self.assertEqual(arguments[0]["operation"], "local.get")
+        self.assertEqual(arguments[0]["index"], 2, "动画恢复使用实际 ped 指针")
+        self.assertEqual([item["operation"] for item in arguments[1:]], ["i32.const"] * 7)
+        self.assertEqual([item["value"] for item in arguments[1:]], [1, 1, 1, 0, 1, 1, 0])
+        self.assertEqual(items[animation]["target"]["signature"],
+                         {"parameters": ["i64", "i32", "i32", "i32", "i32", "i32", "i32", "i32"], "results": []})
+        state_calls = [(index, item) for index, item in enumerate(items)
+                       if item["operation"] == "call" and item["target"]["function_index"] == 45881]
+        self.assertEqual([items[index - 1]["value"] for index, _ in state_calls], [2, 0],
+                         "允许和禁止 ragdoll 分别使用原生状态 2 和 0")
+        self.assertEqual(state_calls[-1][0] > animation, True)
+        query = self.original.instructions(57464)
+        self.assertTrue(query["decode_complete"])
+        masks = [item["value"] for item in query["instructions"] if item["operation"] == "i64.const"]
+        self.assertIn(2061584302080, masks)
+        self.assertIn(687194767360, masks, "查询沿用 ped ragdoll 状态位判断，不等同于死亡查询")
+
     def test_public_patch_requires_entity_interfaces(self):
         with self.assertRaisesRegex(ValueError, "必须同时"):
             build(self.original, False, True)

@@ -49,7 +49,8 @@ async function harness(options = {}) {
     close() { this.readyState = 3; this.onclose?.({}); }
     welcome(features = capabilities, id = 'TEMP') {
       this.readyState = Socket.OPEN;
-      this.receive({ type: 'welcome', protocol: 1, client_id: id, capabilities: features });
+      this.receive({ type: 'welcome', protocol: 1, client_id: id, capabilities: features,
+        ...(Object.hasOwn(options, 'weaponRules') ? { weapon_rules: options.weaponRules } : {}) });
     }
     receive(value) { this.onmessage?.({ data: JSON.stringify(value) }); }
     messages(type) { return this.sent.filter((value) => value.type === type); }
@@ -574,7 +575,7 @@ test('服务端命中和拒绝反馈不注销玩家身份，日志区分结果�
   const packets = []; page.api.setReceiver((value) => packets.push(copy(value)));
   const results = [
     { seq: 1, weapon: 0x83bf0278, accepted: true, hit: false },
-    { seq: 2, weapon: 0x83bf0278, accepted: true, hit: true, victim_id: 'REMOTE', damage: 40, health: 160 },
+    { seq: 2, weapon: 0x83bf0278, accepted: true, hit: true, victim_id: 'REMOTE', damage: 40, health: 160, revision: 2 },
     { seq: 3, weapon: 0xb1ca77b1, accepted: false, hit: false, reason: 'unsupported_weapon' },
     { seq: 4, weapon: 0x83bf0278, accepted: false, hit: false, reason: 'weapon_mismatch' },
   ];
@@ -584,7 +585,9 @@ test('服务端命中和拒绝反馈不注销玩家身份，日志区分结果�
   assert.equal(logs.length, 4); assert.equal(logs[0].hit, false); assert.equal(logs[1].hit, true);
   assert.equal(logs[2].reason, 'unsupported_weapon'); assert.equal(logs[2].accepted, false);
   assert.ok(logs.every((value) => value.stage === 'result'
-    && Object.keys(value).every((key) => ['stage', 'seq', 'weapon', 'accepted', 'hit', 'reason'].includes(key))));
+    && Object.keys(value).every((key) => ['stage', 'client_id', 'seq', 'weapon', 'accepted', 'hit', 'reason', 'victim_id', 'damage', 'health', 'revision'].includes(key))));
+  assert.equal(logs[1].client_id, 'LOCAL'); assert.equal(logs[1].victim_id, 'REMOTE'); assert.equal(logs[1].revision, 2);
+  assert.equal(logs[1].damage, 40); assert.equal(logs[1].health, 160);
   assert.ok(page.logs.every((line) => !line.includes('private-resume-token')));
   assert.equal(socket.readyState, 1); assert.equal(page.sockets.length, 1); page.api.close();
 });
@@ -597,7 +600,7 @@ test('实际服务器省略 hit 的拒绝反馈仍记录结果并提示，成功
   assert.deepEqual(packets.filter((value) => value.type === 'combat_feedback'), [{
     type: 'combat_feedback', seq: 1, weapon: 0xb1ca77b1, accepted: false, hit: false, reason: 'unsupported_weapon' }]);
   const results = page.logs.filter((line) => line.startsWith('[public-combat] ')).map((line) => JSON.parse(line.slice('[public-combat] '.length)));
-  assert.deepEqual(results, [{ stage: 'result', seq: 1, weapon: 0xb1ca77b1, accepted: false, hit: false, reason: 'unsupported_weapon' }]);
+  assert.deepEqual(results, [{ stage: 'result', client_id: 'LOCAL', seq: 1, weapon: 0xb1ca77b1, accepted: false, hit: false, reason: 'unsupported_weapon' }]);
   socket.receive({ type: 'shot_result', seq: 2, weapon: 1, accepted: true });
   socket.receive({ type: 'shot_result', seq: 2, weapon: 1, accepted: false, hit: true, reason: 'invalid_shot' });
   socket.receive({ type: 'shot_result', seq: 2, weapon: 1, accepted: false, hit: null, reason: 'invalid_shot' });
@@ -605,21 +608,21 @@ test('实际服务器省略 hit 的拒绝反馈仍记录结果并提示，成功
   assert.equal(socket.readyState, 1); page.api.close();
 });
 
-test('射击成功发送才记录 sent 阶段，等待、失败、过期不制造日志且日志不包含玩家信息', async () => {
+test('射击成功发送才记录 sent 阶段，等待、失败、过期不制造日志且不包含坐标昵称或凭据', async () => {
   const page = await harness(); const socket = page.enter();
   const combatLogs = () => page.logs.filter((line) => line.startsWith('[public-combat] ')).map((line) => JSON.parse(line.slice('[public-combat] '.length)));
   socket.failSendType = 'shot_event';
   page.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(), state: playerState() });
   page.advance(30); assert.deepEqual(combatLogs(), []);
   socket.failSendType = null; page.advance(10);
-  assert.deepEqual(combatLogs(), [{ stage: 'sent', seq: 1, weapon: playerState().weapon }]);
+  assert.deepEqual(combatLogs(), [{ stage: 'sent', client_id: 'LOCAL', seq: 1, weapon: playerState().weapon }]);
   socket.receive({ type: 'shot_result', seq: 1, weapon: playerState().weapon, accepted: true, hit: false });
   assert.deepEqual(combatLogs().map((value) => value.stage), ['sent', 'result']);
   socket.bufferedAmount = 70000;
   page.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(), state: playerState() });
   page.advance(300); assert.equal(combatLogs().length, 2);
-  const sent = combatLogs()[0]; assert.deepEqual(Object.keys(sent).sort(), ['seq', 'stage', 'weapon']);
-  assert.ok(combatLogs().every((value) => !['position', 'origin', 'target', 'client_id', 'name', 'resume_token'].some((key) => Object.hasOwn(value, key))));
+  const sent = combatLogs()[0]; assert.deepEqual(Object.keys(sent).sort(), ['client_id', 'seq', 'stage', 'weapon']);
+  assert.ok(combatLogs().every((value) => !['position', 'origin', 'target', 'name', 'resume_token'].some((key) => Object.hasOwn(value, key))));
   page.api.close();
 });
 
@@ -670,4 +673,170 @@ test('战斗反馈的原生通知明确说明武器不支持，命中限频，�
   assert.equal(read().notices.length, 2); assert.ok(read().notices.at(-1).text.includes('傷害 40'));
   receiver({ type: 'combat_feedback', accepted: true, hit: true, damage: 40, health: 120 }); assert.equal(read().notices.length, 2);
   now = 1501; receiver({ type: 'combat_feedback', accepted: true, hit: true, damage: 40, health: 80 }); assert.equal(read().notices.length, 3);
+});
+
+test('战斗快照按每名玩家独立保持 revision 单调，周期完整快照不会把已重生角色改回尸体', async () => {
+  const page = await harness(); const socket = page.enter();
+  socket.receive({ type: 'room_state', room: room('LOCAL', [{ id: 'REMOTE', name: '玩家乙' }]) });
+  const packets = []; page.api.setReceiver((value) => packets.push(copy(value)));
+  socket.receive({ type: 'combat_state', room_id: 'PUBLIC', players: [
+    { id: 'LOCAL', health: 175, alive: true, revision: 9 },
+    { id: 'REMOTE', health: 200, alive: true, revision: 5, kills: 2, deaths: 1, spawn: [711.5, -1088.1, 22.4] }] });
+  socket.receive({ type: 'combat_state', room_id: 'PUBLIC', players: [
+    { id: 'LOCAL', health: 100, alive: true, revision: 10 },
+    { id: 'REMOTE', health: 0, alive: false, revision: 4, deaths: 1 }] });
+  const merged = packets.filter((value) => value.type === 'combat_state').at(-1).players;
+  assert.equal(merged.find((player) => player.id === 'LOCAL').revision, 10);
+  assert.equal(merged.find((player) => player.id === 'REMOTE').health, 200);
+  socket.receive({ type: 'room_state', room: room('LOCAL', [{ id: 'REMOTE', name: '玩家乙' }]) });
+  socket.receive({ type: 'world_state', room_id: 'PUBLIC', states: [] });
+  const snapshot = packets.filter((value) => value.type === 'session').at(-1);
+  assert.equal(snapshot.combat.find((player) => player.id === 'REMOTE').alive, true);
+  assert.equal(snapshot.combat.find((player) => player.id === 'REMOTE').revision, 5);
+  page.api.close();
+});
+
+test('伤害死亡重生立即合并权威版本，先发布新状态再发控制，并阻止旧事件重新杀死已重生玩家', async () => {
+  const page = await harness(); const socket = page.enter();
+  socket.receive({ type: 'room_state', room: room('LOCAL', [{ id: 'REMOTE', name: '玩家乙' }]) });
+  socket.receive({ type: 'combat_state', players: [{ id: 'REMOTE', health: 200, alive: true, revision: 1, deaths: 0 }] });
+  const packets = []; page.api.setReceiver((value) => packets.push(copy(value)));
+  socket.receive({ type: 'damage', victim_id: 'REMOTE', attacker_id: 'LOCAL', health: 0, damage: 40, revision: 2 });
+  assert.equal(packets.at(-2).type, 'session'); assert.equal(packets.at(-1).type, 'damage');
+  assert.equal(packets.at(-2).combat.find((player) => player.id === 'REMOTE').alive, false);
+  socket.receive({ type: 'death', player_id: 'REMOTE', killer_id: 'LOCAL', deaths: 1, revision: 2 });
+  assert.equal(packets.at(-2).combat.find((player) => player.id === 'REMOTE').deaths, 1,
+    'damage 与 death 共用 revision，等版本 death 仍须补齐阵亡计数');
+  socket.receive({ type: 'respawn', player_id: 'REMOTE', health: 200, position: [711.5, -1088.1, 22.4], revision: 3 });
+  const revived = packets.at(-2).combat.find((player) => player.id === 'REMOTE');
+  assert.equal(revived.alive, true); assert.equal(revived.health, 200); assert.equal(revived.revision, 3);
+  assert.deepEqual(revived.spawn, [711.5, -1088.1, 22.4]);
+  const count = packets.length;
+  socket.receive({ type: 'death', player_id: 'REMOTE', revision: 2 });
+  socket.receive({ type: 'damage', victim_id: 'REMOTE', health: 0, damage: 40, revision: 2 });
+  assert.equal(packets.length, count, '旧控制事件不能再交给引擎或产生第二条死亡提示');
+  socket.receive({ type: 'combat_state', players: [{ id: 'REMOTE', health: 0, alive: false, revision: 2 }] });
+  socket.receive({ type: 'world_state', room_id: 'PUBLIC', states: [] });
+  const current = packets.filter((value) => value.type === 'session').at(-1).combat.find((player) => player.id === 'REMOTE');
+  assert.equal(current.revision, 3); assert.equal(current.alive, true); assert.equal(current.health, 200);
+  page.api.close();
+});
+
+test('移动序号只拒绝严格旧序号，同序号的服务器伤害和重生仍更新生命及出生位置', async () => {
+  const page = await harness(); const socket = page.enter();
+  socket.receive({ type: 'room_state', room: room('LOCAL', [{ id: 'REMOTE', name: '玩家乙' }]) });
+  const packets = []; page.api.setReceiver((value) => packets.push(copy(value)));
+  socket.receive({ type: 'player_state', room_id: 'PUBLIC', player_id: 'REMOTE', state: playerState(20) });
+  const before = packets.filter((value) => value.type === 'player_state').length;
+  socket.receive({ type: 'player_state', room_id: 'PUBLIC', player_id: 'REMOTE', state: { ...playerState(19), position: [100, 100, 20] } });
+  assert.equal(packets.filter((value) => value.type === 'player_state').length, before);
+  socket.receive({ type: 'player_state', room_id: 'PUBLIC', player_id: 'REMOTE', state: { ...playerState(20), health: 0, shooting: false } });
+  assert.equal(packets.filter((value) => value.type === 'player_state').at(-1).state.health, 0);
+  const spawn = [713.5, -1088.1, 22.4];
+  socket.receive({ type: 'player_state', room_id: 'PUBLIC', player_id: 'REMOTE', state: { ...playerState(20), position: spawn, health: 200 } });
+  assert.deepEqual(packets.filter((value) => value.type === 'player_state').at(-1).state.position, spawn);
+  socket.receive({ type: 'world_state', room_id: 'PUBLIC', states: [{ player_id: 'REMOTE', state: { ...playerState(19), position: [100, 100, 20] } }] });
+  let snapshot = packets.filter((value) => value.type === 'session').at(-1);
+  assert.deepEqual(snapshot.peers[0].state.position, spawn); assert.equal(snapshot.peers[0].state.health, 200);
+  socket.receive({ type: 'world_state', room_id: 'PUBLIC', states: [] });
+  snapshot = packets.filter((value) => value.type === 'session').at(-1);
+  assert.equal(snapshot.peers.length, 1, '瞬时缺少状态条目不删除仍在公共战局的玩家');
+  socket.receive({ type: 'room_state', room: room('LOCAL') });
+  assert.equal(packets.filter((value) => value.type === 'session').at(-1).peers.length, 0,
+    '正式移除成员时才清除其旧角色状态'); page.api.close();
+});
+
+test('恢复位置不被旧移动序号倒退，成员移除和重新连接的新身份清空旧战斗版本', async () => {
+  const page = await harness({ identity: { client_id: 'LOCAL', resume_token: 'valid' }, intent: { reconnect: true } });
+  const socket = page.enter();
+  const position = [732, -1080, 23];
+  socket.receive({ type: 'world_state', room_id: 'PUBLIC', states: [{ player_id: 'LOCAL', state: { ...playerState(50), position } }] });
+  await page.api.ready;
+  socket.receive({ type: 'combat_state', players: [{ id: 'LOCAL', health: 200, alive: true, revision: 9 }] });
+  const packets = []; page.api.setReceiver((value) => packets.push(copy(value)));
+  socket.receive({ type: 'player_state', room_id: 'PUBLIC', player_id: 'LOCAL', state: playerState(49) });
+  socket.receive({ type: 'world_state', room_id: 'PUBLIC', states: [{ player_id: 'LOCAL', state: playerState(49) }] });
+  assert.deepEqual(packets.filter((value) => value.type === 'session').at(-1).resume_position, position);
+  socket.close(); page.advance(500); const next = page.sockets.at(-1); next.welcome();
+  next.receive({ type: 'error', code: 'resume_denied' }); page.enter(next, 'NEW');
+  next.receive({ type: 'combat_state', players: [{ id: 'NEW', health: 150, alive: true, revision: 1 }] });
+  next.receive({ type: 'world_state', room_id: 'PUBLIC', states: [] });
+  const newSession = packets.filter((value) => value.type === 'session').at(-1);
+  assert.equal(newSession.client_id, 'NEW'); assert.equal(newSession.combat.length, 1);
+  assert.equal(newSession.combat[0].revision, 1); assert.equal(newSession.combat[0].health, 150);
+  page.api.close();
+});
+
+test('旧协议缺少 combat revision 时仍按零版本同步，非法版本与跨房间事件不污染缓存', async () => {
+  const page = await harness(); const socket = page.enter(), packets = [];
+  page.api.setReceiver((value) => packets.push(copy(value)));
+  socket.receive({ type: 'combat_state', players: [{ id: 'LOCAL', health: 175, alive: true }] });
+  assert.equal(packets.at(-1).players[0].revision, 0);
+  socket.receive({ type: 'damage', victim_id: 'LOCAL', health: 150 });
+  assert.equal(packets.at(-2).combat[0].health, 150);
+  socket.receive({ type: 'combat_state', room_id: 'WRONG', players: [{ id: 'LOCAL', health: 0, alive: false, revision: 99 }] });
+  socket.receive({ type: 'combat_state', players: [{ id: 'LOCAL', health: 0, alive: false, revision: -1 }] });
+  socket.receive({ type: 'death', room_id: 'WRONG', player_id: 'LOCAL', revision: 99 });
+  socket.receive({ type: 'death', player_id: 'UNKNOWN', revision: 99 });
+  socket.receive({ type: 'death', player_id: 'LOCAL', revision: '99' });
+  socket.receive({ type: 'world_state', room_id: 'PUBLIC', states: [] });
+  const current = packets.filter((value) => value.type === 'session').at(-1).combat[0];
+  assert.equal(current.health, 150); assert.equal(current.alive, true); assert.equal(current.revision, 0);
+  page.api.close();
+});
+
+test('服务器武器规则交给引擎且防接收器修改，长冷却单发自动等到合法时刻发送', async () => {
+  const weapon = playerState().weapon;
+  const rules = [{ weapon, cooldown_ms: 500, damage: 28 }, { weapon: 0x83bf0278, cooldown_ms: 100, damage: 26 }];
+  const page = await harness({ weaponRules: rules }); const socket = page.enter();
+  const packets = []; page.api.setReceiver((value) => packets.push(copy(value)));
+  assert.deepEqual(packets[0].weapon_rules, rules);
+  page.api.setReceiver((value) => { if (value.weapon_rules?.length) value.weapon_rules[0].cooldown_ms = 1; });
+  page.api.setReceiver((value) => packets.push(copy(value)));
+  assert.equal(packets.filter((value) => value.type === 'session').at(-1).weapon_rules[0].cooldown_ms, 500);
+  page.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(), state: playerState() });
+  assert.equal(socket.messages('shot_event').length, 1);
+  page.advance(1); page.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(), state: playerState() });
+  page.advance(513); assert.equal(socket.messages('shot_event').length, 1);
+  page.advance(1); assert.equal(socket.messages('shot_event').length, 2,
+    '500毫秒武器冷却不能被原250毫秒队列寿命错误丢弃');
+  const times = socket.sentTimes.filter((entry) => entry.type === 'shot_event');
+  assert.equal(times[1].at - times[0].at, 515);
+  page.api.close(); assert.equal(page.timers.size, 0);
+});
+
+test('不同枪械依据当前武器规则发送，旧服务器没有规则时仍使用50毫秒间隔', async () => {
+  const pistol = playerState().weapon, rifle = 0x83bf0278;
+  const page = await harness({ weaponRules: [{ weapon: pistol, cooldown_ms: 500, damage: 28 }, { weapon: rifle, cooldown_ms: 100, damage: 26 }] });
+  const socket = page.enter();
+  page.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(pistol), state: playerState() });
+  page.advance(1); page.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(rifle), state: { ...playerState(), weapon: rifle } });
+  page.advance(113); assert.equal(socket.messages('shot_event').length, 1);
+  page.advance(1); assert.equal(socket.messages('shot_event').length, 2); assert.equal(socket.messages('shot_event')[1].weapon, rifle);
+  assert.equal(socket.sentTimes.filter((entry) => entry.type === 'shot_event')[1].at, 115);
+  page.api.close();
+  const legacy = await harness(); const oldSocket = legacy.enter();
+  legacy.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(), state: playerState() });
+  legacy.advance(1); legacy.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(), state: playerState() });
+  legacy.advance(48); assert.equal(oldSocket.messages('shot_event').length, 1);
+  legacy.advance(1); assert.equal(oldSocket.messages('shot_event').length, 2);
+  legacy.api.close();
+});
+
+test('武器规则严格拒绝重复哈希、非法冷却和伤害，反馈 revision 仅接收非负安全整数', async () => {
+  const valid = { weapon: 1, cooldown_ms: 100, damage: 20 };
+  for (const weaponRules of [[valid, valid], [{ ...valid, cooldown_ms: 0 }], [{ ...valid, cooldown_ms: 2001 }],
+    [{ ...valid, damage: 201 }], [{ ...valid, weapon: -1 }], [{ ...valid, extra: 1 }]]) {
+    const page = await harness({ weaponRules }); const socket = page.sockets[0]; socket.welcome();
+    assert.equal(socket.readyState, 3); assert.equal(page.statuses.at(-1).phase, 'reconnecting'); page.api.close();
+  }
+  const page = await harness(); const socket = page.enter(), packets = [];
+  page.api.setReceiver((value) => packets.push(copy(value)));
+  for (const revision of [-1, 1.5, '2', Number.MAX_SAFE_INTEGER + 1]) {
+    socket.receive({ type: 'shot_result', seq: 1, weapon: 1, accepted: true, hit: true, revision });
+  }
+  assert.equal(packets.filter((value) => value.type === 'combat_feedback').length, 0);
+  socket.receive({ type: 'shot_result', seq: 1, weapon: 1, accepted: true, hit: true, victim_id: 'REMOTE', damage: 40, health: 0, revision: 3 });
+  assert.equal(packets.filter((value) => value.type === 'combat_feedback')[0].revision, 3);
+  page.api.close();
 });

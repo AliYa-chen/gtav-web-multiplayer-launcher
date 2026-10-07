@@ -9,6 +9,7 @@ export function installGameAdapter(worker, network = null) {
   let shots = [];
   let nextShotId = 0;
   let combat = [];
+  const combatById = new Map();
   let controls = [], nextControlId = 0;
   let notices = [], nextNoticeId = 0;
   let nativeHud = false, lastNetworkNotice = '', lastGamePhase = '', lastKills = null;
@@ -18,6 +19,30 @@ export function installGameAdapter(worker, network = null) {
   let lastReport = '';
   let networkMessage = '', gameMessage = '';
   let lastCombatNotice = '', lastCombatNoticeAt = -Infinity;
+  function mergeCombat(value) {
+    if (!value || typeof value.id !== 'string') return;
+    const revision = Number.isSafeInteger(value.revision) ? value.revision : 0;
+    const previous = combatById.get(value.id);
+    if (previous && (previous.revision ?? 0) > revision) return;
+    combatById.set(value.id, { ...previous, ...value, revision });
+    combat = [...combatById.values()];
+  }
+  function mergeControlCombat(event) {
+    if (!['damage', 'death', 'respawn'].includes(event.type)) return true;
+    const id = event.type === 'damage' ? event.victim_id : event.player_id;
+    const revision = Number.isSafeInteger(event.revision) ? event.revision : 0;
+    if (typeof id !== 'string' || revision < (combatById.get(id)?.revision ?? 0)) return false;
+    const health = event.type === 'death' ? 0 : event.health;
+    if (Number.isInteger(health)) mergeCombat({ id, health, alive: health > 0, revision,
+      ...(event.type === 'respawn' && Array.isArray(event.position) ? { spawn: event.position } : {}) });
+    return true;
+  }
+  function mergePeer(peer) {
+    if (!peer?.player_id || peer.player_id === session.client_id || !peer.state) return;
+    const old = peers.get(peer.player_id)?.state;
+    if (Number.isSafeInteger(peer.state.seq) && Number.isSafeInteger(old?.seq) && peer.state.seq < old.seq) return;
+    peers.set(peer.player_id, peer);
+  }
   function combatFeedback(data) {
     const rejected = {
       unsupported_weapon: ['当前武器暂不支持多人伤害同步，请使用普通枪械。', '目前武器暫不支援多人傷害同步，請使用一般槍械。'],
@@ -103,6 +128,7 @@ export function installGameAdapter(worker, network = null) {
       combatFeedback(data);
       return;
     } else if (data.type === 'session') {
+      const previousId = session.client_id;
       session = { connected: data.connected === true, client_id: data.client_id || null,
         members: Array.isArray(data.members) ? data.members : [],
         avatar: data.avatar === 'female' ? 'female' : 'male',
@@ -110,19 +136,23 @@ export function installGameAdapter(worker, network = null) {
         seed: Number.isInteger(data.seed) ? data.seed >>> 0 : 0,
         model: Number.isInteger(data.model) ? data.model >>> 0 : undefined,
         appearance_spec: data.appearance_spec || {},
+        weapon_rules: Array.isArray(data.weapon_rules) ? data.weapon_rules : [],
         resumed: data.resumed === true,
         resume_state_ready: data.resume_state_ready === true,
         resume_state: data.resume_state || null,
         resume_position: data.resume_position || null, spawn: data.spawn || null };
-      peers.clear();
-      for (const peer of data.peers || []) {
-        if (peer?.player_id && peer.player_id !== session.client_id && peer.state) peers.set(peer.player_id, peer);
-      }
+      if (session.client_id && previousId && session.client_id !== previousId) { peers.clear(); combatById.clear(); }
+      const members = new Set(session.members.map((member) => member.id));
+      for (const id of peers.keys()) if (!members.has(id)) peers.delete(id);
+      for (const id of combatById.keys()) if (!members.has(id)) combatById.delete(id);
+      for (const peer of data.peers || []) mergePeer(peer);
       if (!session.connected) { shots = []; controls = []; }
-      combat = Array.isArray(data.combat) ? data.combat : [];
+      for (const value of data.combat || []) mergeCombat(value);
+      combat = [...combatById.values()];
     } else if (data.type === 'combat_state' && Array.isArray(data.players)) {
-      combat = data.players;
+      for (const value of data.players) mergeCombat(value);
     } else if (['damage', 'death', 'respawn', 'correction'].includes(data.type)) {
+      if (!mergeControlCombat(data)) return;
       controls.push({ id: ++nextControlId, event: data });
       if (controls.length > 32) controls.shift();
       if (data.type === 'respawn' && data.player_id === session.client_id) notify('已重生，正在恢復角色');
@@ -130,7 +160,7 @@ export function installGameAdapter(worker, network = null) {
         lastGamePhase = 'dead'; notify('已陣亡，等待伺服器重生');
       }
     } else if (data.type === 'player_state' && data.player_id !== session.client_id && data.state) {
-      peers.set(data.player_id, { player_id: data.player_id, state: data.state });
+      mergePeer({ player_id: data.player_id, state: data.state });
     } else if (data.type === 'shot_event' && data.player_id !== session.client_id && data.event) {
       shots.push({ id: ++nextShotId, player_id: data.player_id, event: data.event });
       if (shots.length > 32) shots.shift();
@@ -186,9 +216,14 @@ export function installGameAdapter(worker, network = null) {
         lastKills = message.kills;
       }
       reportStatus({ phase, peers: message.peer_count,
+        ...(message.client_id ? { client_id: message.client_id } : {}),
+        ...(Number.isInteger(message.health) ? { server_health: message.health, server_alive: message.alive,
+          revision: message.revision, native_health: message.native_health, native_dead: message.native_dead } : {}),
         ...(Number.isInteger(message.weapon) ? { weapon: message.weapon, weapon_ready: message.weapon_ready === true } : {}) });
     } else if (message.type === 'lifecycle') {
       reportStatus({ phase: 'lifecycle', ...message });
+    } else if (message.type === 'life_reconcile') {
+      reportStatus({ phase: 'life_reconcile', ...message });
     } else if (message.type === 'bridge_error') {
       nativeHud = false;
       const hud = document.getElementById('hud');

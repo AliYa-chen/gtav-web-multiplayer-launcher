@@ -31,6 +31,7 @@ self.prepareMultiplayerBridge = function (imports) {
     const consumedShots = new Set();
     const consumedControls = new Set();
     const consumedNotices = new Set();
+    const authorityStates = new Map();
     const weaponRequests = new Map();
     // 零伤害转播仍会触发原生武器物理，只允许普通枪，拒绝爆炸类武器。
     const VISUAL_WEAPONS = new Set(['weapon_pistol', 'weapon_combatpistol', 'weapon_appistol',
@@ -70,6 +71,23 @@ self.prepareMultiplayerBridge = function (imports) {
       const data = view();
       return [0, 8, 16].map((part) => data.getFloat32(scratch + offset + part, true));
     }
+    function mergeAuthority(value) {
+      if (!value || typeof value.id !== 'string') return;
+      const revision = Number.isSafeInteger(value.revision) ? value.revision : 0;
+      const previous = authorityStates.get(value.id);
+      if (previous && (previous.revision ?? 0) > revision) return;
+      authorityStates.set(value.id, { ...previous, ...value, revision });
+    }
+    function authorityControl(event) {
+      if (!event || !['damage', 'death', 'respawn'].includes(event.type)) return;
+      const id = event.type === 'damage' ? event.victim_id : event.player_id;
+      if (typeof id !== 'string') return;
+      const update = { id, revision: Number.isSafeInteger(event.revision) ? event.revision : 0 };
+      if (event.type === 'death') Object.assign(update, { health: 0, alive: false });
+      else if (Number.isInteger(event.health)) Object.assign(update, { health: event.health, alive: event.health > 0 });
+      if (event.type === 'respawn' && validPosition(event.position)) update.spawn = [...event.position];
+      mergeAuthority(update);
+    }
     function actualWeapon(ped) {
       if (ex.mpGetCurrentPedWeapon) {
         const ready = ex.mpGetCurrentPedWeapon(ped, BigInt(scratch + 112), 1);
@@ -90,11 +108,16 @@ self.prepareMultiplayerBridge = function (imports) {
         jumping: Boolean(ex.mpIsJumping?.(ped)), ducking: Boolean(ex.mpIsDucking?.(ped)),
         sprinting: Boolean(ex.mpIsSprinting?.(ped)) };
     }
+    function shotInterval(weapon) {
+      const rule = (packet?.weapon_rules || []).find((entry) => entry.weapon === weapon);
+      return Number.isInteger(rule?.cooldown_ms) && rule.cooldown_ms >= 1 && rule.cooldown_ms <= 2000
+        ? Math.max(50, rule.cooldown_ms + 15) : 50;
+    }
     // 每个有效 owner 回调只读取本地武器脉冲；较重的实体更新仍每 40ms 执行。
     function sampleShots(now) {
       if (now - shotSampleAt < 5 || !packet?.connected || !initialPlacement || modelRestore) return;
       shotSampleAt = now;
-      const authority = (packet.combat || []).find((player) => player.id === packet.client_id);
+      const authority = authorityStates.get(packet.client_id);
       const ped = ex.mpGetPlayerPed(-1);
       if (!ped || authority?.alive === false || (ex.mpGetModel(ped) >>> 0) !== avatarTarget) {
         weaponSample = null; pendingShots = []; return;
@@ -115,11 +138,12 @@ self.prepareMultiplayerBridge = function (imports) {
       const delayedDecrease = decreased && pendingDecrease && clip === pendingDecrease.clip - 1;
       if (delayedDecrease) pendingDecrease = null;
       // 持续无限弹时用慢速脉冲兜底，仍由服务器武器射速校验。
-      const fallback = shooting && !decreased && now - priorFiredAt >= 150;
+      const interval = shotInterval(weapon);
+      const fallback = shooting && !decreased && now - priorFiredAt >= Math.max(150, interval);
       const firedAt = same ? weaponSample.firedAt : -Infinity;
       weaponSample = { ped, weapon, shooting, clip, firedAt, pendingDecrease };
       if ((!decreased || delayedDecrease) && !rising && !fallback) return;
-      if (now - firedAt < 50) return;
+      if (now - firedAt < interval) return;
       weaponSample.firedAt = now;
       if (!decreased && clip !== null) weaponSample.pendingDecrease = { clip, at: now };
       const ray = cameraRay();
@@ -260,7 +284,7 @@ self.prepareMultiplayerBridge = function (imports) {
       if (ex.mpSetPlayerControl) ex.mpSetPlayerControl(ex.mpPlayerId(), 1, 0);
       if (ex.mpScreenFadeIn) ex.mpScreenFadeIn(250);
       if (ex.mpIsDead(ped, 0) || ex.mpGetHealth(ped) <= 100) return null;
-      lifeOverride = { id: packet.client_id, health, alive: true, revision, spawn: [...position] };
+      lifeOverride = { ...authorityStates.get(packet.client_id), id: packet.client_id, health, alive: true, revision, spawn: [...position] };
       lastRespawnRevision = Math.max(lastRespawnRevision, revision);
       lastAuthorityAlive = true;
       lastGoodLocal = { ...(lastGoodLocal || {}), position: [...position], heading };
@@ -412,23 +436,41 @@ self.prepareMultiplayerBridge = function (imports) {
       }
       const dead = state.alive === false || state.health <= 0;
       if (dead) {
-        if (!replica.dead) {
+        if (!replica.dead || !ex.mpIsDead(replica.ped, 0) || ex.mpGetHealth(replica.ped) !== 0) {
           ex.mpFreeze(replica.ped, 0);
           ex.mpSetInvincible(replica.ped, 0);
+          if (ex.mpSetCanRagdoll) ex.mpSetCanRagdoll(replica.ped, 1);
           ex.mpSetHealth(replica.ped, 0, 0);
           replica.dead = true; replica.health = 0;
+          replica.ragdollProtected = false;
+          lifecycle('replica_authority_dead');
         }
         return;
       }
-      if (replica.dead) {
+      // 单机任务可能让替身独立死亡；逻辑缓存存活时也必须检查实体本身。
+      if (replica.dead || ex.mpIsDead(replica.ped, 0) || ex.mpGetHealth(replica.ped) <= 100) {
+        if (now - (replica.recoveryAt ?? -Infinity) < 500) return;
+        replica.recoveryAt = now;
+        post({ type: 'life_reconcile', player_id: id, server_health: state.health,
+          server_alive: true, revision: state.revision, native_health: ex.mpGetHealth(replica.ped),
+          native_dead: Boolean(ex.mpIsDead(replica.ped, 0)) });
         if (ex.mpResurrect) ex.mpResurrect(replica.ped);
         if (ex.mpRevive) ex.mpRevive(replica.ped);
         if (ex.mpClearTasksImmediately) ex.mpClearTasksImmediately(replica.ped);
         ex.mpSetInvincible(replica.ped, 1); ex.mpFreeze(replica.ped, 1);
-        replica.dead = false; replica.health = null; replica.position = [...state.position];
+        ex.mpSetHealth(replica.ped, state.server_authority ? nativeCombatHealth(state.health) : state.health, 0);
+        if (ex.mpIsDead(replica.ped, 0)) { replica.recovering = true; return; }
+        replica.dead = false; replica.recovering = false; replica.health = null; replica.position = [...state.position];
         replica.actions = null;
+        replica.reloadActive = false;
         ex.mpSetCoordsNoOffset(replica.ped, vector(72, state.position), 1, 1, 1);
+        lifecycle('replica_authority_restored');
       }
+      // 无敌只阻止扣血，不会退出已经触发的 ragdoll；存活替身保持可见站姿。
+      if (ex.mpSetCanRagdoll && (!replica.ragdollProtected || ex.mpIsRagdoll?.(replica.ped))) {
+        ex.mpSetCanRagdoll(replica.ped, 0); replica.ragdollProtected = true;
+      }
+      ex.mpSetInvincible(replica.ped, 1);
       if (state.weapon) {
         const equipped = actualWeapon(replica.ped);
         // Give/Select 无成功返回，资源加载或其他任务收枪后需验证实际装备并限频重试。
@@ -483,7 +525,7 @@ self.prepareMultiplayerBridge = function (imports) {
         ex.mpSetHeading(replica.ped, state.heading); replica.heading = state.heading;
       }
       const nativeHealth = state.server_authority ? nativeCombatHealth(state.health) : state.health;
-      if (ex.mpSetHealth && Number.isInteger(state.health) && replica.health !== nativeHealth) {
+      if (ex.mpSetHealth && Number.isInteger(state.health) && ex.mpGetHealth(replica.ped) !== nativeHealth) {
         ex.mpSetHealth(replica.ped, nativeHealth, 0); replica.health = nativeHealth;
       }
 
@@ -498,8 +540,9 @@ self.prepareMultiplayerBridge = function (imports) {
       const delta = smoothingTime ? Math.min(100, now - smoothingTime) : 40;
       smoothingTime = now;
       for (const peer of peers.slice(0, 32)) {
-        const combat = (packet.combat || []).find((player) => player.id === peer.player_id);
-        updateReplica(peer.player_id, combat ? { ...peer.state, health: combat.health, alive: combat.alive, server_authority: true } : peer.state, now, delta);
+        const combat = authorityStates.get(peer.player_id);
+        updateReplica(peer.player_id, combat ? { ...peer.state, health: combat.health, alive: combat.alive,
+          revision: combat.revision, server_authority: true } : peer.state, now, delta);
       }
       for (const shot of packet.shots || []) {
         if (consumedShots.has(shot.id)) continue;
@@ -517,7 +560,8 @@ self.prepareMultiplayerBridge = function (imports) {
               // 服务端已确认伤害，转播只产生轨迹/枪声，不再次独立扣血。
               ex.mpShootBullet(vector(24, shot.event.origin), vector(72, shot.event.target),
                 0, 1, weapon | 0, replica.ped, 1, 0, -1);
-              ex.mpTaskShootAtCoord(replica.ped, vector(72, shot.event.target), 200, 0xc6ee6b4c | 0);
+              // TASK_SHOOT_AT_COORD 会再产生默认伤害实弹；姿态仅使用不射击的瞄准任务。
+              if (ex.mpTaskAimGunAtCoord) ex.mpTaskAimGunAtCoord(replica.ped, vector(72, shot.event.target), 250, 0, 0);
             }
           }
         }
@@ -562,7 +606,12 @@ self.prepareMultiplayerBridge = function (imports) {
           modelMismatch = null; modelRestore = null; lastGoodLocal = null;
           modelDefaultsPending = false;
           weaponSample = null; pendingShots = [];
+          authorityStates.clear();
         }
+        for (const player of packet.combat || []) mergeAuthority(player);
+        for (const control of packet.controls || []) authorityControl(control.event);
+        const members = new Set((packet.members || []).map((member) => member.id));
+        for (const id of authorityStates.keys()) if (id !== packet.client_id && !members.has(id)) authorityStates.delete(id);
         updateWorld(now);
         // 等待服务器恢复快照，避免刷新时先随机换装或上报单机出生坐标。
         if (packet.resumed && !packet.resume_state_ready) return;
@@ -570,13 +619,17 @@ self.prepareMultiplayerBridge = function (imports) {
         if (!deathRestartPaused && ex.mpPauseDeathRestart) {
           ex.mpPauseDeathRestart(1); deathRestartPaused = true;
         }
-        let authority = (packet.combat || []).find((player) => player.id === packet.client_id);
+        let authority = authorityStates.get(packet.client_id);
         const acknowledgement = [];
         for (const control of packet.controls || []) {
           if (consumedControls.has(control.id)) { acknowledgement.push(control.id); continue; }
           const event = control.event;
           let completed = true;
           const revision = Number.isSafeInteger(event?.revision) ? event.revision : 0;
+          const eventId = event?.type === 'damage' ? event.victim_id : event?.player_id;
+          if (['damage', 'death', 'respawn'].includes(event?.type) && revision < (authorityStates.get(eventId)?.revision ?? 0)) {
+            consumedControls.add(control.id); acknowledgement.push(control.id); continue;
+          }
           if (event?.type === 'respawn' && event.player_id === packet.client_id) {
             if (revision > lastRespawnRevision) {
               completed = Boolean(recoverLocal(event.position, event.heading ?? 90, event.health ?? 200, revision, now));
@@ -608,11 +661,13 @@ self.prepareMultiplayerBridge = function (imports) {
             const revision = Number.isSafeInteger(authority.revision) ? authority.revision : 0;
             if (lastAuthorityAlive === false || ex.mpIsDead(localPed, 0)) {
               const restoring = !initialPlacement && validPosition(resumeState?.position);
+              const localAccident = lastAuthorityAlive !== false && validPosition(lastGoodLocal?.position);
               const destination = restoring ? resumeState.position
+                : localAccident ? lastGoodLocal.position
                 : validPosition(authority.spawn) ? authority.spawn
                 : validPosition(packet.spawn) ? packet.spawn : TEST_SPAWN;
               const restored = recoverLocal(destination, restoring && Number.isFinite(resumeState.heading)
-                ? resumeState.heading : 90, authority.health, revision, now);
+                ? resumeState.heading : localAccident ? lastGoodLocal.heading : 90, authority.health, revision, now);
               if (!restored) return;
               localPed = restored;
               authority = lifeOverride;
@@ -754,11 +809,15 @@ self.prepareMultiplayerBridge = function (imports) {
         if (now - lastStatus >= 1000) {
           lastStatus = now;
           post({ type: 'game_status', connected: true, peer_count: replicas.size,
+            client_id: packet.client_id,
             weapon, weapon_ready: actualWeapon(localPed).ready,
-            ...(authority ? { health: authority.health, alive: authority.alive, kills: authority.kills, deaths: authority.deaths } : {}) });
+            ...(authority ? { health: authority.health, alive: authority.alive, revision: authority.revision,
+              native_health: ex.mpGetHealth(localPed), native_dead: Boolean(ex.mpIsDead(localPed, 0)),
+              kills: authority.kills, deaths: authority.deaths } : {}) });
         }
-        pendingShots = pendingShots.filter((shot) => now - shot.at <= 250 && shot.ped === localPed && shot.event.weapon === weapon);
-        if (pendingShots.length && now - lastShot >= 50 && (!authority || authority.alive)) {
+        pendingShots = pendingShots.filter((shot) => now - shot.at <= Math.max(250, shotInterval(shot.event.weapon) + 100)
+          && shot.ped === localPed && shot.event.weapon === weapon);
+        if (pendingShots.length && now - lastShot >= shotInterval(weapon) && (!authority || authority.alive)) {
           lastShot = now;
           const shot = pendingShots.shift();
           // 同一武器的新状态随事件交给页面，网络层先发状态再发射击，避免换枪竞态。

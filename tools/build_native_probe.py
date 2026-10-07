@@ -57,6 +57,9 @@ ENTITY_EXPORTS = {
     "mpSetHeading": (50135, "entity_commands::CommandSetEntityHeading(int, float)", ["i32", "f32"], []),
     "mpSetCollision": (50128, "entity_commands::CommandSetEntityCollision(int, bool, bool)", ["i32", "i32", "i32"], []),
     "mpSetInvincible": (50137, "entity_commands::CommandSetEntityInvincible(int, bool)", ["i32", "i32"], []),
+    # 活跃远端副本不由本地物理决定倒地；服务端死亡前重新开启 ragdoll。
+    "mpSetCanRagdoll": (57471, "ped_commands::CommandSetPedCanRagdoll(int, bool)", ["i32", "i32"], []),
+    "mpIsRagdoll": (57464, "ped_commands::CommandIsPedRagdoll(int)", ["i32"], ["i32"]),
     "mpBlockEvents": (57447, "ped_commands::CommandSetBlockingOfNonTemporaryEvents(int, bool)", ["i32", "i32"], []),
     "mpDeleteEntity": (50100, "entity_commands::CommandDeleteEntity(int&)", ["i64"], []),
     "mpDeletePed": (57115, "ped_commands::CommandDeletePed(int&)", ["i64"], []),

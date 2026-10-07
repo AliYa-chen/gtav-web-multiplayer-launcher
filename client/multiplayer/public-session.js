@@ -38,11 +38,32 @@ function cleanShotResult(value) {
     if (Object.hasOwn(value, key) && (!Number.isInteger(value[key]) || value[key] < 0 || value[key] > 200)) return null;
   }
   if (Object.hasOwn(value, 'reason') && (typeof value.reason !== 'string' || !/^[a-z_]{1,64}$/.test(value.reason))) return null;
+  if (Object.hasOwn(value, 'revision') && (!Number.isSafeInteger(value.revision) || value.revision < 0)) return null;
   return { seq: value.seq, weapon: value.weapon, accepted: value.accepted, hit,
     ...(Object.hasOwn(value, 'victim_id') ? { victim_id: value.victim_id } : {}),
     ...(Object.hasOwn(value, 'damage') ? { damage: value.damage } : {}),
     ...(Object.hasOwn(value, 'health') ? { health: value.health } : {}),
+    ...(Object.hasOwn(value, 'revision') ? { revision: value.revision } : {}),
     ...(Object.hasOwn(value, 'reason') ? { reason: value.reason } : {}) };
+}
+function cleanCombatPlayer(value) {
+  if (!value || typeof value.id !== 'string' || !value.id || value.id.length > 128
+    || !Number.isInteger(value.health) || value.health < 0 || value.health > 200 || typeof value.alive !== 'boolean') return null;
+  const revision = Object.hasOwn(value, 'revision') ? value.revision : 0;
+  if (!Number.isSafeInteger(revision) || revision < 0) return null;
+  return { ...value, revision, ...(coordinates(value.spawn) ? { spawn: value.spawn.slice() } : {}) };
+}
+function cleanWeaponRules(value) {
+  if (!Array.isArray(value) || value.length > 128) return null;
+  const hashes = new Set(), rules = [];
+  for (const rule of value) {
+    if (!rule || typeof rule !== 'object' || Array.isArray(rule) || Object.keys(rule).length !== 3
+      || !unsignedHash(rule.weapon) || hashes.has(rule.weapon)
+      || !Number.isInteger(rule.cooldown_ms) || rule.cooldown_ms < 1 || rule.cooldown_ms > 2000
+      || !Number.isInteger(rule.damage) || rule.damage < 0 || rule.damage > 200) return null;
+    hashes.add(rule.weapon); rules.push({ weapon: rule.weapon, cooldown_ms: rule.cooldown_ms, damage: rule.damage });
+  }
+  return rules;
 }
 
 // 游戏页直接持有连接。关闭大厅不会影响战局，也不需要另开浏览器标签页。
@@ -50,6 +71,8 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   const address = normalizeServerAddress(preferences.server, location.href);
   const peers = new Map();
   const combat = new Map();
+  const weaponRuleByHash = new Map();
+  let weaponRules = [];
   // 每个游戏页独占连接与桥接，避免同一来源的多个标签页混用角色和身份。
   let receiver = null, latestStatus = null;
   const pendingControls = [];
@@ -146,8 +169,38 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
       resume_state: resumeState,
       resume_position: resumeState?.position || null,
       spawn: connected ? spawn : null,
+      weapon_rules: weaponRules.map((rule) => ({ ...rule })),
       avatar: preferences.preset.endsWith('_female') ? 'female' : 'male', preset: preferences.preset, seed: preferences.seed,
       model: modelForPreset(preferences), appearance_spec: randomAppearance(preferences) });
+  }
+  function mergeCombat(value) {
+    const player = cleanCombatPlayer(value);
+    if (!player || (room && !room.members.some(({ id }) => id === player.id))) return false;
+    const previous = combat.get(player.id);
+    if (previous && player.revision < previous.revision) return false;
+    combat.set(player.id, { ...previous, ...player });
+    return true;
+  }
+  function applyCombatEvent(message) {
+    if (Object.hasOwn(message, 'room_id') && message.room_id !== room?.id) return false;
+    const id = message.type === 'damage' ? message.victim_id : message.player_id;
+    if (typeof id !== 'string' || !room?.members.some((member) => member.id === id)) return false;
+    const previous = combat.get(id);
+    const revision = Object.hasOwn(message, 'revision') ? message.revision : 0;
+    if (!Number.isSafeInteger(revision) || revision < 0 || (previous && revision < previous.revision)) return false;
+    const health = message.type === 'death' ? 0 : message.type === 'respawn' ? (message.health ?? 200) : message.health;
+    return mergeCombat({ ...previous, id, revision, health, alive: health > 0,
+      ...(message.type === 'respawn' && coordinates(message.position) ? { spawn: message.position.slice() } : {}),
+      ...(message.type === 'death' && Number.isInteger(message.deaths) && message.deaths >= 0 ? { deaths: message.deaths } : {}) });
+  }
+  function mergePlayerState(id, value) {
+    const state = cleanPlayerState(value);
+    if (!state || !Number.isSafeInteger(value.seq) || value.seq < 0) return false;
+    const previous = peers.get(id)?.state;
+    // 伤害、死亡和重生会复用最后的移动序号，只有更小的序号才属于旧状态。
+    if (previous && value.seq < previous.seq) return false;
+    peers.set(id, { player_id: id, state: { seq: value.seq, ...state } });
+    return true;
   }
   function send(type, fields) {
     if (!socket || socket.readyState !== WebSocket.OPEN) return false;
@@ -192,17 +245,18 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     clearTimeout(shotTimer); shotTimer = 0;
     if (!pendingShot || !room || !profiled || stopped) return;
     const now = performance.now(), shot = pendingShot;
-    if (now - shot.at >= 250 || latestLocalState?.weapon !== shot.event.weapon) {
+    if (now - shot.at >= shot.maxWait || latestLocalState?.weapon !== shot.event.weapon) {
       clearPendingShot(); return;
     }
-    const delay = Math.max(0, 50 - (now - lastShotSentAt));
+    const rule = weaponRuleByHash.get(shot.event.weapon);
+    const delay = Math.max(0, (rule ? Math.max(50, rule.cooldown_ms + 15) : 50) - (now - lastShotSentAt));
     if (delay || !socket || socket.bufferedAmount > 65536) { scheduleShot(delay || 10); return; }
     // 一条有限寿命的射击等待最新同武器状态，防止单发被状态节流或短暂背压丢弃。
     pendingState = latestLocalState || shot.state;
     if (!pendingState || pendingState.weapon !== shot.event.weapon || !flushState(true)) { scheduleShot(); return; }
     if (!send('shot_event', { seq: shotSequence + 1, ...shot.event })) { scheduleShot(); return; }
     shotSequence++; lastShotSentAt = now;
-    logCombat({ stage: 'sent', seq: shotSequence, weapon: shot.event.weapon });
+    logCombat({ stage: 'sent', client_id: clientId, seq: shotSequence, weapon: shot.event.weapon });
     clearPendingShot();
   }
   function onWorkerMessage(data) {
@@ -227,7 +281,8 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
         if (!state || state.weapon !== event.weapon) return;
       }
       latestLocalState = state;
-      pendingShot = { event, state, at: now };
+      const rule = weaponRuleByHash.get(event.weapon);
+      pendingShot = { event, state, at: now, maxWait: Math.min(2250, Math.max(250, (rule?.cooldown_ms || 0) + 100)) };
       flushShot();
     }
   }
@@ -247,6 +302,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     supportsCombatFeedback = false;
     peers.clear(); combat.clear(); pendingState = null;
     latestLocalState = null;
+    weaponRules = []; weaponRuleByHash.clear();
     lastSentState = null; lastCombatResultSequence = -1;
     // 新身份从 profile 的服务端序号恢复，不能把重连当作换一个玩家。
     lastStateSentAt = lastShotSentAt = -Infinity;
@@ -323,6 +379,9 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
         supportsHeartbeat = message.capabilities.includes('heartbeat');
         supportsSnapshot = message.capabilities.includes('snapshot');
         supportsCombatFeedback = message.capabilities.includes('combat_feedback');
+        weaponRules = Object.hasOwn(message, 'weapon_rules') ? cleanWeaponRules(message.weapon_rules) : [];
+        if (!weaponRules) throw new Error('服务器武器规则格式无效。');
+        weaponRuleByHash.clear(); for (const rule of weaponRules) weaponRuleByHash.set(rule.weapon, rule);
         hello();
         status('joining', '加入战局中');
         break;
@@ -348,6 +407,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
         if (!profiled) throw new Error('服务器尚未确认玩家身份。');
         const members = new Set(room.members.map(({ id }) => id));
         for (const id of peers.keys()) if (!members.has(id)) peers.delete(id);
+        for (const id of combat.keys()) if (!members.has(id)) combat.delete(id);
         attempts = 0;
         startRecoveryTimers();
         postSession(); status(initial ? 'joined' : 'membership', '已加入公共战局');
@@ -357,13 +417,9 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
       case 'world_state': {
         if (message.room_id !== room?.id) return;
         if (!Array.isArray(message.states) || message.states.length > 1024) throw new Error('服务器战局状态格式无效。');
-        peers.clear();
         const members = new Set(room.members.map(({ id }) => id));
         for (const entry of message.states) {
-          const state = cleanPlayerState(entry.state);
-          if (members.has(entry.player_id) && state && Number.isSafeInteger(entry.state.seq) && entry.state.seq >= 0) {
-            peers.set(entry.player_id, { player_id: entry.player_id, state: { seq: entry.state.seq, ...state } });
-          }
+          if (members.has(entry.player_id)) mergePlayerState(entry.player_id, entry.state);
         }
         resumeStateReady = true;
         postSession(); status('sync', '正在同步公共战局玩家'); completeInitialJoin(); break;
@@ -372,9 +428,9 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
         if (message.room_id !== room?.id || !room.members.some(({ id }) => id === message.player_id)) return;
         const state = cleanPlayerState(message.state);
         if (!state || !Number.isSafeInteger(message.state.seq) || message.state.seq < 0) throw new Error('服务器角色状态格式无效。');
-        peers.set(message.player_id, { player_id: message.player_id, state: { seq: message.state.seq, ...state } });
+        if (!mergePlayerState(message.player_id, message.state)) return;
         if (resumed && message.player_id === clientId) postSession();
-        emit(message); status('sync', '正在同步公共战局玩家'); break;
+        emit({ ...message, state: peers.get(message.player_id).state }); status('sync', '正在同步公共战局玩家'); break;
       }
       case 'shot_event':
         if (message.room_id !== room?.id || !room.members.some(({ id }) => id === message.player_id)) return;
@@ -386,22 +442,29 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
         const result = cleanShotResult(message);
         if (!result || result.seq <= lastCombatResultSequence) break;
         lastCombatResultSequence = result.seq;
-        logCombat({ stage: 'result', seq: result.seq, weapon: result.weapon,
-          accepted: result.accepted, hit: result.hit, reason: result.reason || '' });
+        logCombat({ stage: 'result', client_id: clientId, seq: result.seq, weapon: result.weapon,
+          accepted: result.accepted, hit: result.hit, reason: result.reason || '',
+          ...(Object.hasOwn(result, 'victim_id') ? { victim_id: result.victim_id } : {}),
+          ...(Object.hasOwn(result, 'damage') ? { damage: result.damage } : {}),
+          ...(Object.hasOwn(result, 'health') ? { health: result.health } : {}),
+          ...(Object.hasOwn(result, 'revision') ? { revision: result.revision } : {}) });
         emit({ type: 'combat_feedback', ...result });
         break;
       }
       case 'chat': break; // 游戏页不显示大厅聊天。
       case 'combat_state':
         if (!supportsCombat || !Array.isArray(message.players)) return;
-        combat.clear();
-        for (const player of message.players) {
-          if (typeof player.id === 'string' && Number.isInteger(player.health) && player.health >= 0 && player.health <= 200
-              && typeof player.alive === 'boolean' && Number.isSafeInteger(player.revision)) combat.set(player.id, player);
-        }
+        if (Object.hasOwn(message, 'room_id') && message.room_id !== room?.id) return;
+        for (const player of message.players) mergeCombat(player);
         emit({ ...message, players: [...combat.values()] });
         break;
-      case 'damage': case 'death': case 'respawn': case 'correction':
+      case 'damage': case 'death': case 'respawn':
+        if (supportsCombat && applyCombatEvent(message)) {
+          // 完整快照的权威版本先更新；随后控制消息不会被下一次周期快照覆盖回旧生命状态。
+          postSession(); emit(message);
+        }
+        break;
+      case 'correction':
         if (supportsCombat) emit(message);
         break;
       case 'pong':

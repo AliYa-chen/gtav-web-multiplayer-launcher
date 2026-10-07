@@ -35,8 +35,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** 独立公共战局服务：鉴权恢复、权威移动校验、伤害、死亡、重生及状态分发。 */
 public final class Main {
-    private static final String VERSION = "0.2.3-public";
-    private static final List<String> CAPABILITIES = List.of("public_session", "chat", "player_state", "shoot_events", "appearance", "combat", "resume", "heartbeat", "snapshot", "actions", "combat_feedback");
+    private static final String VERSION = "0.2.4-public";
+    private static final List<String> CAPABILITIES = List.of("public_session", "chat", "player_state", "shoot_events", "appearance", "combat", "resume", "heartbeat", "snapshot", "actions", "combat_feedback", "weapon_rules");
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final int MAX_MESSAGE_BYTES = 64 * 1024;
 
@@ -373,7 +373,8 @@ public final class Main {
         void sendInitial(Client client) {
             synchronized (lock) {
                 client.send(object("type", "welcome", "protocol", 1, "client_id", client.id, "capabilities", CAPABILITIES,
-                    "public_session", true, "server_version", VERSION, "room", roomState().get("room")));
+                    "public_session", true, "server_version", VERSION, "room", roomState().get("room"),
+                    "weapon_rules", CombatWorld.weaponRules()));
             }
         }
 
@@ -447,9 +448,9 @@ public final class Main {
                     // 收到字节、错误 JSON 或被拒绝的动作都不能延长连接寿命。
                     client.recordActivity();
                 } catch (LobbyProblem problem) {
-                    reportError(client, message, problem.code, problem.getMessage());
+                    reportError(client, message, problem.code, problem.getMessage(), 0);
                 } catch (CombatWorld.Rejection rejection) {
-                    reportError(client, message, rejection.code, rejection.getMessage());
+                    reportError(client, message, rejection.code, rejection.getMessage(), rejection.retryAfterMillis);
                 }
             }
         }
@@ -545,6 +546,7 @@ public final class Main {
                     result.put("victim_id", event.get("victim_id"));
                     result.put("damage", event.get("damage"));
                     result.put("health", event.get("health"));
+                    result.put("revision", event.get("revision"));
                     break;
                 }
                 // 判定回执只发射手，伤害与死亡广播仍由权威结果驱动。
@@ -552,8 +554,9 @@ public final class Main {
             }
         }
 
-        private void reportError(Client client, Map<String, Object> message, String code, String description) {
+        private void reportError(Client client, Map<String, Object> message, String code, String description, long retryAfterMillis) {
             Map<String, Object> error = object("type", "error", "code", code, "message", description);
+            if (retryAfterMillis > 0) error.put("retry_after_ms", retryAfterMillis);
             boolean shot = "shot_event".equals(message.get("type"));
             if (shot) {
                 try { error.put("seq", safeInteger(message.get("seq"), "射击序号")); }
@@ -569,6 +572,7 @@ public final class Main {
                     "reason", code, "message", description);
                 if (error.containsKey("seq")) result.put("seq", error.get("seq"));
                 if (error.containsKey("weapon")) result.put("weapon", error.get("weapon"));
+                if (retryAfterMillis > 0) result.put("retry_after_ms", retryAfterMillis);
                 client.send(result);
             }
         }

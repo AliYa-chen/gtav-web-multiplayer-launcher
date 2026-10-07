@@ -3,6 +3,7 @@ package offline.multiplayer;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -20,6 +21,7 @@ public final class CombatWorld {
     private static final double MAX_SPEED = 14.0;
     private static final double MAX_RAY_LENGTH = 300.0;
     private static final List<String> ACTION_FIELDS = List.of("aiming", "reloading", "jumping", "ducking", "sprinting");
+    private static final Map<Long, Weapon> WEAPONS = weaponCatalog();
     private final LinkedHashMap<String, Player> players = new LinkedHashMap<>();
     private long joins;
 
@@ -27,7 +29,11 @@ public final class CombatWorld {
 
     public static final class Rejection extends Exception {
         public final String code;
-        Rejection(String code, String message) { super(message); this.code = code; }
+        public final long retryAfterMillis;
+        Rejection(String code, String message) { this(code, message, 0); }
+        Rejection(String code, String message, long retryAfterMillis) {
+            super(message); this.code = code; this.retryAfterMillis = retryAfterMillis;
+        }
     }
 
     private static final class Player {
@@ -162,7 +168,7 @@ public final class CombatWorld {
         if (rule == null) throw reject("unsupported_weapon", String.format(
             "暂不支持武器 0x%08x 的战局伤害，请使用普通枪械", weapon));
         if (shooter.shotAt != Long.MIN_VALUE && now - shooter.shotAt < rule.cooldown)
-            throw reject("rate_limited", "该武器射击间隔过短");
+            throw new Rejection("rate_limited", "该武器射击间隔过短", rule.cooldown - (now - shooter.shotAt));
         shooter.shotSequence = sequence;
         shooter.shotAt = now;
         List<Map<String, Object>> events = new ArrayList<>();
@@ -254,19 +260,33 @@ public final class CombatWorld {
     private static List<Double> position(Player player) { return (List<Double>) player.state.get("position"); }
 
     private record Weapon(int damage, long cooldown) {}
-    private static Weapon weapon(long hash) {
-        if (hash == 0x1b06d571L || hash == 0x5ef9fec4L || hash == 0x22d8fe39L || hash == 0x99aeeb3bL
-                || hash == 0xbfd21232L) return new Weapon(25, 200);
-        if (hash == 0x83bf0278L || hash == 0xbfefff6dL || hash == 0xaf113f99L || hash == 0x624fe830L
-                || hash == 0x2be6766bL || hash == 0x13532244L || hash == 0xefe7e2dfL || hash == 0x9d07f764L
-                || hash == 0x7fd62962L) return new Weapon(35, 100);
-        if (hash == 0x1d073a89L || hash == 0x7846a318L || hash == 0x9d61e50fL || hash == 0xe284c527L)
-            return new Weapon(50, 800);
-        if (hash == 0x05fc3c11L || hash == 0x0c472fe2L || hash == 0xc734385aL) return new Weapon(100, 1_000);
+    private static Weapon weapon(long hash) { return WEAPONS.get(hash); }
+
+    private static Map<Long, Weapon> weaponCatalog() {
+        Map<Long, Weapon> rules = new LinkedHashMap<>();
+        addWeapons(rules, new Weapon(25, 200), 0x1b06d571L, 0x5ef9fec4L, 0x22d8fe39L, 0x99aeeb3bL, 0xbfd21232L);
+        addWeapons(rules, new Weapon(35, 100), 0x83bf0278L, 0xbfefff6dL, 0xaf113f99L, 0x624fe830L,
+            0x2be6766bL, 0x13532244L, 0xefe7e2dfL, 0x9d07f764L, 0x7fd62962L);
+        addWeapons(rules, new Weapon(50, 800), 0x1d073a89L, 0x7846a318L, 0x9d61e50fL, 0xe284c527L);
+        addWeapons(rules, new Weapon(100, 1_000), 0x05fc3c11L, 0x0c472fe2L, 0xc734385aL);
         // 本项目 MINIGUN 是普通即时命中武器，原枪射击间隔为 20ms。
         // 每条客户端射击消息仍只有一条射线，不按原生更高射速补算多发伤害。
-        if (hash == 0x42bf8a85L) return new Weapon(25, 20);
-        return null;
+        addWeapons(rules, new Weapon(25, 20), 0x42bf8a85L);
+        return Collections.unmodifiableMap(rules);
+    }
+
+    private static void addWeapons(Map<Long, Weapon> rules, Weapon rule, long... hashes) {
+        for (long hash : hashes) rules.put(hash, rule);
+    }
+
+    /** 返回只读公开规则；权威射击判定与 welcome 使用同一内部目录。 */
+    public static List<Map<String, Object>> weaponRules() {
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Map.Entry<Long, Weapon> entry : WEAPONS.entrySet()) {
+            result.add(Collections.unmodifiableMap(object("weapon", entry.getKey(),
+                "cooldown_ms", entry.getValue().cooldown, "damage", entry.getValue().damage)));
+        }
+        return List.copyOf(result);
     }
 
     private static Map<String, Object> actions(Object input) throws Rejection {
