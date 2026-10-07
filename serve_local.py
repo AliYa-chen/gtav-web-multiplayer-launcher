@@ -8,6 +8,7 @@ from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parent / 'gta5data'
 CLIENT = Path(__file__).resolve().parent / 'client'
+DEFAULT_ROOM_SERVER = '183.66.27.21:47485'
 LOG_FILE = Path(__file__).resolve().parent / 'docs' / 'snapshot' / 'browser-local.log'
 LOG_LOCK = threading.Lock()
 mimetypes.add_type('application/wasm', '.wasm')
@@ -32,7 +33,7 @@ class LocalServer(ThreadingHTTPServer):
     """各实例使用不同端口，从而隔离浏览器存储和引擎广播频道。"""
     daemon_threads = True
 
-    def __init__(self, address, *, multiplayer_server='auto',
+    def __init__(self, address, *, multiplayer_server=DEFAULT_ROOM_SERVER,
                  instance_name='玩家1', log_file=LOG_FILE):
         self.multiplayer_server = multiplayer_server
         self.instance_name = instance_name
@@ -78,8 +79,18 @@ class Handler(SimpleHTTPRequestHandler):
     def send_head(self):
         self.byte_range = None
         route = urlsplit(self.path)
+        if route.path in ('/multiplayer', '/multiplayer/'):
+            query = parse_qs(route.query)
+            params = {'online': '1'}
+            for name in ('server', 'name'):
+                if query.get(name): params[name] = query[name][0]
+            self.send_response(307)
+            self.send_header('Location', '/?' + urlencode(params))
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return None
         if route.path == '/api/local-config':
-            multiplayer = getattr(self.server, 'multiplayer_server', 'auto')
+            multiplayer = getattr(self.server, 'multiplayer_server', DEFAULT_ROOM_SERVER)
             if multiplayer == 'auto':
                 try:
                     hostname = urlsplit('http://' + self.headers.get('Host', '')).hostname or 'localhost'
@@ -220,7 +231,7 @@ class Handler(SimpleHTTPRequestHandler):
             return
         super().log_request(code, size)
 
-def create_local_servers(port=8000, instances=1, multiplayer_server='auto',
+def create_local_servers(port=8000, instances=1, multiplayer_server=DEFAULT_ROOM_SERVER,
                          log_file=LOG_FILE, host='127.0.0.1'):
     """创建若干独立本地实例；端口占用时寻找下一个可用端口。"""
     if not 0 <= port <= 65535 or not 1 <= instances <= 8:
@@ -335,7 +346,8 @@ def main(argv=None):
     args.add_argument('--host', default='0.0.0.0', help='监听地址，默认 0.0.0.0，允许局域网访问；127.0.0.1 仅本机')
     args.add_argument('--instances', type=int, default=1, help='同时启动 1～8 个本地实例，使用不同端口模拟用户')
     args.add_argument('--multiplayer', action='store_true', help='打开轻量多人大厅；多实例时自动启用')
-    args.add_argument('--room-server', default='auto', help='公共战局 IP:端口；默认 auto，使用网页访问 IP 的 8787 端口')
+    args.add_argument('--room-server', default=DEFAULT_ROOM_SERVER,
+                      help='远程公共战局 IP:端口，默认 ' + DEFAULT_ROOM_SERVER + '；客户端无需本地 WebSocket 服务')
     args.add_argument('--start-room-server', action='store_true', help='一并启动本机 Java 大厅，方便多用户测试；需要 Java 17+')
     args.add_argument('--java', default='java', help='Java 可执行文件路径，用于 --start-room-server')
     args.add_argument('--open', action='store_true', help='服务器就绪后打开默认浏览器')
@@ -363,7 +375,7 @@ def main(argv=None):
                 params = {'name': server.instance_name}
                 if options.room_server != 'auto':
                     params['server'] = options.room_server
-                suffix = 'multiplayer/?' + urlencode(params)
+                suffix = '?' + urlencode({'online': '1', **params})
             address = 'http://localhost:%d/%s' % (server.server_port, suffix)
             print('%s：%s' % (server.instance_name, address), flush=True)
             if options.port and server.server_port != options.port + len(threads) - 1:

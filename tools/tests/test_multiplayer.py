@@ -218,14 +218,17 @@ class MultiplayerIntegrationTests(unittest.TestCase):
         for client in self.clients:
             client.close()
 
-    def client(self, name: str = "测试玩家") -> WebSocketClient:
+    def client(self, name: str = "测试玩家", *, capabilities=None) -> WebSocketClient:
         client = WebSocketClient(self.port)
         self.clients.append(client)
         client.welcome = client.expect("welcome")
         self.assertTrue(client.welcome["public_session"])
         self.assertEqual(client.welcome["room"]["id"], "PUBLIC")
-        client.send({"type": "hello", "name": name})
-        client.expect("profile")
+        hello = {"type": "hello", "name": name}
+        if capabilities is not None:
+            hello["capabilities"] = capabilities
+        client.send(hello)
+        client.profile = client.expect("profile")
         client.expect("room_state", lambda message: any(member["id"] == client.welcome["client_id"] for member in (message.get("room") or {}).get("members", [])))
         client.initial_world = client.expect("world_state")
         return client
@@ -256,6 +259,116 @@ class MultiplayerIntegrationTests(unittest.TestCase):
             self.assertTrue(snapshot["state_transport"])
             self.assertFalse(snapshot["game_sync"])
 
+    def test_application_heartbeat_and_snapshot_validation(self):
+        """应用心跳验证双向传输；快照请求需已加入，严格拒绝附加字段。"""
+        client = WebSocketClient(self.port)
+        self.clients.append(client)
+        welcome = client.expect("welcome")
+        self.assertEqual(welcome["server_version"], "0.2.1-public")
+        self.assertTrue({"heartbeat", "snapshot"}.issubset(welcome["capabilities"]))
+        for nonce in (0, 123456, 9007199254740991):
+            client.send({"type": "ping", "nonce": nonce})
+            self.assertEqual(client.expect("pong"), {"type": "pong", "nonce": nonce})
+        for invalid in ({"type": "ping"}, {"type": "ping", "nonce": None},
+                        {"type": "ping", "nonce": -1}, {"type": "ping", "nonce": True},
+                        {"type": "ping", "nonce": 1.5}, {"type": "ping", "nonce": "1"},
+                        {"type": "ping", "nonce": 9007199254740992},
+                        {"type": "ping", "nonce": 1, "health": 200},
+                        {"type": 123, "nonce": 1}, {"type": "sync", "player_id": "别人"}):
+            client.send(invalid)
+            self.error(client, "invalid_message")
+        client.send({"type": "sync"})
+        self.error(client, "not_in_room")
+        client.send({"type": "hello", "name": "旧客户端"})
+        profile = client.expect("profile")
+        client.expect("room_state")
+        client.expect("world_state")
+        client.send({"type": "ping", "nonce": 1})
+        client.expect("pong")
+        client.pending.clear()
+        client.send({"type": "sync"})
+        room = client.expect("room_state")["room"]
+        self.assertEqual(room["members"][0]["id"], profile["client_id"])
+        self.assertEqual(client.expect("world_state")["states"], [])
+        client.send({"type": "ping", "nonce": 2})
+        client.expect("pong")
+        self.assertFalse(any(message["type"] in ("profile", "combat_state") for message in client.pending))
+
+    def test_snapshot_replays_current_world_and_preserves_resume_sequences(self):
+        """恢复快照包含最新玩家与权威血量，不重新加入或清除序号。"""
+        first = self.client("恢复玩家", capabilities=["combat", "resume"])
+        second = self.client("同战局玩家", capabilities=["combat"])
+        restored = None
+        try:
+            first_id, second_id = first.profile["client_id"], second.profile["client_id"]
+            rifle = 0xBFEFFF6D
+            first_position = first.profile["spawn"]
+            second_position = [first_position[0] + 6, first_position[1], first_position[2]]
+            first_state = {**self.state(10), "position": first_position, "weapon": rifle}
+            second_state = {**self.state(20), "position": second_position, "weapon": rifle}
+            first.send(first_state)
+            first.expect("player_state", lambda event: event.get("player_id") == first_id)
+            second.send(second_state)
+            first.expect("player_state", lambda event: event.get("player_id") == second_id)
+            first_shot = {"type": "shot_event", "seq": 7, "weapon": rifle,
+                          "origin": [first_position[0], first_position[1], first_position[2] + 0.7],
+                          "target": [first_position[0], first_position[1] + 10, first_position[2] + 0.7]}
+            first.send(first_shot)
+            first.expect("shot_event", lambda event: event.get("player_id") == first_id)
+            second.send({"type": "shot_event", "seq": 9, "weapon": rifle,
+                         "origin": [second_position[0], second_position[1], second_position[2] + 0.7],
+                         "target": [first_position[0], first_position[1], first_position[2] + 0.7]})
+            self.assertEqual(first.expect("damage", lambda event: event.get("victim_id") == first_id)["health"], 165)
+            latest = {**second_state, "seq": 21, "heading": 135}
+            second.send(latest)
+            first.expect("player_state", lambda event: event.get("player_id") == second_id and event["state"]["seq"] == 21)
+            first.send({"type": "ping", "nonce": 10})
+            first.expect("pong")
+            first.pending.clear()
+            first.send({"type": "sync"})
+            room = first.expect("room_state")["room"]
+            self.assertEqual({member["id"] for member in room["members"]}, {first_id, second_id})
+            states = {item["player_id"]: item["state"] for item in first.expect("world_state")["states"]}
+            self.assertEqual(states[second_id]["seq"], 21)
+            self.assertEqual(states[second_id]["heading"], 135)
+            self.assertEqual(states[first_id]["health"], 165)
+            combat = first.expect("combat_state")
+            self.assertEqual(next(player for player in combat["players"] if player["id"] == first_id)["health"], 165)
+            first.send({"type": "ping", "nonce": 11})
+            first.expect("pong")
+            self.assertFalse(any(message["type"] == "profile" for message in first.pending))
+            first.send(first_state)
+            self.error(first, "stale_seq")
+            first.send(first_shot)
+            self.error(first, "stale_seq")
+            first.close()
+            second.expect("room_state", lambda event: any(
+                member["id"] == first_id and not member["connected"] for member in event["room"]["members"]))
+            restored = WebSocketClient(self.port)
+            self.clients.append(restored)
+            restored.expect("welcome")
+            restored.send({"type": "hello", "name": "恢复玩家", "capabilities": ["combat", "resume"],
+                           "client_id": first_id, "resume_token": first.profile["resume_token"]})
+            profile = restored.expect("profile")
+            self.assertEqual(profile["client_id"], first_id)
+            self.assertEqual(profile["health"], 165)
+            self.assertEqual(profile["last_state_seq"], 10)
+            self.assertEqual(profile["last_shot_seq"], 7)
+            restored.expect("room_state")
+            restored.expect("world_state")
+            restored.expect("combat_state")
+            restored.send({**first_state, "seq": 11, "health": 200})
+            state = restored.expect("player_state", lambda event:
+                event.get("player_id") == first_id and event["state"]["seq"] == 11)
+            self.assertEqual(state["state"]["health"], 165)
+        finally:
+            for client in (restored or first, second):
+                try:
+                    client.send({"type": "leave_room"})
+                    client.expect("room_state", lambda event: event.get("room") is None)
+                except (OSError, EOFError):
+                    pass
+
     def test_three_players_public_join_chat_state_and_shot_relay(self):
         """三人自动进入同一公共战局，聊天、角色状态和射击事件被实际转发。"""
         first, second, third = [self.client(name) for name in ("玩家一", "玩家二", "玩家三")]
@@ -269,13 +382,13 @@ class MultiplayerIntegrationTests(unittest.TestCase):
             event = client.expect("chat", lambda message: message.get("text") == "你好，测试消息 🌍")
             self.assertEqual(event["room_id"], "PUBLIC")
             self.assertEqual(event["sender_id"], second.welcome["client_id"])
-        state = self.state()
+        state = {**self.state(), "weapon": 0x1B06D571}
         second.send(state)
         shot = {"type": "shot_event", "seq": 1, "origin": state["position"], "target": [713.5, -1090, 22.41], "weapon": 0x1B06D571}
         second.send(shot)
         for client in (first, second, third):
             event = client.expect("player_state", lambda message: message.get("player_id") == second.welcome["client_id"])
-            self.assertEqual(event["state"], {key: value for key, value in state.items() if key != "type"})
+            self.assertEqual(event["state"], {**{key: value for key, value in state.items() if key != "type"}, "alive": True})
             self.assertEqual(event["room_id"], "PUBLIC")
             self.assertIsInstance(event["time"], str)
             event = client.expect("shot_event", lambda message: message.get("player_id") == second.welcome["client_id"])
@@ -283,7 +396,7 @@ class MultiplayerIntegrationTests(unittest.TestCase):
             self.assertEqual(event["room_id"], "PUBLIC")
         fourth = self.client("后来加入")
         saved = next(item for item in fourth.initial_world["states"] if item["player_id"] == second.welcome["client_id"])
-        self.assertEqual(saved["state"], {key: value for key, value in state.items() if key != "type"})
+        self.assertEqual(saved["state"], {**{key: value for key, value in state.items() if key != "type"}, "alive": True})
 
     def test_public_policy_rejects_room_launch_and_debug_injection(self):
         """客户端不能改变公共战局地图、创建私房或开启调试参数。"""
@@ -316,7 +429,9 @@ class MultiplayerIntegrationTests(unittest.TestCase):
             self.error(client, "invalid_message")
         client.send(self.state(2))
         self.assertEqual(client.expect("player_state", lambda message: message["state"]["seq"] == 2)["player_id"], client.welcome["client_id"])
-        shot = {"type": "shot_event", "seq": 1, "origin": [0, 0, 0], "target": [1, 2, 3], "weapon": 0}
+        position = self.state()["position"]
+        shot = {"type": "shot_event", "seq": 1, "origin": position,
+                "target": [position[0] + 1, position[1] + 2, position[2] + 3], "weapon": 0}
         client.send(shot)
         client.expect("shot_event")
         client.send(shot)

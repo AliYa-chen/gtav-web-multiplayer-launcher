@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>GTA V 离线版</title>
+<link rel="stylesheet" href="/multiplayer/join-modal.css">
 <style>
 	html, body { margin: 0; height: 100%; background: #000; color: #ccc; font: 12px Consolas, "Microsoft YaHei", "PingFang SC", monospace; overflow: hidden; }
 	#canvas { display: block; position: absolute; left: 0; top: 0; width: 100vw; height: 100vh; background: #000; }
@@ -40,28 +41,30 @@
 	#fill { height: 100%; width: 0; background: #7cc576; }
 	#hud { position: fixed; left: 8px; bottom: 8px; max-width: 60vw; white-space: pre-wrap; opacity: .8; pointer-events: none; }
 	#fps { position: fixed; left: 8px; top: 6px; display: none; color: #0f0; font: bold 18px/1.2 Consolas, "Microsoft YaHei", "PingFang SC", monospace; font-variant-numeric: tabular-nums; text-shadow: 1px 1px 2px #000, 0 0 3px #000; pointer-events: none; z-index: 10; }
-	#multiplayer-nav { position: fixed; top: 18px; right: 20px; z-index: 11; padding: 10px 17px; border: 1px solid #8bb681; border-radius: 6px; color: #d6f2cd; background: #111b14e8; font: 14px/1.4 "Microsoft YaHei", "PingFang SC", sans-serif; text-decoration: none; }
-	#multiplayer-nav:hover { background: #263b2b; }
-	#multiplayer-nav:focus-visible { outline: 2px solid #c7edb9; outline-offset: 4px; }
 </style>
 </head>
 <body>
-<a id="multiplayer-nav" href="/multiplayer/">战局 ↗</a>
 <canvas id="canvas" width="800" height="600" tabindex="-1"></canvas>
 <div id="hud"></div>
 <div id="loading"><div id="ls-stage"><div id="ls-screens"></div><img id="ls-logo" src="/b/8b0b5899ed/title/logo.png" alt=""><div id="ls-bars"><div id="modes" class="ls-bar"><button data-act="back"></button><button data-act="map5"></button><button data-act="map6"></button><button data-act="sandbox"></button><button data-act="story"></button><button data-act="online"></button></div><div class="ls-bar"><span id="label">正在启动…</span><span id="pct">0%</span><i class="ls-spin"></i></div></div></div><div id="ls-log"><div id="data"></div><div id="console"></div></div><div id="bar"><div id="fill"></div></div></div>
 <div id="fps"></div>
 <script type="module">
 import { installGameAdapter } from '/multiplayer/game-adapter.js';
+import { installJoinModal, readPublicPreferences } from '/multiplayer/join-modal.js';
+import { startPublicSession } from '/multiplayer/public-session.js';
 // 浏览器版本的入口页。引擎在专用工作线程中运行（loader.js，相当于引擎的“主线程”，静态构造函数和
 // main() 在此执行，可能阻塞该线程）。页面仅持有 canvas，并将其交给该线程，再转交 GPU 工作线程。
 // 查询参数：?args=-flag1,-flag2=value 将参数追加到引擎命令行；?shot=N 将每第 N 次画面呈现的截图发送到开发服务器。
 // 多人游戏入口只运行 GTA V 沙盒，忽略地址栏中的模式和诊断参数。
 const ROOM_GAME = location.pathname === '/play/';
 const q = new URLSearchParams(ROOM_GAME ? 'mode=sandbox' : location.search);
-if (ROOM_GAME) document.getElementById('multiplayer-nav').textContent = '返回战局大厅 ↗';
+const onlinePreferences = ROOM_GAME ? readPublicPreferences() : null;
+let onlineConnectionReady = !ROOM_GAME;
+const joinModal = installJoinModal({ onJoin: () => location.assign('/play/') });
+const editingInput = (event) => joinModal.isOpen || Boolean(event.target?.closest?.('input,textarea,select,[contenteditable="true"]'));
 // 在线入口在页面捕获阶段拦截调试按键，避免将它们写入引擎的共享输入区。
 function stopOnlineDebugKey(e) {
+	if (editingInput(e)) return false;
 	if (!ROOM_GAME || !((e.code === 'KeyP' && e.shiftKey) || ['Equal', 'NumpadAdd', 'Insert', 'Delete'].includes(e.code) || /^F(?:[1-9]|1[0-2])$/.test(e.code))) return false;
 	e.preventDefault(); e.stopImmediatePropagation();
 	return true;
@@ -246,7 +249,7 @@ const ACTS = {		// 按钮定义：文案、键帽文字、按键代码。
 	map6: ['GTA VI 地图', '6', ['Digit6', 'Numpad6']],
 	sandbox: ['沙盒模式', '空格', ['Space']],
 	story: ['故事模式', '回车', ['Enter', 'NumpadEnter']],
-	online: ['加入在线战局', 'IP', []],
+	online: ['加入在线战局', 'O', ['KeyO']],
 };
 const LOADING = { 1: '正在加载故事模式', 2: '正在加载沙盒模式：GTA V 地图', 3: '正在加载沙盒模式：GTA VI 地图' };
 const modesEl = document.getElementById('modes'), modeButtons = [...modesEl.querySelectorAll('button')];
@@ -268,7 +271,7 @@ const showModes = () => {
 		b.classList.toggle('chosen', loading);
 	}
 	if (startMode) modesEl.classList.remove('ask');
-	if (waitingChoice && !startMode) document.getElementById('label').textContent = pickingMap ? '请选择地图以继续' : '请选择故事模式或沙盒模式以继续';
+	if (waitingChoice && !startMode) document.getElementById('label').textContent = pickingMap ? '请选择地图以继续' : '请选择故事模式、沙盒模式或在线战局以继续';
 };
 const choose = (m) => {
 	pickingMap = false;
@@ -281,7 +284,7 @@ const choose = (m) => {
 };
 const act = (a) => {
 	if (startCommitted) return;
-	if (a === 'online') location.href = '/multiplayer/';
+	if (a === 'online') joinModal.open();
 	else if (a === 'story') choose(1);
 	else if (a === 'map5') choose(2);
 	else if (a === 'map6') choose(3);
@@ -289,7 +292,7 @@ const act = (a) => {
 };
 modesEl.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b && !b.hidden) act(b.dataset.act); });
 addEventListener('keydown', (e) => {
-	if (startCommitted || e.ctrlKey || e.altKey || e.metaKey || !document.getElementById('loading')) return;
+	if (editingInput(e) || startCommitted || e.ctrlKey || e.altKey || e.metaKey || !document.getElementById('loading')) return;
 	const b = modeButtons.find((x) => !x.hidden && ACTS[x.dataset.act][2].includes(e.code));
 	if (!b) return;
 	act(b.dataset.act);
@@ -335,6 +338,7 @@ showModes();
 	// 仍在运行但频繁换页或死锁的标签页则可以报告：显示提示，并在服务器日志中保留带时间戳的记录用于诊断。
 	setInterval(() => {
 		if (ready) return;
+		if (ROOM_GAME && !onlineConnectionReady) { lastActivity = performance.now(); return; }
 		if (waitingChoice) { if (!startMode) { lastActivity = performance.now(); return; } waitingChoice = false; label.textContent = translateUiText(lastLabel); }
 		const quiet = (performance.now() - lastActivity) / 1000;
 		if (quiet > 30) {
@@ -369,7 +373,7 @@ if (!ROOM_GAME) {
 	const el = document.getElementById('fps');
 	let on = false;
 	new BroadcastChannel('game-fps').onmessage = (ev) => { if (on) el.textContent = Math.round(ev.data.fps) + ' 帧/秒'; };
-	const isToggle = (e) => e.code === 'Equal' && !e.ctrlKey && !e.altKey && !e.metaKey;
+	const isToggle = (e) => !editingInput(e) && e.code === 'Equal' && !e.ctrlKey && !e.altKey && !e.metaKey;
 	addEventListener('keydown', (e) => {
 		if (!isToggle(e)) return;
 		e.stopImmediatePropagation(); e.preventDefault();
@@ -407,8 +411,29 @@ async function dropOldCache() {
 }
 let lowMemory = false;		// 在下方赋值（模块作用域，后面的 ?mem 内存监测也会使用）。
 let startSize = [1280, 720], wantSize = null;		// 在下方赋值（模块作用域，installInput 会使用这些变量）。
+let publicSession = null;
+if (ROOM_GAME && onlinePreferences) {
+	try {
+		publicSession = await startPublicSession(onlinePreferences, ({ phase, text }) => {
+			const label = document.getElementById('label');
+			if (label && !onlineConnectionReady) label.textContent = phase === 'joined' ? '加入战局中' : text;
+			if (onlineConnectionReady && phase === 'reconnecting') { hud.textContent = text; hud.style.color = '#f2b178'; }
+			else if (onlineConnectionReady && phase === 'joined') { hud.textContent = '公共战局连接已恢复'; hud.style.color = ''; }
+		});
+		await publicSession.ready;
+		onlineConnectionReady = true;
+	} catch (error) {
+		publicSession?.close();
+		joinModal.setMessage(error.message);
+		joinModal.open();
+		document.getElementById('label').textContent = '连接未完成，请确认战局服务器地址';
+	}
+} else if (ROOM_GAME) {
+	document.getElementById('label').textContent = '请输入昵称与服务器地址以加入战局';
+	joinModal.open();
+}
 if (!crossOriginIsolated) { document.getElementById('label').textContent = '页面未启用跨域隔离：请通过 HTTPS 或 localhost 打开，并确认服务器发送了 COOP/COEP 响应头。'; document.getElementById('label').style.color = '#e66'; }
-else {
+else if (onlineConnectionReady) {
 	const offscreen = canvas.transferControlToOffscreen();
 	await dropOldCache();
 	// 低内存配置：?low=1 强制启用，?low=0 禁用；默认条件为 navigator.deviceMemory <= 4（浏览器将 4 GB 及以下的内存报告为 4）：
@@ -448,7 +473,7 @@ const ENGINE_ARGS = ['-fastscriptcore'];
 // 等待还会为每帧增加 15 毫秒。下方使用空回调；游玩时该线程不会在此执行其他工作。
 setInterval(() => {}, 1);
 const worker = new Worker(BASE + '/loader.js');
-	const multiplayerAdapter = ROOM_GAME ? installGameAdapter(worker) : null;
+	const multiplayerAdapter = ROOM_GAME ? installGameAdapter(worker, publicSession) : null;
 	worker.onmessage = (ev) => {
 		multiplayerAdapter?.onWorkerMessage(ev.data);
 		if (ev.data.hud) hud.textContent = translateUiText(ev.data.hud);
@@ -592,7 +617,8 @@ function installInput(memory, block) {
 	const FLY_ALIAS = { KeyI: 'Numpad8', KeyK: 'Numpad2', KeyJ: 'Numpad4', KeyL: 'Numpad6', KeyU: 'Numpad7', KeyO: 'Numpad9' };
 	const held = new Set();
 	const syncFlyAlias = () => { for (const [src, target] of Object.entries(FLY_ALIAS)) Atomics.store(keys, VK[target], held.has(src) || held.has(target) ? 0x80 : 0); };
-	addEventListener('keydown', (e) => {
+addEventListener('keydown', (e) => {
+		if (editingInput(e)) return;
 		if (stopOnlineDebugKey(e)) return;
 		if (passThrough(e)) return;
 		e.preventDefault();
@@ -608,7 +634,8 @@ function installInput(memory, block) {
 			if (((head - Atomics.load(w, TAIL)) >>> 0) < 64) { U16[head & 63] = e.code === 'Enter' ? 13 : 8; Atomics.store(w, HEAD, (head + 1) | 0); }
 		}
 	});
-	addEventListener('keyup', (e) => {
+addEventListener('keyup', (e) => {
+		if (editingInput(e)) return;
 		if (stopOnlineDebugKey(e)) return;
 		if (passThrough(e)) return;
 		e.preventDefault();
@@ -617,6 +644,7 @@ function installInput(memory, block) {
 		held.delete(e.code); syncFlyAlias();
 	});
 	const releaseAll = () => { held.clear(); for (let i = 0; i < 256; i++) Atomics.store(keys, i, 0); Atomics.store(w, BTN, 0); };
+	addEventListener('online-modal-open', releaseAll);
 	addEventListener('focus', () => { trace('window focus'); Atomics.store(w, FOCUS, 1); });
 	addEventListener('blur', () => { trace('window blur (all keys released)'); Atomics.store(w, FOCUS, 0); releaseAll(); });
 
@@ -627,7 +655,7 @@ function installInput(memory, block) {
 		e.preventDefault();
 	});
 	addEventListener('mouseup', (e) => { Atomics.and(w, BTN, ~(1 << [0, 2, 1, 3, 4][e.button])); });
-	addEventListener('contextmenu', (e) => e.preventDefault());
+	addEventListener('contextmenu', (e) => { if (!editingInput(e)) e.preventDefault(); });
 	document.addEventListener('pointerlockchange', () => { trace('pointer lock ' + (locked() ? 'on' : 'off')); Atomics.store(w, LOCKED, locked() ? 1 : 0); });
 	addEventListener('mousemove', (e) => {
 		const r = canvas.getBoundingClientRect();
@@ -651,6 +679,7 @@ function installInput(memory, block) {
 	// 小数会累积。引擎每帧消耗一个刻度（browser_input_wasm.cpp），因此较长的滚动会持续数帧。
 	let wheelAccum = 0;
 	addEventListener('wheel', (e) => {
+		if (editingInput(e)) return;
 		e.preventDefault();
 		wheelAccum += -e.deltaY / (e.deltaMode === 0 ? 100 : e.deltaMode === 1 ? 3 : 1);
 		const n = Math.trunc(wheelAccum);

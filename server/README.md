@@ -1,8 +1,8 @@
-# GTA V 公共战局服务端 0.1.0-public
+# GTA V 公共战局服务端 0.2.1-public
 
 所有玩家连接同一台服务器后，输入昵称就会自动进入唯一的 `PUBLIC` 公共战局。战局常驻，即使没有玩家也保留；无需创建房间、输入房间码、准备或等待房主开始。地图固定为 GTA V，游戏使用沙盒模式。
 
-服务端已经实现 WebSocket 连接、成员与聊天、角色状态和射击事件转发、新玩家状态快照及断线清理。真实游戏中的实体桥仍在试验验证，伤害判定、击杀与载具同步尚未实现。健康接口的 `game_sync: false` 表示真实游戏同步尚未完成稳定验证，`state_transport: true` 表示状态转发接口已经提供。
+服务端已经实现 WebSocket 连接、成员与聊天、角色状态和射击事件转发、新玩家状态快照及断线清理。新增服务端权威普通枪械伤害、击杀计分、四秒重生和六十秒身份恢复。真实游戏中的实体桥仍在试验验证，载具同步尚未实现。健康接口的 `game_sync: false` 表示真实游戏同步尚未完成稳定验证，`state_transport: true` 表示状态转发接口已经提供。
 
 本服务使用自有协议，与原 GTA Online 的身份、会话及网络包协议不同。项目保留原网络代码，但其浏览器适配存在空实现；不能把本 JAR 当成兼容原 GTA Online 的私服。具体证据见完整项目的 `docs/原线上模式审计.md`。
 
@@ -45,11 +45,11 @@ java -jar multiplayer-server.jar --host 127.0.0.1 --port 8787
 | `--max-clients` | `128` | 同时连接上限，范围 1～1024，也作为公共战局的最大人数 |
 | `--help` | — | 显示帮助并退出 |
 
-战局、成员和最新状态只保存在内存中，服务重启后玩家需要重新连接。空战局一直存在。
+战局、成员和最新状态只保存在内存中。断线六十秒内可以用恢复凭据保留身份、生命值、分数与位置；服务器进程重启后需要重新加入。空战局一直存在。
 
 ## 玩家连接与本机多开
 
-每位玩家在自己的电脑上运行完整本地项目，从首页进入“多人”，填写公共服务器的 IP 与昵称。连接成功后自动加入公共战局，再使用页面的游戏入口进入本地 GTA V 沙盒。
+每位玩家在自己的电脑上运行完整本地项目，从首页进入“多人”，填写公共服务器的 IP 与昵称。连接成功后自动加入公共战局，连接成功后在同一页面进入在线 GTA V 沙盒，不再保留大厅标签页。
 
 也可以在完整项目根目录直接打开多人页面：
 
@@ -60,7 +60,7 @@ python3 serve_local.py --multiplayer --room-server 192.168.1.20:8787 --open
 本机模拟两个用户并一起启动 Java 服务端：
 
 ```sh
-python3 serve_local.py --start-room-server --instances 2 --open
+python3 serve_local.py --start-room-server --room-server 127.0.0.1:8787 --instances 2 --open
 ```
 
 该命令启动本机 Java 服务与两个本地 HTTP 实例，通常使用 8000、8001 两个端口；端口占用时会自动顺延并打印实际地址。两个页面使用不同端口的浏览器存储与引擎频道，可填不同昵称进入同一公共战局。按 `Ctrl+C` 一起关闭由该命令启动的 Java 服务和本地实例。`--instances` 支持 1～8 个实例。
@@ -74,7 +74,7 @@ python3 serve_local.py --instances 2 --room-server 127.0.0.1:8787 --open
 完整 Windows 项目也可使用自带的 Python：
 
 ```bat
-runtime\python.exe serve_local.py --start-room-server --instances 2 --open
+runtime\python.exe serve_local.py --start-room-server --room-server 127.0.0.1:8787 --instances 2 --open
 ```
 
 `--start-room-server` 只启动 `localhost` 或 `127.0.0.1` 上的本机服务；远程 JAR 需要在远程机器独立运行。可以用 `--java` 指定 Java 可执行文件路径。
@@ -103,7 +103,7 @@ runtime\python.exe serve_local.py --start-room-server --instances 2 --open
 | `state_transport: true` | 状态转发已实现 |
 | `game_sync: false` | 真实游戏同步尚未完成稳定验证 |
 
-这些统计不包含姓名或角色位置。`capabilities` 为 `public_session`、`chat`、`player_state`、`shoot_events`。
+这些统计不包含姓名或角色位置。`capabilities` 为 `public_session`、`chat`、`player_state`、`shoot_events`、`appearance`、`combat`、`resume`。
 
 ## 公共战局协议
 
@@ -211,3 +211,35 @@ python3 -B tools/tests/test_multiplayer.py
 ```
 
 测试使用真实 JAR 和多个 WebSocket 客户端，验证公共战局自动加入、晚加入快照、状态/射击/聊天转发、序号与字段范围、退出清理和帧格式。它验证服务协议；真实游戏角色互见、伤害及载具需要另外使用实际游戏客户端验证。
+
+## 权威战斗与连接恢复（0.2）
+
+声明支持 `combat` 和 `resume` 的客户端，发送：
+
+```json
+{"type":"hello","name":"玩家昵称","capabilities":["combat","resume"]}
+```
+
+`profile` 返回稳定 `client_id`、秘密 `resume_token`、状态与射击的已接受序号、出生点、
+生命值、存活状态和计分。恢复凭据只保留在客户端当前会话存储中，不要输出到日志。
+重连时在 `hello` 加入同一 `client_id` 和 `resume_token`，恢复服务端的原角色；
+同一身份的旧连接会被替换。客户端只凭昵称或玩家 ID 不能恢复他人身份。
+
+服务器事件包括 `combat_state`、`damage`、`death`、`respawn`、`correction`。
+客户端自己的 `health` 仅为兼容字段，服务端不接受它来回血或更改生命值。
+伤害按普通枪械规则、射击冷却和最近的玩家胶囊计算；拒绝远离角色的射击起点、
+无近期状态、死亡射击和额外的受害者/击杀字段。移动采用累计速度预算，异常跳变会被纠正。
+玩家死亡四秒后由服务器广播统一重生；枪械视觉转播不再独立扣血。
+
+**当前射线判定没有墙体、地形和载具碰撞数据，不保证遮挡和真实游戏物理。**
+载具、爆炸和近战未作为完整权威玩法实现；这是公共战局原型。
+健康接口增加 `combat_authoritative: true`、`transport: "websocket"`、`resume_ttl_seconds: 60`。
+`game_sync: false` 继续表示游戏内完整效果尚未完成稳定验证。
+
+0.2.1 增加应用层 `ping` / `pong` 心跳与 `sync` 完整快照。
+声明支持 `heartbeat` 的客户端可以发送 `{"type":"ping","nonce":1}`，收到同序号 `pong`。
+已加入战局的客户端可发送 `{"type":"sync"}`，获取当前成员、角色及所支持的战斗快照，
+不会重置玩家身份、生命值、分数或消息序号。浏览器客户端每五秒心跳、十秒快照，
+二十五秒没有服务器响应则自动重连；网络恢复与页面激活时及时尝试恢复连接。
+
+新增回归测试：`python3 -B tools/tests/test_combat_world.py`。目前旧协议 8 项和权威战斗/恢复 10 项通过。

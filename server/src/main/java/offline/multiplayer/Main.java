@@ -33,14 +33,12 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** 独立大厅服务及已校验的状态转发；游戏角色同步仍需客户端引擎桥验证。 */
+/** 独立公共战局服务：鉴权恢复、权威移动校验、伤害、死亡、重生及状态分发。 */
 public final class Main {
-    private static final String VERSION = "0.1.0-public";
-    private static final List<String> CAPABILITIES = List.of("public_session", "chat", "player_state", "shoot_events");
+    private static final String VERSION = "0.2.1-public";
+    private static final List<String> CAPABILITIES = List.of("public_session", "chat", "player_state", "shoot_events", "appearance", "combat", "resume", "heartbeat", "snapshot");
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final int MAX_MESSAGE_BYTES = 64 * 1024;
-    private static final long MAX_SAFE_INTEGER = 9007199254740991L;
-    private static final long MAX_UNSIGNED_INT = 4294967295L;
 
     private Main() {}
 
@@ -72,7 +70,7 @@ public final class Main {
                         + "  --port 端口          监听端口，默认 8787；0 为系统分配\n"
                         + "  --max-clients 人数   连接上限，默认 128（1–1024）\n"
                         + "所有玩家自动进入同一个公共战局；无需房间码、准备或房主。\n"
-                        + "服务端提供聊天与状态转发；角色同步仍需客户端引擎桥验证。\n"
+                        + "服务端负责移动校验、枪械伤害、击杀、重生与断线恢复；客户端加载游戏资源。\n"
                         + "按 Ctrl+C 停止服务。");
                     return null;
                 }
@@ -133,13 +131,13 @@ public final class Main {
                 thread.setDaemon(true);
                 return thread;
             });
-            maintenance.scheduleAtFixedRate(lobby::maintain, 1, 1, TimeUnit.SECONDS);
+            maintenance.scheduleAtFixedRate(lobby::maintain, 500, 500, TimeUnit.MILLISECONDS);
         }
 
         void run() throws IOException {
             String displayHost = config.host().contains(":") ? "[" + config.host() + "]" : config.host();
             System.out.println("多人大厅已启动：http://" + displayHost + ":" + listener.getLocalPort()
-                + "（WebSocket：/ws，单个 GTA V 公共战局；状态转发已就绪，角色同步需客户端验证）");
+                + "（WebSocket：/ws，单个 GTA V 公共战局；移动与战斗校验已就绪，断线身份保留 60 秒）");
             while (!closed.get()) {
                 try {
                     Socket socket = listener.accept();
@@ -179,7 +177,7 @@ public final class Main {
                     http(socket, 200, "OK", "text/html; charset=utf-8", "<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\">"
                         + "<meta name=\"viewport\" content=\"width=device-width\"><title>GTA V 多人大厅服务</title>"
                         + "<body><h1>GTA V 公共战局服务正在运行</h1><p>请在游戏页面的“多人”中输入本服务器地址。"
-                        + "</p><p>输入昵称后自动加入唯一公共战局，支持聊天与状态转发。游戏角色同步仍需客户端引擎桥验证。"
+                        + "</p><p>输入昵称后自动加入唯一公共战局，支持状态同步、枪械伤害、击杀及断线恢复。射击检测暂不包含地图遮挡。"
                         + "</p><p>WebSocket 接口：/ws；<a href=\"/health\">服务状态</a></p></body></html>", Map.of());
                     return;
                 }
@@ -333,71 +331,95 @@ public final class Main {
         output.flush();
     }
 
+    /** 物理连接与玩家身份分开；断线身份最多保留一分钟，重连不得自行选择其他玩家。 */
     private static final class Lobby {
         private final Object lock = new Object();
         private final LinkedHashMap<String, Client> clients = new LinkedHashMap<>();
-        private final LinkedHashMap<String, Room> rooms = new LinkedHashMap<>();
+        private final LinkedHashMap<String, Session> sessions = new LinkedHashMap<>();
         private final int maxClients;
-        private final Room publicRoom;
+        private final CombatWorld combat = new CombatWorld();
         private long shotEventsReceived;
         private boolean closed;
+        private static final long SESSION_TTL_MILLIS = 60_000;
+        private static final List<String> COMBAT_EVENTS = List.of("combat_state", "damage", "death", "respawn", "correction");
 
-        Lobby(int maxClients) {
-            this.maxClients = maxClients;
-            publicRoom = new Room("PUBLIC", "GTA V 公共战局", maxClients);
-            rooms.put(publicRoom.id, publicRoom);
-        }
+        Lobby(int maxClients) { this.maxClients = maxClients; }
 
         void register(Client client) throws HttpProblem {
             synchronized (lock) {
-                if (closed) throw new HttpProblem(503, "Service Unavailable", "大厅服务正在关闭");
-                if (clients.size() >= maxClients) throw new HttpProblem(503, "Service Unavailable", "大厅连接人数已达上限，请稍后重试");
-                clients.put(client.id, client);
+                if (closed) throw new HttpProblem(503, "Service Unavailable", "战局服务正在关闭");
+                if (clients.size() >= maxClients) throw new HttpProblem(503, "Service Unavailable", "战局连接人数已达上限，请稍后重试");
+                clients.put(client.connectionId, client);
             }
         }
 
         void sendInitial(Client client) {
             synchronized (lock) {
                 client.send(object("type", "welcome", "protocol", 1, "client_id", client.id, "capabilities", CAPABILITIES,
-                    "public_session", true, "server_version", VERSION, "room", roomState(publicRoom).get("room")));
+                    "public_session", true, "server_version", VERSION, "room", roomState().get("room")));
             }
         }
 
         Map<String, Object> snapshot() {
             synchronized (lock) {
-                long statePlayers = publicRoom.members.values().stream().filter(client -> client.lastState != null).count();
-                return object("protocol", 1, "server_version", VERSION, "clients", clients.size(), "players", publicRoom.members.size(), "state_players", statePlayers,
-                    "shot_events_received", shotEventsReceived, "rooms", 1,
-                    "public_session", true, "capabilities", CAPABILITIES, "map", "gta5", "game_sync", false, "state_transport", true);
+                long connected = sessions.values().stream().filter(Session::connected).count();
+                return object("protocol", 1, "server_version", VERSION, "clients", clients.size(), "players", connected,
+                    "retained_players", sessions.size(), "state_players", combat.statePlayers(),
+                    "shot_events_received", shotEventsReceived, "rooms", 1, "public_session", true,
+                    "capabilities", CAPABILITIES, "map", "gta5", "game_sync", false, "state_transport", true,
+                    "combat_authoritative", true, "transport", "websocket", "resume_ttl_seconds", 60);
             }
         }
 
         void process(Client client, Map<String, Object> message) {
             synchronized (lock) {
-                if (closed || !clients.containsKey(client.id) || client.closed.get()) return;
+                if (closed || clients.get(client.connectionId) != client || client.closed.get()) return;
                 try {
                     String type = string(message.get("type"), "消息类型", 40, false);
                     switch (type) {
-                        case "hello" -> {
-                            fields(message, List.of("type", "name"));
-                            client.name = string(message.get("name"), "昵称", 24, false);
-                            client.send(object("type", "profile", "client_id", client.id, "name", client.name));
-                            joinPublic(client);
+                        case "hello" -> hello(client, message);
+                        case "ping" -> {
+                            fields(message, List.of("type", "nonce"));
+                            long nonce = safeInteger(message.get("nonce"), "心跳序号");
+                            // 应用层心跳只确认此连接可双向传输，不改变身份或战斗状态。
+                            client.send(object("type", "pong", "nonce", nonce));
+                        }
+                        case "sync" -> {
+                            fields(message, List.of("type"));
+                            requireSession(client);
+                            client.send(roomState());
+                            client.send(combat.worldState());
+                            if (client.combatCapable) client.send(combat.combatState());
                         }
                         case "list_rooms" -> client.send(roomList());
                         case "create_room", "set_ready", "launch" -> throw problem("public_session_only", "所有玩家共用一个公共战局，无需建房、准备或开始");
                         case "join_room" -> {
                             fields(message, List.of("type", "room_id"));
                             if (!"PUBLIC".equals(message.get("room_id"))) throw problem("public_session_only", "只能加入 PUBLIC 公共战局");
-                            joinPublic(client);
+                            if (client.session == null) {
+                                List<String> declared = new ArrayList<>();
+                                if (client.combatCapable) declared.add("combat");
+                                if (client.resumeCapable) declared.add("resume");
+                                hello(client, object("type", "hello", "name", client.name, "capabilities", declared));
+                            } else {
+                                requireSession(client);
+                                client.send(roomState());
+                                client.send(combat.worldState());
+                                if (client.combatCapable) client.send(combat.combatState());
+                            }
                         }
-                        case "leave_room" -> { fields(message, List.of("type")); leaveRoom(client, true); }
+                        case "leave_room" -> {
+                            fields(message, List.of("type"));
+                            requireSession(client);
+                            leave(client, false);
+                            client.send(object("type", "room_state", "room", null));
+                        }
                         case "chat" -> {
                             fields(message, List.of("type", "text"));
-                            Room room = requireRoom(client);
+                            Session session = requireSession(client);
                             String text = string(message.get("text"), "聊天内容", 500, true);
-                            broadcast(room, object("type", "chat", "room_id", room.id, "sender_id", client.id,
-                                "name", client.name, "text", text, "time", Instant.now().toString()));
+                            broadcast(object("type", "chat", "room_id", "PUBLIC", "sender_id", session.id,
+                                "name", session.name, "text", text, "time", Instant.now().toString()));
                         }
                         case "player_state" -> playerState(client, message);
                         case "shot_event" -> shotEvent(client, message);
@@ -405,58 +427,92 @@ public final class Main {
                     }
                 } catch (LobbyProblem problem) {
                     client.error(problem.code, problem.getMessage());
+                } catch (CombatWorld.Rejection rejection) {
+                    client.error(rejection.code, rejection.getMessage());
                 }
             }
         }
 
-        private void joinPublic(Client client) {
-            publicRoom.members.put(client.id, client);
-            client.roomId = publicRoom.id;
-            client.ready = false;
-            broadcastRoom(publicRoom);
-            client.send(worldState(publicRoom));
+        private void hello(Client client, Map<String, Object> message) throws LobbyProblem {
+            fields(message, List.of("type", "name", "client_id", "resume_token", "capabilities"));
+            String name = string(message.get("name"), "昵称", 24, false);
+            boolean combatCapable = false;
+            boolean resumeCapable = false;
+            if (message.containsKey("capabilities")) {
+                if (!(message.get("capabilities") instanceof List<?> values) || values.size() > 16
+                        || values.stream().anyMatch(value -> !(value instanceof String text) || text.length() > 40))
+                    throw problem("invalid_message", "客户端能力声明必须是文本数组");
+                combatCapable = values.contains("combat");
+                resumeCapable = values.contains("resume");
+            }
+            boolean hasId = message.containsKey("client_id");
+            boolean hasToken = message.containsKey("resume_token");
+            if (hasId != hasToken) throw problem("resume_denied", "恢复连接需要完整的玩家身份和恢复凭据");
+            Session session;
+            if (client.session != null) {
+                if (hasId) throw problem("invalid_message", "此连接已加入战局，请勿重复恢复身份");
+                session = requireSession(client);
+            } else if (hasId) {
+                String id = string(message.get("client_id"), "玩家身份", 80, false);
+                String token = string(message.get("resume_token"), "恢复凭据", 128, false);
+                session = sessions.get(id);
+                long now = System.currentTimeMillis();
+                if (session == null || !session.resumable || (!session.connected() && now - session.disconnectedAt >= SESSION_TTL_MILLIS)
+                        || !MessageDigest.isEqual(session.token.getBytes(StandardCharsets.US_ASCII), token.getBytes(StandardCharsets.US_ASCII)))
+                    throw problem("resume_denied", "恢复凭据无效或已过期，请重新加入战局");
+                Client previous = session.client;
+                if (previous != null && previous != client) previous.disconnect();
+            } else {
+                if (sessions.size() >= maxClients) throw problem("room_full", "公共战局人数已达上限，请稍后重试");
+                session = new Session(client.id, name, resumeCapable);
+                sessions.put(session.id, session);
+            }
+            session.name = name;
+            client.name = name;
+            session.client = client;
+            session.disconnectedAt = 0;
+            client.id = session.id;
+            client.session = session;
+            client.combatCapable = combatCapable;
+            client.resumeCapable = resumeCapable;
+            Map<String, Object> profile = object("type", "profile", "client_id", session.id, "name", name);
+            profile.putAll(combat.join(session.id));
+            if (resumeCapable) profile.put("resume_token", session.token);
+            client.send(profile);
+            broadcast(roomState());
+            client.send(combat.worldState());
+            broadcast(combat.combatState());
         }
 
-        private void playerState(Client client, Map<String, Object> message) throws LobbyProblem {
-            Room room = requireLaunchedRoom(client);
-            fields(message, List.of("type", "seq", "position", "heading", "model", "health", "weapon", "shooting"));
-            long sequence = longInteger(message.get("seq"), 0, MAX_SAFE_INTEGER, "状态序号");
-            List<Double> position = coordinates(message.get("position"), "角色坐标");
-            double heading = finiteNumber(message.get("heading"), 0, 360, "角色朝向");
-            long model = longInteger(message.get("model"), 0, MAX_UNSIGNED_INT, "角色模型");
-            int health = integer(message.get("health"), 0, 1000, "本地角色生命值");
-            long weapon = longInteger(message.get("weapon"), 0, MAX_UNSIGNED_INT, "当前武器");
-            Object shooting = message.get("shooting");
-            if (!(shooting instanceof Boolean)) throw problem("invalid_message", "射击状态必须为 true 或 false");
-            if (sequence <= client.lastStateSequence) throw problem("stale_seq", "角色状态序号必须严格递增");
+        private Session requireSession(Client client) throws LobbyProblem {
+            Session session = client.session;
+            if (session == null || sessions.get(session.id) != session || session.client != client)
+                throw problem("not_in_room", "请先发送昵称加入公共战局");
+            return session;
+        }
+
+        private void playerState(Client client, Map<String, Object> message) throws LobbyProblem, CombatWorld.Rejection {
+            Session session = requireSession(client);
+            fields(message, List.of("type", "seq", "position", "heading", "model", "health", "weapon", "shooting", "appearance"));
+            Map<String, Object> checked = new LinkedHashMap<>(message);
+            if (message.containsKey("appearance")) checked.put("appearance", appearance(message.get("appearance")));
             if (!client.stateRate.take()) throw problem("rate_limited", "角色状态更新过快，持续更新上限为每秒 30 次");
-            Map<String, Object> state = object("seq", sequence, "position", position, "heading", heading,
-                "model", model, "health", health, "weapon", weapon, "shooting", shooting);
-            client.lastStateSequence = sequence;
-            client.lastState = state;
-            broadcast(room, object("type", "player_state", "room_id", room.id, "player_id", client.id,
-                "state", state, "time", Instant.now().toString()));
+            CombatWorld.Outcome outcome = combat.updateState(session.id, checked, System.currentTimeMillis());
+            if (!outcome.accepted()) {
+                if (client.combatCapable) outcome.events().forEach(client::send);
+                client.error("invalid_movement", "移动距离超过服务端限制，已纠正角色位置");
+                return;
+            }
+            outcome.events().forEach(this::broadcast);
         }
 
-        private void shotEvent(Client client, Map<String, Object> message) throws LobbyProblem {
-            Room room = requireLaunchedRoom(client);
+        private void shotEvent(Client client, Map<String, Object> message) throws LobbyProblem, CombatWorld.Rejection {
+            Session session = requireSession(client);
             fields(message, List.of("type", "seq", "origin", "target", "weapon"));
-            long sequence = longInteger(message.get("seq"), 0, MAX_SAFE_INTEGER, "射击序号");
-            List<Double> origin = coordinates(message.get("origin"), "射击起点");
-            List<Double> target = coordinates(message.get("target"), "射击目标点");
-            long weapon = longInteger(message.get("weapon"), 0, MAX_UNSIGNED_INT, "射击武器");
-            if (sequence <= client.lastShotSequence) throw problem("stale_seq", "射击事件序号必须严格递增");
             if (!client.shotRate.take()) throw problem("rate_limited", "射击事件过快，持续发送上限为每秒 30 次");
-            Map<String, Object> event = object("seq", sequence, "origin", origin, "target", target, "weapon", weapon);
-            client.lastShotSequence = sequence;
+            List<Map<String, Object>> events = combat.shoot(session.id, message, System.currentTimeMillis());
             shotEventsReceived++;
-            // 只转发射击数据，不接受命中、击杀或其他玩家生命值的权威声明。
-            broadcast(room, object("type", "shot_event", "room_id", room.id, "player_id", client.id,
-                "event", event, "time", Instant.now().toString()));
-        }
-
-        private Room requireLaunchedRoom(Client client) throws LobbyProblem {
-            return requireRoom(client);
+            events.forEach(this::broadcast);
         }
 
         private void fields(Map<String, Object> message, List<String> allowed) throws LobbyProblem {
@@ -464,66 +520,126 @@ public final class Main {
                 throw problem("invalid_message", "消息包含不允许的字段");
         }
 
-        private Room requireRoom(Client client) throws LobbyProblem {
-            Room room = rooms.get(client.roomId);
-            if (room == null) throw problem("not_in_room", "请先发送昵称加入公共战局");
-            return room;
+        private Map<String, Object> appearance(Object value) throws LobbyProblem {
+            if (!(value instanceof Map<?, ?> input)) throw problem("invalid_message", "角色外观必须是对象");
+            if (input.keySet().stream().anyMatch(key -> !List.of("components", "props", "overlays", "hair").contains(key)))
+                throw problem("invalid_message", "角色外观包含不允许的字段");
+            List<?> components = appearanceList(input.get("components"), 12, "服装组件");
+            List<Object> checkedComponents = new ArrayList<>(12);
+            for (Object component : components) {
+                List<?> parts = appearanceList(component, 3, "服装组件参数");
+                checkedComponents.add(List.of(integer(parts.get(0), 0, 1024, "服装编号"),
+                    integer(parts.get(1), 0, 255, "服装纹理"), integer(parts.get(2), 0, 3, "服装调色板")));
+            }
+            List<?> props = appearanceList(input.get("props"), 8, "角色饰品");
+            List<Object> checkedProps = new ArrayList<>(8);
+            for (Object prop : props) {
+                List<?> parts = appearanceList(prop, 2, "饰品参数");
+                int drawable = integer(parts.get(0), -1, 1024, "饰品编号");
+                int texture = integer(parts.get(1), -1, 255, "饰品纹理");
+                if (drawable >= 0 && texture < 0) throw problem("invalid_message", "已佩戴饰品的纹理不能为负数");
+                checkedProps.add(List.of(drawable, texture));
+            }
+            Map<String, Object> checked = object("components", checkedComponents, "props", checkedProps);
+            if (input.containsKey("overlays")) {
+                List<?> overlays = appearanceList(input.get("overlays"), 13, "角色妆容");
+                List<Object> checkedOverlays = new ArrayList<>(13);
+                for (Object overlay : overlays) {
+                    List<?> parts = appearanceList(overlay, 5, "妆容参数");
+                    checkedOverlays.add(List.of(integer(parts.get(0), 0, 255, "妆容编号"),
+                        finiteNumber(parts.get(1), 0, 1, "妆容透明度"),
+                        integer(parts.get(2), 0, 2, "妆容颜色类型"),
+                        integer(parts.get(3), 0, 63, "妆容主色"), integer(parts.get(4), 0, 63, "妆容副色")));
+                }
+                checked.put("overlays", checkedOverlays);
+            }
+            if (input.containsKey("hair")) {
+                List<?> hair = appearanceList(input.get("hair"), 2, "发色参数");
+                checked.put("hair", List.of(integer(hair.get(0), 0, 63, "发色"), integer(hair.get(1), 0, 63, "发色高光")));
+            }
+            return checked;
         }
 
-        private void leaveRoom(Client client, boolean notify) {
-            Room room = rooms.get(client.roomId);
-            client.roomId = null;
-            client.ready = false;
-            client.lastState = null;
-            if (room != null) {
-                room.members.remove(client.id);
-                broadcastRoom(room);
+        private List<?> appearanceList(Object value, int count, String name) throws LobbyProblem {
+            if (!(value instanceof List<?> parts) || parts.size() != count)
+                throw problem("invalid_message", name + "必须包含 " + count + " 个参数");
+            return parts;
+        }
+
+
+        private void leave(Client client, boolean retain) {
+            Session session = client.session;
+            client.session = null;
+            if (session == null || session.client != client) return;
+            session.client = null;
+            session.disconnectedAt = System.currentTimeMillis();
+            combat.setConnected(session.id, false);
+            // 不支持恢复凭据的旧客户端无法恢复身份，可立即清理，避免占用战局。
+            if (!retain || !session.resumable) {
+                sessions.remove(session.id);
+                combat.remove(session.id);
             }
-            if (notify) client.send(object("type", "room_state", "room", null));
+            broadcast(roomState());
+            broadcast(combat.combatState());
         }
 
         void remove(Client client) {
             synchronized (lock) {
-                if (clients.remove(client.id) == null) return;
-                leaveRoom(client, false);
+                if (clients.remove(client.connectionId) != client) return;
+                leave(client, true);
             }
         }
 
         private Map<String, Object> roomList() {
-            List<Object> list = new ArrayList<>();
-            for (Room room : rooms.values()) list.add(object("id", room.id, "name", room.name, "map", "gta5",
-                "max_players", room.capacity, "players", room.members.size(), "phase", "launched", "host_id", null));
-            return object("type", "room_list", "rooms", list);
+            long count = sessions.values().stream().filter(Session::connected).count();
+            return object("type", "room_list", "rooms", List.of(object("id", "PUBLIC", "name", "GTA V 公共战局", "map", "gta5",
+                "max_players", maxClients, "players", count, "phase", "launched", "host_id", null)));
         }
 
-        private Map<String, Object> roomState(Room room) {
+        private Map<String, Object> roomState() {
             List<Object> members = new ArrayList<>();
-            for (Client client : room.members.values()) members.add(object("id", client.id, "name", client.name, "ready", client.ready));
-            return object("type", "room_state", "room", object("id", room.id, "name", room.name, "map", "gta5",
-                "max_players", room.capacity, "phase", "launched", "host_id", null, "members", members));
+            for (Session session : sessions.values()) members.add(object("id", session.id, "name", session.name,
+                "ready", false, "connected", session.connected()));
+            return object("type", "room_state", "room", object("id", "PUBLIC", "name", "GTA V 公共战局", "map", "gta5",
+                "max_players", maxClients, "phase", "launched", "host_id", null, "members", members));
         }
 
-        private Map<String, Object> worldState(Room room) {
-            List<Object> states = new ArrayList<>();
-            for (Client client : room.members.values()) {
-                if (client.lastState != null) states.add(object("player_id", client.id, "state", client.lastState));
+        private void broadcast(Map<String, Object> message) {
+            boolean combatOnly = COMBAT_EVENTS.contains(message.get("type"));
+            byte[] bytes = textFrame(message);
+            for (Session session : sessions.values()) {
+                Client client = session.client;
+                if (session.connected() && (!combatOnly || client.combatCapable)) client.enqueue(bytes, false);
             }
-            return object("type", "world_state", "room_id", room.id, "states", states);
-        }
-
-        private void broadcastRoom(Room room) { broadcast(room, roomState(room)); }
-
-        private void broadcast(Room room, Map<String, Object> message) {
-            byte[] frame = textFrame(message);
-            for (Client client : room.members.values()) client.enqueue(frame, false);
         }
 
         void maintain() {
             List<Client> current;
-            synchronized (lock) { current = new ArrayList<>(clients.values()); }
+            synchronized (lock) {
+                if (closed) return;
+                long now = System.currentTimeMillis();
+                boolean changed = false;
+                var iterator = sessions.values().iterator();
+                while (iterator.hasNext()) {
+                    Session session = iterator.next();
+                    if (session.client == null && now - session.disconnectedAt >= SESSION_TTL_MILLIS) {
+                        iterator.remove();
+                        combat.remove(session.id);
+                        changed = true;
+                    }
+                }
+                if (changed) { broadcast(roomState()); broadcast(combat.combatState()); }
+                combat.maintain(now).forEach(this::broadcast);
+                current = new ArrayList<>(clients.values());
+            }
             long now = System.nanoTime();
             for (Client client : current) {
                 if (client.closed.get()) continue;
+                // 未完成 hello 的连接不应永久占用名额。
+                if (client.session == null && now - client.acceptedAt > TimeUnit.SECONDS.toNanos(15)) {
+                    client.disconnect();
+                    continue;
+                }
                 long writingSince = client.writingSince;
                 if (writingSince != 0 && now - writingSince > TimeUnit.SECONDS.toNanos(5)) {
                     client.disconnect();
@@ -547,27 +663,41 @@ public final class Main {
                 closed = true;
                 current = new ArrayList<>(clients.values());
                 clients.clear();
-                publicRoom.members.clear();
+                sessions.clear();
             }
             current.forEach(Client::disconnect);
         }
     }
 
-    private static final class Room {
+    private static final class Session {
         final String id;
-        final String name;
-        final int capacity;
-        final LinkedHashMap<String, Client> members = new LinkedHashMap<>();
-        Room(String id, String name, int capacity) {
-            this.id = id; this.name = name; this.capacity = capacity;
+        final String token;
+        final boolean resumable;
+        String name;
+        Client client;
+        long disconnectedAt;
+        Session(String id, String name, boolean resumable) {
+            this.id = id;
+            this.name = name;
+            this.resumable = resumable;
+            byte[] bytes = new byte[32];
+            RANDOM.nextBytes(bytes);
+            token = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
         }
+        boolean connected() { return client != null && !client.closed.get(); }
     }
 
     private static final class Client {
         final Socket socket;
         final InputStream input;
         final Lobby lobby;
-        final String id = java.util.UUID.randomUUID().toString();
+        final String connectionId = java.util.UUID.randomUUID().toString();
+        String id = connectionId;
+        String name = "玩家";
+        final long acceptedAt = System.nanoTime();
+        volatile Session session;
+        boolean combatCapable;
+        boolean resumeCapable;
         final AtomicBoolean closed = new AtomicBoolean();
         final ArrayBlockingQueue<Outbound> outgoing = new ArrayBlockingQueue<>(128);
         final CountDownLatch disconnected = new CountDownLatch(1);
@@ -579,13 +709,7 @@ public final class Main {
         long lastPongAt = System.nanoTime();
         long pingSentAt;
         byte[] ping;
-        String name = "玩家 " + id.substring(0, 4).toUpperCase(Locale.ROOT);
-        String roomId;
-        boolean ready;
         boolean closing;
-        long lastStateSequence = -1;
-        long lastShotSequence = -1;
-        Map<String, Object> lastState;
 
         Client(Socket socket, InputStream input, Lobby lobby) { this.socket = socket; this.input = input; this.lobby = lobby; }
 
@@ -816,14 +940,14 @@ public final class Main {
         throw problem("invalid_message", name + "必须为 " + min + "–" + max + " 的整数");
     }
 
-    private static long longInteger(Object value, long min, long max, String name) throws LobbyProblem {
+    private static long safeInteger(Object value, String name) throws LobbyProblem {
         if (value instanceof BigDecimal decimal) {
             try {
                 long parsed = decimal.longValueExact();
-                if (parsed >= min && parsed <= max) return parsed;
+                if (parsed >= 0 && parsed <= 9_007_199_254_740_991L) return parsed;
             } catch (ArithmeticException ignored) {}
         }
-        throw problem("invalid_message", name + "必须为 " + min + "–" + max + " 的整数");
+        throw problem("invalid_message", name + "必须为 0–9007199254740991 的整数");
     }
 
     private static double finiteNumber(Object value, double min, double max, String name) throws LobbyProblem {
@@ -835,21 +959,13 @@ public final class Main {
         throw problem("invalid_message", name + "必须为 " + min + "–" + max + " 的有限数值");
     }
 
-    private static List<Double> coordinates(Object value, String name) throws LobbyProblem {
-        if (!(value instanceof List<?> list) || list.size() != 3)
-            throw problem("invalid_message", name + "必须包含三个坐标值");
-        List<Double> result = new ArrayList<>(3);
-        for (Object coordinate : list) result.add(finiteNumber(coordinate, -16000, 16000, name));
-        return result;
-    }
-
     private static Map<String, Object> object(Object... pairs) {
         LinkedHashMap<String, Object> result = new LinkedHashMap<>();
         for (int index = 0; index < pairs.length; index += 2) result.put((String) pairs[index], pairs[index + 1]);
         return result;
     }
 
-    /** 仅用于大厅协议的小型严格 JSON 实现：限制深度、数值长度并拒绝重复键。 */
+    /** 用于战局协议的小型严格 JSON 实现：限制深度、数值长度并拒绝重复键。 */
     private static final class Json {
         private final String input;
         private int position;

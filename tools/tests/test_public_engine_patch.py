@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""校验公共战局补丁隔离范围；不启动游戏或覆盖运行中的引擎。"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "tools"))
+from build_native_probe import (
+    DEFAULT_WASM, EXPECTED_MODEL_WRAPPER, HOOK_FUNCTION, ORIGINAL_SHA256,
+    PUBLIC_MODEL_WRAPPER, build, checked_audit, export_map,
+)
+from inspect_native_bridge import WasmAudit
+
+
+class PublicEnginePatchTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source_digest = hashlib.sha256(DEFAULT_WASM.read_bytes()).hexdigest()
+        cls.original = checked_audit(DEFAULT_WASM, True, True)
+        cls.temporary = tempfile.TemporaryDirectory(prefix="gta-public-patch-")
+        cls.outputs, cls.reports, cls.audits = {}, {}, {}
+        for name, entities, public in (("probe", False, False), ("replica", True, False), ("public", True, True)):
+            output, report = build(cls.original, entities, public)
+            path = Path(cls.temporary.name) / f"{name}.wasm"
+            path.write_bytes(output)
+            cls.outputs[name], cls.reports[name], cls.audits[name] = path, report, WasmAudit(path)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temporary.cleanup()
+        if hashlib.sha256(DEFAULT_WASM.read_bytes()).hexdigest() != cls.source_digest:
+            raise AssertionError("原始单机引擎被修改")
+
+    def body(self, audit, index):
+        start, end = audit.bodies[index]
+        return audit.data[start:end]
+
+    def test_readonly_probe_unchanged_and_public_patch_is_isolated(self):
+        # 外观导出仅扩展实体探针；公共开关仍不能改变只读探针产物。
+        self.assertEqual(self.reports["probe"]["prototype"]["sha256"],
+                         "bbf19a89c8327eb580eb3c7a1530dbd1988ac3f4624897aba3f348cf98393dd8")
+        self.assertEqual(len(self.reports["probe"]["additional_exports"]), len(export_map(False)))
+        self.assertEqual(self.body(self.audits["replica"], HOOK_FUNCTION),
+                         self.body(self.audits["public"], HOOK_FUNCTION))
+        self.assertEqual(self.body(self.audits["replica"], PUBLIC_MODEL_WRAPPER), EXPECTED_MODEL_WRAPPER)
+        self.assertEqual(self.source_digest, ORIGINAL_SHA256)
+
+    def test_only_expected_function_bodies_change(self):
+        for name, expected in (("probe", {HOOK_FUNCTION}), ("replica", {HOOK_FUNCTION}),
+                               ("public", {HOOK_FUNCTION, PUBLIC_MODEL_WRAPPER})):
+            result = self.audits[name]
+            changed = {index for index in self.original.bodies
+                       if self.body(self.original, index) != self.body(result, index)}
+            self.assertEqual(changed, expected, name)
+            self.assertEqual(self.reports[name]["invariants"]["patched_function_bodies"], len(expected))
+        self.assertEqual(self.body(self.original, PUBLIC_MODEL_WRAPPER), EXPECTED_MODEL_WRAPPER)
+        replacement = self.body(self.audits["public"], PUBLIC_MODEL_WRAPPER)
+        self.assertEqual(len(replacement), len(EXPECTED_MODEL_WRAPPER))
+        decoded = self.audits["public"].instructions(PUBLIC_MODEL_WRAPPER)
+        self.assertTrue(decoded["decode_complete"])
+        self.assertEqual(decoded["locals"], [])
+        self.assertEqual({item["operation"] for item in decoded["instructions"]}, {"nop", "end"})
+        # 直接桥设置模型和另一种玩家切换路径均保留原始函数体。
+        for index in (58625, 58869, 47995, 45486):
+            self.assertEqual(self.body(self.original, index), self.body(self.audits["public"], index))
+
+    def test_all_other_sections_and_export_abis_are_preserved(self):
+        result = self.audits["public"]
+        self.assertEqual(result.types, self.original.types)
+        self.assertEqual(result.imports, self.original.imports)
+        self.assertEqual(result.function_types, self.original.function_types)
+        self.assertEqual(result.names, self.original.names)
+        for kind, (start, end) in self.original.sections.items():
+            if kind in (7, 10):
+                continue
+            new_start, new_end = result.sections[kind]
+            self.assertEqual(self.original.data[start:end], result.data[new_start:new_end], f"section {kind}")
+        self.assertEqual([(name, self.original.data[start:end]) for name, start, end in self.original.custom],
+                         [(name, result.data[start:end]) for name, start, end in result.custom])
+        for index, names in self.original.exports.items():
+            self.assertTrue(set(names).issubset(result.exports[index]))
+        self.assertEqual(len(self.reports["public"]["additional_exports"]), len(export_map(True)))
+        for name, (index, _, parameters, results) in export_map(True).items():
+            self.assertIn(name, result.exports[index])
+            self.assertEqual(result.descriptor(index)["signature"], {"parameters": parameters, "results": results})
+        self.assertEqual(result.exports, self.audits["replica"].exports)
+
+    def test_appearance_export_functions_retain_original_bodies(self):
+        appearance_exports = ("mpGetDrawable", "mpGetTexture", "mpGetPalette", "mpSetComponent",
+                              "mpRandomComponents", "mpRandomProps", "mpSetHeadOverlay", "mpSetOverlayTint",
+                              "mpSetHairTint", "mpGetPropIndex", "mpGetPropTextureIndex", "mpSetProp", "mpClearProp",
+                              "mpHeadOverlayCount", "mpDrawableCount", "mpTextureCount")
+        for name in appearance_exports:
+            index, expected_name, parameters, results = export_map(True)[name]
+            descriptor = self.original.descriptor(index)
+            self.assertEqual(descriptor["name"], expected_name, name)
+            self.assertEqual(descriptor["signature"], {"parameters": parameters, "results": results}, name)
+            self.assertIn(name, self.audits["public"].exports[index])
+            self.assertNotIn(name, self.audits["probe"].exports.get(index, []))
+            for result in (self.audits["replica"], self.audits["public"]):
+                self.assertEqual(self.body(self.original, index), self.body(result, index), name)
+
+    def test_combat_export_abis_and_standard_bullet_defaults(self):
+        for name in ("mpShootBullet", "mpRevive", "mpResurrect", "mpClearTasksImmediately",
+                     "mpRequestWeaponAsset", "mpHasWeaponAsset"):
+            index, expected_name, parameters, results = export_map(True)[name]
+            descriptor = self.original.descriptor(index)
+            self.assertEqual(descriptor["name"], expected_name, name)
+            self.assertEqual(descriptor["signature"], {"parameters": parameters, "results": results}, name)
+            self.assertIn(name, self.audits["public"].exports[index])
+            self.assertNotIn(name, self.audits["probe"].exports.get(index, []))
+            self.assertEqual(self.body(self.original, index), self.body(self.audits["public"], index), name)
+        # 标准九参 C++ 子弹接口与 SHOOT_SINGLE_BULLET_BETWEEN_COORDS 包装器
+        # 共同调用同一实现，尾部八个默认值也完全相同，避免自行猜测新接口的十七个参数。
+        for index in (52891, 53207):
+            decoded = self.original.instructions(index)
+            self.assertTrue(decoded["decode_complete"])
+            calls = [item for item in decoded["instructions"] if item["operation"] == "call"]
+            self.assertEqual([item["target"]["function_index"] for item in calls], [52889])
+            defaults = decoded["instructions"][-10:-2]
+            self.assertEqual([item["operation"] for item in defaults], ["i32.const"] * 8)
+            self.assertEqual([item["value"] for item in defaults], [0, 0, 0, 0, 1, 0, 0, 0])
+
+    def test_public_patch_requires_entity_interfaces(self):
+        with self.assertRaisesRegex(ValueError, "必须同时"):
+            build(self.original, False, True)
+        with self.assertRaisesRegex(ValueError, "必须同时"):
+            checked_audit(DEFAULT_WASM, False, True)
+        result = subprocess.run([sys.executable, "-B", str(ROOT / "tools/build_native_probe.py"), "--public-client"],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("必须与 --entity-probe", result.stderr)
+
+    def test_rejects_unexpected_wrapper_bytes(self):
+        original_bytes = self.original.data
+        start, end = self.original.bodies[PUBLIC_MODEL_WRAPPER]
+        try:
+            self.original.data = original_bytes[:start] + b"\x01" + original_bytes[start + 1:]
+            with self.assertRaisesRegex(ValueError, "原始函数体不匹配"):
+                build(self.original, True, True)
+        finally:
+            self.original.data = original_bytes
+
+    def test_full_public_module_compiles_without_running_game(self):
+        node = os.environ.get("NODE") or shutil.which("node")
+        if not node:
+            self.skipTest("没有可用的 Node.js，结构检查仍会执行")
+        script = "const fs=require('node:fs'); WebAssembly.compile(fs.readFileSync(process.argv[1])).then(()=>console.log('compiled')).catch(e=>{console.error(e);process.exitCode=1});"
+        # 只延迟机器码编译，未启用延迟校验；完整模块仍需通过 V8 验证。
+        result = subprocess.run([node, "--wasm-lazy-compilation", "-e", script, str(self.outputs["public"])],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "compiled")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

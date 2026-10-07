@@ -1,0 +1,17 @@
+.online-join { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 22px; background: #000a; backdrop-filter: blur(8px); font: 15px/1.6 "Microsoft YaHei", "PingFang SC", sans-serif; color: #eee; }
+.online-join[hidden] { display: none; }
+.online-join__panel { box-sizing: border-box; width: min(100%, 510px); max-height: calc(100dvh - 44px); overflow: auto; padding: 30px; border: 1px solid #ffffff26; border-radius: 12px; background: #111714f5; box-shadow: 0 24px 100px #000a; }
+.online-join__header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 22px; }
+.online-join__eyebrow { margin: 0 0 5px; color: #acd39b; font-size: 12px; letter-spacing: .12em; }
+.online-join h1 { margin: 0; color: #fff; font-size: 27px; font-weight: 600; line-height: 1.25; }
+.online-join__close { flex: none; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 5px; background: #ffffff10; color: #d1d8cf; cursor: pointer; font-size: 25px; line-height: 1; }
+.online-join form { display: grid; gap: 17px; }
+.online-join label { display: grid; gap: 6px; color: #e2e8df; }
+.online-join input, .online-join select { box-sizing: border-box; width: 100%; padding: 11px 12px; border: 1px solid #ffffff24; border-radius: 5px; background: #080d09; color: #fff; font: inherit; }
+.online-join input::placeholder { color: #758173; }
+.online-join input:focus-visible, .online-join select:focus-visible, .online-join button:focus-visible { outline: 2px solid #a5d395; outline-offset: 3px; }
+.online-join__hint { margin: 0; color: #a3afa0; font-size: 12px; line-height: 1.7; }
+.online-join__submit { margin-top: 4px; min-height: 46px; padding: 10px 18px; border: 0; border-radius: 5px; background: #a7d995; color: #0e1b08; cursor: pointer; font: 600 16px/1.5 "Microsoft YaHei", "PingFang SC", sans-serif; }
+.online-join__submit:hover { background: #bdebaa; }
+.online-join__message { margin: 0; min-height: 20px; color: #f2b178; font-size: 13px; overflow-wrap: anywhere; }
+@media (max-width: 480px) { .online-join { padding: 14px; } .online-join__panel { padding: 23px; max-height: calc(100dvh - 28px); } .online-join h1 { font-size: 24px; } }

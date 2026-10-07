@@ -1,6 +1,7 @@
 """生成可脱离游戏资源独立部署的公共战局服务端压缩包。"""
 import hashlib
 import json
+import re
 import subprocess
 import sys
 import zipfile
@@ -13,11 +14,15 @@ ROOT = Path(__file__).resolve().parents[1]
 def main():
     subprocess.run([sys.executable, '-B', str(ROOT / 'tools/build_multiplayer_server.py')], check=True)
     source = ROOT / 'server'
+    main_source = (source / 'src/main/java/offline/multiplayer/Main.java').read_text(encoding='utf-8')
+    version = re.search(r'private static final String VERSION = "([^"]+)";', main_source)
+    if not version:
+        raise ValueError('无法读取当前服务端版本，拒绝生成错误的部署清单')
     files = [source / name for name in ['multiplayer-server.jar', 'README.md', 'Start-Server.cmd',
                                        'Start-Server.command', 'Start-Server.sh']]
     files += sorted((source / 'src').rglob('*.java'))
     manifest = {
-        'version': '0.1.0-public', 'protocol': 1, 'java_minimum': 17,
+        'version': version.group(1), 'protocol': 1, 'java_minimum': 17,
         'public_session': 'PUBLIC', 'map': 'gta5', 'mode': 'sandbox',
         'game_resources_required': False,
         'validation': '公共战局、角色状态与射击事件传输通过测试；真实游戏角色同步仍为实验版。',

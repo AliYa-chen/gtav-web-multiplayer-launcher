@@ -1,15 +1,25 @@
 // 游戏页面与同一浏览器实例的公共战局大厅之间传递状态。
 // 网络连接由大厅持有；引擎线程通过共享内存读取最新快照，避免阻塞其帧循环。
-export function installGameAdapter(worker) {
-  const channel = new BroadcastChannel('gta5-public-bridge-v1');
+export function installGameAdapter(worker, network = null) {
+  // 正常在线游戏直接连接本页网络会话，避免同一端口多个标签页串用身份和外观。
+  // 广播频道仅保留给独立探针或旧测试入口。
+  const channel = network ? null : new BroadcastChannel('gta5-public-bridge-v1');
+  const sendLocal = (message) => network ? network.onWorkerMessage(message) : channel.postMessage(message);
   const peers = new Map();
-  let session = { connected: false, client_id: null, members: [], avatar: 'male' };
+  let session = { connected: false, client_id: null, members: [], avatar: 'male', preset: 'npc_male', seed: 0 };
   let shots = [];
   let nextShotId = 0;
+  let combat = [];
+  let controls = [], nextControlId = 0;
   let shared = null;
   let timer = 0;
   let closed = false;
   let lastReport = '';
+  let networkMessage = '', gameMessage = '';
+  function renderHud() {
+    const hud = document.getElementById('hud');
+    if (hud) hud.textContent = [networkMessage, gameMessage].filter(Boolean).join(' · ');
+  }
 
   function reportStatus(value) {
     const text = JSON.stringify(value);
@@ -28,7 +38,7 @@ export function installGameAdapter(worker) {
   function publish() {
     timer = 0;
     if (!shared || closed) return;
-    const packet = { ...session, peers: [...peers.values()], shots };
+    const packet = { ...session, peers: [...peers.values()], shots, combat, controls };
     const bytes = new TextEncoder().encode(JSON.stringify(packet));
     if (bytes.length > shared.capacity) return;
     const header = new Int32Array(shared.memory.buffer, shared.block, 4);
@@ -44,17 +54,33 @@ export function installGameAdapter(worker) {
     if (!timer) timer = setTimeout(publish, 40);
   }
 
-  channel.onmessage = ({ data }) => {
+  const receive = (data) => {
     if (!data || typeof data !== 'object') return;
-    if (data.type === 'session') {
+    if (data.type === 'network_status') {
+      networkMessage = data.connected ? '服务器在线 · ' + (data.members || 1) + ' 位玩家'
+        : (data.text || '服务器连接中断，正在自动重连…');
+      renderHud();
+      return;
+    } else if (data.type === 'session') {
       session = { connected: data.connected === true, client_id: data.client_id || null,
         members: Array.isArray(data.members) ? data.members : [],
-        avatar: data.avatar === 'female' ? 'female' : 'male' };
+        avatar: data.avatar === 'female' ? 'female' : 'male',
+        preset: data.preset || (data.avatar === 'female' ? 'freemode_female' : 'freemode_male'),
+        seed: Number.isInteger(data.seed) ? data.seed >>> 0 : 0,
+        model: Number.isInteger(data.model) ? data.model >>> 0 : undefined,
+        appearance_spec: data.appearance_spec || {},
+        resume_position: data.resume_position || null, spawn: data.spawn || null };
       peers.clear();
       for (const peer of data.peers || []) {
         if (peer?.player_id && peer.player_id !== session.client_id && peer.state) peers.set(peer.player_id, peer);
       }
-      if (!session.connected) shots = [];
+      if (!session.connected) { shots = []; controls = []; }
+      combat = Array.isArray(data.combat) ? data.combat : [];
+    } else if (data.type === 'combat_state' && Array.isArray(data.players)) {
+      combat = data.players;
+    } else if (['damage', 'death', 'respawn', 'correction'].includes(data.type)) {
+      controls.push({ id: ++nextControlId, event: data });
+      if (controls.length > 32) controls.shift();
     } else if (data.type === 'player_state' && data.player_id !== session.client_id && data.state) {
       peers.set(data.player_id, { player_id: data.player_id, state: data.state });
     } else if (data.type === 'shot_event' && data.player_id !== session.client_id && data.event) {
@@ -63,6 +89,8 @@ export function installGameAdapter(worker) {
     } else return;
     schedule();
   };
+  if (network) network.setReceiver(receive);
+  else channel.onmessage = ({ data }) => receive(data);
 
   function onWorkerMessage(data) {
     const message = data?.multiplayer;
@@ -70,19 +98,27 @@ export function installGameAdapter(worker) {
     if (message.type === 'memory') {
       shared = message;
       publish();
-      channel.postMessage({ type: 'bridge_ready' });
+      sendLocal({ type: 'bridge_ready' });
       reportStatus({ phase: 'engine_ready' });
     } else if (message.type === 'shot_ack' && Array.isArray(message.ids)) {
       const consumed = new Set(message.ids);
       shots = shots.filter((shot) => !consumed.has(shot.id));
       schedule();
+    } else if (message.type === 'control_ack' && Array.isArray(message.ids)) {
+      const consumed = new Set(message.ids);
+      controls = controls.filter((control) => !consumed.has(control.id));
+      schedule();
     } else if (message.type === 'local_state' || message.type === 'local_shot') {
-      channel.postMessage(message);
+      sendLocal(message);
     } else if (message.type === 'game_status') {
-      const hud = document.getElementById('hud');
-      if (hud) hud.textContent = message.role_loading ? '公共战局 · 正在加载在线角色…'
-        : '公共战局 · 正在同步 ' + message.peer_count + ' 位其他玩家';
+      gameMessage = message.role_loading ? '正在加载在线角色…'
+        : message.alive === false ? '已阵亡 · 等待服务器重生'
+        : '已显示 ' + message.peer_count + ' 位其他玩家' + (Number.isInteger(message.health)
+          ? ' · 生命值 ' + message.health + ' · 击杀 ' + (message.kills || 0) + ' / 阵亡 ' + (message.deaths || 0) : '');
+      renderHud();
       reportStatus({ phase: message.role_loading ? 'loading_avatar' : 'synchronizing', peers: message.peer_count });
+    } else if (message.type === 'lifecycle') {
+      reportStatus({ phase: 'lifecycle', ...message });
     } else if (message.type === 'bridge_error') {
       const hud = document.getElementById('hud');
       if (hud) { hud.textContent = '角色同步已暂停：' + message.message; hud.style.color = '#f96'; }
@@ -90,12 +126,12 @@ export function installGameAdapter(worker) {
     }
   }
 
-  channel.postMessage({ type: 'bridge_ready' });
+  sendLocal({ type: 'bridge_ready' });
   addEventListener('pagehide', () => {
     closed = true;
     clearTimeout(timer);
-    channel.postMessage({ type: 'game_closed' });
-    channel.close();
+    sendLocal({ type: 'game_closed' });
+    channel?.close();
     crashes.close();
   }, { once: true });
   return { onWorkerMessage };

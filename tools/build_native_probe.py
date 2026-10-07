@@ -2,6 +2,7 @@
 """制作非生产的 native 探针 WASM 副本，不覆盖游戏引擎。
 
 默认增加只读玩家/坐标/脚本上下文与分配器导出；--entity-probe 增加隔离实体实验导出。
+--entity-probe --public-client 另生成公共战局副本，屏蔽单机脚本的角色模型切换。
 在脚本线程安装活动上下文后插入回调。
 此工具不会运行 WASM；生成文件仍需浏览器实际验证，不能据此声明多人同步可用。
 """
@@ -24,6 +25,9 @@ HOOK_INSTRUCTION_START = 9966559
 HOOK_INSTRUCTION_OFFSET = 108
 MAGIC = 0x4D505442
 CALLBACK_IMPORT = 11
+PUBLIC_MODEL_WRAPPER = 58868
+PUBLIC_MODEL_WRAPPER_NAME = "player_commands::SetupScriptCommands()::scrWrapped_SET_PLAYER_MODEL::Call(rage::scrThread::Info&)"
+EXPECTED_MODEL_WRAPPER = bytes.fromhex("002000290310220028020020002802081081ca030b")
 EXPECTED_RUN_PREFIX = bytes.fromhex(
     "031a7e0c7f067d230042f00b7d220521082005240042b0d6ac07200042ac037c2214370300"
     "2000280220221d417e714102470440200042c0017c210642a0d6ac07290300211a42a0d6ac07"
@@ -38,6 +42,14 @@ ADDITIONAL_EXPORTS = {
     "mpFree": (91002, "emscripten_builtin_free", ["i64"], []),
 }
 ENTITY_EXPORTS = {
+    "mpForcePlaying": (18890, "CGameLogic::ForceStatePlaying()", [], []),
+    "mpResurrectLocalPlayer": (54881, "network_commands::CommandNetworkResurrectLocalPlayer(rage::scrVector const&, float, int, bool, bool, int, int)", ["i64", "f32", "i32", "i32", "i32", "i32", "i32"], []),
+    "mpPauseDeathRestart": (52750, "misc_commands::CommandPauseDeathArrestRestart(bool)", ["i32"], []),
+    "mpScreenFadeIn": (49036, "camera_commands::CommandDoScreenFadeIn(int)", ["i32"], []),
+    "mpIsScreenFadedOut": (49034, "camera_commands::CommandIsScreenFadedOut()", [], ["i32"]),
+    "mpSetPlayerControl": (58654, "player_commands::CommandSetPlayerControl(int, bool, int)", ["i32", "i32", "i32"], []),
+    "mpTaskStandStill": (60564, "task_commands::CommandTaskStandStill(int, int)", ["i32", "i32"], []),
+    "mpTaskGoStraight": (60577, "task_commands::CommandTaskGoStraightToCoord(int, rage::scrVector const&, float, int, float, float)", ["i32", "i64", "f32", "i32", "f32", "f32"], []),
     "mpGetModel": (50040, "entity_commands::CommandGetEntityModel(int)", ["i32"], ["i32"]),
     "mpHeading": (50032, "entity_commands::CommandGetEntityHeading(int)", ["i32"], ["f32"]),
     "mpCreatePed": (57110, "ped_commands::CommandCreatePed(int, int, rage::scrVector const&, float, bool, bool)", ["i32", "i32", "i64", "f32", "i32", "i32"], ["i32"]),
@@ -75,6 +87,29 @@ ENTITY_EXPORTS = {
     "mpSetPlayerModel": (58625, "player_commands::CommandChangePlayerModel(int, int)", ["i32", "i32"], []),
     "mpPlayerId": (58714, "player_commands::CommandPlayerId()", [], ["i32"]),
     "mpDefaultVariation": (57395, "ped_commands::CommandSetPedDefaultComponentVariation(int)", ["i32"], []),
+    "mpGetDrawable": (57381, "ped_commands::CommandGetPedDrawableVariation(int, int)", ["i32", "i32"], ["i32"]),
+    "mpGetTexture": (57384, "ped_commands::CommandGetPedTextureVariation(int, int)", ["i32", "i32"], ["i32"]),
+    "mpGetPalette": (57387, "ped_commands::CommandGetPedPaletteVariation(int, int)", ["i32", "i32"], ["i32"]),
+    "mpSetComponent": (57392, "ped_commands::CommandSetPedComponentVariation(int, int, int, int, int)", ["i32", "i32", "i32", "i32", "i32"], []),
+    "mpRandomComponents": (57393, "ped_commands::CommandSetPedRandomComponentVariation(int, int)", ["i32", "i32"], []),
+    "mpRandomProps": (57394, "ped_commands::CommandSetPedRandomProps(int)", ["i32"], []),
+    "mpSetHeadOverlay": (57402, "ped_commands::CommandSetPedHeadOverlay(int, int, int, float)", ["i32", "i32", "i32", "f32"], []),
+    "mpHeadOverlayCount": (57404, "ped_commands::CommandGetPedHeadOverlayNum(int)", ["i32"], ["i32"]),
+    "mpSetOverlayTint": (57405, "ped_commands::CommandSetPedHeadOverlayTint(int, int, int, int, int)", ["i32", "i32", "i32", "i32", "i32"], []),
+    "mpSetHairTint": (57406, "ped_commands::CommandSetPedHairTint(int, int, int)", ["i32", "i32", "i32"], []),
+    "mpGetPropIndex": (57435, "ped_commands::CommandGetPedPropIndex(int, int)", ["i32", "i32"], ["i32"]),
+    "mpGetPropTextureIndex": (57438, "ped_commands::CommandGetPropTextureIndex(int, int)", ["i32", "i32"], ["i32"]),
+    "mpSetProp": (57436, "ped_commands::CommandSetPedPropIndex(int, int, int, int, bool)", ["i32", "i32", "i32", "i32", "i32"], []),
+    "mpClearProp": (57439, "ped_commands::CommandClearPedProp(int, int)", ["i32", "i32"], []),
+    "mpDrawableCount": (57383, "ped_commands::CommandGetNumberOfPedDrawableVariations(int, int)", ["i32", "i32"], ["i32"]),
+    "mpTextureCount": (57385, "ped_commands::CommandGetNumberOfPedTextureVariations(int, int, int)", ["i32", "i32", "i32"], ["i32"]),
+    # 标准单发子弹函数沿用脚本包装器的八个默认尾参数；远端视觉弹必须传 damage=0。
+    "mpShootBullet": (52891, "misc_commands::CommandFireSingleBullet(rage::scrVector const&, rage::scrVector const&, int, bool, int, int, bool, bool, float)", ["i64", "i64", "i32", "i32", "i32", "i32", "i32", "i32", "f32"], []),
+    "mpRevive": (57485, "ped_commands::CommandReviveInjuredPed(int)", ["i32"], []),
+    "mpResurrect": (57486, "ped_commands::CommandResurrectPed(int)", ["i32"], []),
+    "mpClearTasksImmediately": (60722, "task_commands::CommandClearPedTasksImmediately(int)", ["i32"], []),
+    "mpRequestWeaponAsset": (62968, "weapon_commands::RequestWeaponAsset(int, int, int)", ["i32", "i32", "i32"], []),
+    "mpHasWeaponAsset": (62969, "weapon_commands::HasWeaponAssetLoaded(int)", ["i32"], ["i32"]),
 }
 
 
@@ -108,7 +143,19 @@ def encoded_name(value: str) -> bytes:
     return unsigned_leb(len(value_bytes)) + value_bytes
 
 
-def checked_audit(path: Path, entity_probe: bool = False) -> WasmAudit:
+def checked_public_wrapper(audit: WasmAudit):
+    descriptor = audit.descriptor(PUBLIC_MODEL_WRAPPER)
+    if descriptor["name"] != PUBLIC_MODEL_WRAPPER_NAME or descriptor["signature"] != {"parameters": ["i64"], "results": []}:
+        raise ValueError("单机 SET_PLAYER_MODEL 包装器的函数名称或 ABI 不匹配")
+    start, end = audit.bodies[PUBLIC_MODEL_WRAPPER]
+    if audit.data[start:end] != EXPECTED_MODEL_WRAPPER:
+        raise ValueError("单机 SET_PLAYER_MODEL 包装器的原始函数体不匹配，拒绝屏蔽")
+    return start, end
+
+
+def checked_audit(path: Path, entity_probe: bool = False, public_client: bool = False) -> WasmAudit:
+    if public_client and not entity_probe:
+        raise ValueError("公共战局副本必须同时启用实体实验接口")
     audit = WasmAudit(path)
     digest = hashlib.sha256(audit.data).hexdigest()
     if digest != ORIGINAL_SHA256:
@@ -133,10 +180,16 @@ def checked_audit(path: Path, entity_probe: bool = False) -> WasmAudit:
     after = next((instruction for instruction in decoded["instructions"] if instruction["instruction_offset"] == 108), None)
     if not before or before["operation"] != "i64.store" or before.get("memory", {}).get("offset") != 0 or not after or after["operation"] != "block":
         raise ValueError("hook 前后的 TLS 写入和指令边界不匹配")
+    if public_client:
+        checked_public_wrapper(audit)
     return audit
 
 
-def build(audit: WasmAudit, entity_probe: bool = False):
+def build(audit: WasmAudit, entity_probe: bool = False, public_client: bool = False):
+    if public_client and not entity_probe:
+        raise ValueError("公共战局副本必须同时启用实体实验接口")
+    if public_client:
+        checked_public_wrapper(audit)
     data = audit.data
     exports = export_map(entity_probe)
     hook_position = HOOK_INSTRUCTION_START + HOOK_INSTRUCTION_OFFSET
@@ -180,6 +233,14 @@ def build(audit: WasmAudit, entity_probe: bool = False):
                     body = data[body_start:hook_position] + hook_bytes + data[hook_position:body_end]
                     result.extend(unsigned_leb(len(body)) + body)
                     patched_bodies += 1
+                elif public_client and index == PUBLIC_MODEL_WRAPPER:
+                    # 脚本调用经包装器；JS 的 mpSetPlayerModel 直接调用 58625，仍可设置公共角色。
+                    # void 包装器改为等长 nop；不更改函数索引、该包装器长度或另一个 CHANGE_PLAYER_PED 包装器。
+                    body = b"\x00" + b"\x01" * (len(EXPECTED_MODEL_WRAPPER) - 2) + b"\x0b"
+                    if body_size != len(body):
+                        raise ValueError("单机角色包装器体长度不匹配")
+                    result.extend(data[entry_start:body_start] + body)
+                    patched_bodies += 1
                 else:
                     result.extend(data[entry_start:body_end])
                 reader.take(body_size)
@@ -193,11 +254,13 @@ def build(audit: WasmAudit, entity_probe: bool = False):
         else:
             output.extend(data[section_start:payload_end])
         source.take(size)
-    if not export_section_seen or not code_section_seen or patched_bodies != 1:
-        raise ValueError("预期导出节/代码节/单个目标函数体未全部匹配")
+    expected_patch_count = 2 if public_client else 1
+    if not export_section_seen or not code_section_seen or patched_bodies != expected_patch_count:
+        raise ValueError("预期导出节/代码节/目标函数体未全部匹配")
     evidence = {
-        "purpose": ("非生产实体复制实验：增加本地角色创建/属性/坐标/销毁接口，尚未证明实际游戏操作成功。" if entity_probe else "非生产只读探针：读取本地玩家、坐标和活动脚本上下文；未加入创建角色或写入实体的接口。"),
+        "purpose": ("公共战局引擎副本：增加实体接口，单独屏蔽单机脚本的 SET_PLAYER_MODEL 包装器；保留桥接接口直接设置角色。" if public_client else "非生产实体复制实验：增加本地角色创建/属性/坐标/销毁接口，尚未证明实际游戏操作成功。" if entity_probe else "非生产只读探针：读取本地玩家、坐标和活动脚本上下文；未加入创建角色或写入实体的接口。"),
         "entity_probe": entity_probe,
+        "public_client": public_client,
         "original": {"path": str(audit.path.resolve()), "sha256": ORIGINAL_SHA256, "bytes": len(data)},
         "prototype": {"sha256": hashlib.sha256(output).hexdigest(), "bytes": len(output)},
         "hook": {"function_index": HOOK_FUNCTION, "function_name": audit.names[HOOK_FUNCTION],
@@ -213,24 +276,40 @@ def build(audit: WasmAudit, entity_probe: bool = False):
                        "data_and_elements_unchanged": True, "patched_function_bodies": patched_bodies},
         "runtime_status": "尚未在实际游戏中验证；编译成功也不代表脚本上下文、生命周期或多人同步可用。",
     }
+    if public_client:
+        wrapper_start, _ = audit.bodies[PUBLIC_MODEL_WRAPPER]
+        replacement = b"\x00" + b"\x01" * (len(EXPECTED_MODEL_WRAPPER) - 2) + b"\x0b"
+        evidence["public_model_patch"] = {
+            **audit.descriptor(PUBLIC_MODEL_WRAPPER),
+            "original_body_offset": wrapper_start,
+            "body_bytes": len(EXPECTED_MODEL_WRAPPER),
+            "original_body_sha256": hashlib.sha256(EXPECTED_MODEL_WRAPPER).hexdigest(),
+            "original_body_hex": EXPECTED_MODEL_WRAPPER.hex(),
+            "replacement_body_hex": replacement.hex(),
+            "scope": "仅屏蔽单机脚本 SET_PLAYER_MODEL；直接导出的 58625 原生函数、CHANGE_PLAYER_PED 和 C++ 重生/存档路径均保留。",
+        }
     return bytes(output), evidence
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wasm", type=Path, default=DEFAULT_WASM, help="必须匹配已审计 SHA256 的原始引擎")
-    parser.add_argument("--output", type=Path, help="非生产输出路径；默认只读 native-probe.wasm，实体实验 native-replica.wasm")
+    parser.add_argument("--output", type=Path, help="独立输出路径；默认只读 native-probe.wasm，实体实验 native-replica.wasm，公共战局 native-public.wasm")
     parser.add_argument("--entity-probe", action="store_true", help="增加隔离实体复制实验导出；不改变默认只读探针")
+    parser.add_argument("--public-client", action="store_true", help="仅公共战局屏蔽单机脚本角色切换；必须同时指定 --entity-probe")
     arguments = parser.parse_args()
-    default_output = ROOT / "archive/cache" / ("native-replica.wasm" if arguments.entity_probe else "native-probe.wasm")
+    if arguments.public_client and not arguments.entity_probe:
+        parser.error("--public-client 必须与 --entity-probe 一起使用")
+    output_name = "native-public.wasm" if arguments.public_client else "native-replica.wasm" if arguments.entity_probe else "native-probe.wasm"
+    default_output = ROOT / "archive/cache" / output_name
     original, output = arguments.wasm.resolve(), (arguments.output or default_output).resolve()
     production_root = (ROOT / "gta5data").resolve()
     if output == original or output == DEFAULT_WASM.resolve() or production_root in output.parents:
         parser.error("不能将探针写入原引擎或生产镜像目录；请选择 archive/cache 或独立实验目录")
     if output.suffix != ".wasm":
         parser.error("探针输出必须是独立的 .wasm 文件")
-    audit = checked_audit(original, arguments.entity_probe)
-    prototype, evidence = build(audit, arguments.entity_probe)
+    audit = checked_audit(original, arguments.entity_probe, arguments.public_client)
+    prototype, evidence = build(audit, arguments.entity_probe, arguments.public_client)
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(output.name + ".tmp")
     temporary.write_bytes(prototype)
