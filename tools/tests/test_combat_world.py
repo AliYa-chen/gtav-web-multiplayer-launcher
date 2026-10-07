@@ -19,11 +19,13 @@ import test_multiplayer as protocol
 
 RIFLE = 0xBFEFFF6D
 PISTOL = 0x1B06D571
+MINIGUN = 0x42BF8A85
 MODEL = 0x705E61F2
 APPEARANCE = {
     "components": [[0, 0, 0]] * 12,
     "props": [[-1, 0]] * 8,
 }
+ACTIONS = {"aiming": True, "reloading": False, "jumping": False, "ducking": True, "sprinting": False}
 
 
 class CombatWorldIntegrationTests(unittest.TestCase):
@@ -46,9 +48,11 @@ class CombatWorldIntegrationTests(unittest.TestCase):
         client.welcome = client.expect("welcome")
         return client
 
-    def client(self, name: str, *, resume=None):
+    def client(self, name: str, *, resume=None, feedback=False):
         client = self.raw_client()
         hello = {"type": "hello", "name": name, "capabilities": ["combat", "resume"]}
+        if feedback:
+            hello["capabilities"].append("combat_feedback")
         if resume:
             hello.update(client_id=resume["client_id"], resume_token=resume["resume_token"])
         client.send(hello)
@@ -147,6 +151,97 @@ class CombatWorldIntegrationTests(unittest.TestCase):
         states = {player["id"]: player for player in event["players"]}
         self.assertEqual(states[first.player_id]["health"], 200)
         self.assertEqual(states[third.player_id]["health"], 200)
+
+    def test_actions_and_aim_target_are_validated_and_legacy_states_still_work(self):
+        """可选行为字段完整转发；原客户端不发新字段时保持原状态格式。"""
+        first = self.client("行为玩家")
+        legacy = self.raw_client()
+        legacy.send({"type": "hello", "name": "原协议玩家"})
+        legacy.expect("profile")
+        legacy.expect("world_state")
+        base = {"type": "player_state", "seq": 1, "position": first.spawn, "heading": 90,
+                "model": MODEL, "health": 200, "weapon": RIFLE, "shooting": False}
+        aim = [first.spawn[0] + 20, first.spawn[1], first.spawn[2] + .7]
+        first.send({**base, "actions": ACTIONS, "aim_target": aim})
+        accepted = legacy.expect("player_state", lambda event: event.get("player_id") == first.player_id)["state"]
+        self.assertEqual(accepted["actions"], ACTIONS)
+        self.assertEqual(accepted["aim_target"], aim)
+        for changes in (
+            {"actions": {"aiming": True}}, {"actions": {**ACTIONS, "flying": True}},
+            {"actions": {**ACTIONS, "aiming": 1}}, {"actions": []},
+            {"aim_target": [1, 2]}, {"aim_target": [16001, 0, 0]},
+            {"aim_target": [1, "2", 3]},
+        ):
+            first.send({**base, "seq": 2, **changes})
+            self.error(first, "invalid_message")
+        first.send({**base, "seq": 2})
+        old = first.expect("player_state", lambda event: event.get("state", {}).get("seq") == 2)["state"]
+        self.assertNotIn("actions", old)
+        self.assertNotIn("aim_target", old)
+
+    def test_minigun_is_one_bullet_per_event_and_unknown_weapon_is_rejected(self):
+        """本项目普通加特林有单发伤害；未知武器不再静默广播零伤害。"""
+        first = self.client("武器玩家", feedback=True)
+        second = self.client("目标")
+        self.state(first, weapon=0xffffffff)
+        self.state(second, position=[first.spawn[0] + 6, first.spawn[1], first.spawn[2]])
+        self.shot(first, 1, self.body(second.position), weapon=0xffffffff)
+        error = self.error(first, "unsupported_weapon")
+        self.assertIn("0xffffffff", error["message"])
+        self.assertEqual(error["seq"], 1)
+        self.assertEqual(error["weapon"], 0xffffffff)
+        rejected = first.expect("shot_result", lambda event: event.get("seq") == 1)
+        self.assertFalse(rejected["accepted"])
+        self.assertEqual(rejected["reason"], "unsupported_weapon")
+        self.assertEqual(self.get_json("/health")[1]["shot_events_received"], 0)
+        self.state(first, 2, weapon=MINIGUN)
+        self.shot(first, 2, self.body(second.position), weapon=MINIGUN)
+        damage = first.expect("damage", lambda event: event.get("shot_seq") == 2)
+        self.assertEqual(damage["damage"], 25)
+        self.assertEqual(damage["health"], 175)
+        result = first.expect("shot_result", lambda event: event.get("seq") == 2)
+        self.assertTrue(result["accepted"])
+        self.assertTrue(result["hit"])
+        self.assertEqual(result["damage"], 25)
+        self.assertEqual(result["health"], 175)
+
+    def test_shot_feedback_distinguishes_hit_miss_rejection_and_is_sender_only(self):
+        """同一合法射线可区分未命中、命中和被拒绝，回执只发射手。"""
+        first = self.client("回执射手", feedback=True)
+        second = self.client("回执目标", feedback=True)
+        self.state(first)
+        self.state(second, position=[first.spawn[0] + 6, first.spawn[1], first.spawn[2]])
+        miss_target = [first.spawn[0], first.spawn[1] + 20, first.spawn[2] + .7]
+        self.accepted_shot(first, 1, miss_target)
+        missed = first.expect("shot_result", lambda event: event.get("seq") == 1)
+        self.assertTrue(missed["accepted"])
+        self.assertFalse(missed["hit"])
+        self.assertNotIn("victim_id", missed)
+        self.assertNotIn("damage", missed)
+        time.sleep(.13)
+        self.accepted_shot(first, 2, self.body(second.position))
+        hit = first.expect("shot_result", lambda event: event.get("seq") == 2)
+        self.assertEqual({key: hit[key] for key in ("accepted", "hit", "victim_id", "damage", "health")},
+                         {"accepted": True, "hit": True, "victim_id": second.player_id, "damage": 35, "health": 165})
+        first.send({"type": "shot_event", "seq": 3, "origin": self.body(first.position),
+                    "target": self.body(second.position), "weapon": RIFLE, "victim_id": second.player_id,
+                    "shot_count": 20})
+        self.error(first, "invalid_message")
+        rejected = first.expect("shot_result", lambda event: event.get("seq") == 3)
+        self.assertFalse(rejected["accepted"])
+        self.assertEqual(rejected["reason"], "invalid_message")
+        first.send({"type": "chat", "text": "回执验证完成"})
+        second.expect("chat", lambda event: event.get("text") == "回执验证完成")
+        self.assertFalse(any(event.get("type") == "shot_result" for event in second.pending))
+
+    def test_client_without_feedback_capability_receives_no_shot_result(self):
+        """原客户端仍收到射击和伤害广播，不额外接收新回执类型。"""
+        first, second = self.pair()
+        self.accepted_shot(first, 1, self.body(second.position))
+        first.expect("damage", lambda event: event.get("shot_seq") == 1)
+        first.send({"type": "chat", "text": "旧客户端屏障"})
+        first.expect("chat", lambda event: event.get("text") == "旧客户端屏障")
+        self.assertFalse(any(event.get("type") == "shot_result" for event in first.pending))
 
     def test_shot_checks_origin_weapon_rate_sequence_and_client_damage_fields(self):
         """远程起点、错误武器、超快连发和伪造受害者等消息不能产生伤害。"""

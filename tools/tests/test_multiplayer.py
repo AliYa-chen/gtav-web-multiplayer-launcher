@@ -265,7 +265,7 @@ class MultiplayerIntegrationTests(unittest.TestCase):
         client = WebSocketClient(self.port)
         self.clients.append(client)
         welcome = client.expect("welcome")
-        self.assertEqual(welcome["server_version"], "0.2.2-public")
+        self.assertEqual(welcome["server_version"], "0.2.3-public")
         self.assertTrue({"heartbeat", "snapshot"}.issubset(welcome["capabilities"]))
         for nonce in (0, 123456, 9007199254740991):
             client.send({"type": "ping", "nonce": nonce})
@@ -431,8 +431,10 @@ class MultiplayerIntegrationTests(unittest.TestCase):
         client.send(self.state(2))
         self.assertEqual(client.expect("player_state", lambda message: message["state"]["seq"] == 2)["player_id"], client.welcome["client_id"])
         position = self.state()["position"]
+        client.send({**self.state(3), "weapon": 0x1B06D571})
+        client.expect("player_state", lambda event: event.get("state", {}).get("seq") == 3)
         shot = {"type": "shot_event", "seq": 1, "origin": position,
-                "target": [position[0] + 1, position[1] + 2, position[2] + 3], "weapon": 0}
+                "target": [position[0] + 1, position[1] + 2, position[2] + 3], "weapon": 0x1B06D571}
         client.send(shot)
         client.expect("shot_event")
         client.send(shot)

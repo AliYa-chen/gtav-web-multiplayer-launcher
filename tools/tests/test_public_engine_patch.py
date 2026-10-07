@@ -185,6 +185,109 @@ class PublicEnginePatchTests(unittest.TestCase):
         self.assertIn("NUL 结尾 UTF-8", constraints)
         self.assertIn("End 返回前不可释放或覆写", constraints)
 
+    def test_weapon_sampling_and_action_exports_abis_and_isolation(self):
+        expected = {
+            "mpGetCurrentPedWeapon": (62918, "weapon_commands::CommandGetCurrentPedWeapon(int, int&, bool)", ["i32", "i64", "i32"], ["i32"]),
+            "mpGetAmmoInClip": (62942, "weapon_commands::CommandGetAmmoInClip(int, int, int&)", ["i32", "i32", "i64"], ["i32"]),
+            "mpLastWeaponImpact": (62953, "weapon_commands::CommandGetPedLastWeaponImpactCoord(int, rage::Vector3&)", ["i32", "i64"], ["i32"]),
+            "mpIsAiming": (58689, "player_commands::CommandIsPlayerFreeAiming(int)", ["i32"], ["i32"]),
+            "mpIsReloading": (57122, "ped_commands::CommandIsPedReloading(int)", ["i32"], ["i32"]),
+            "mpIsJumping": (57240, "ped_commands::CommandIsPedJumping(int)", ["i32"], ["i32"]),
+            "mpIsDucking": (57259, "ped_commands::CommandIsPedDucking(int)", ["i32"], ["i32"]),
+            "mpSetDucking": (57258, "ped_commands::CommandSetPedDucking(int, bool)", ["i32", "i32"], []),
+            "mpIsSprinting": (60839, "task_commands::CommandPedIsSprinting(int)", ["i32"], ["i32"]),
+            "mpTaskAimGunAtCoord": (60655, "task_commands::CommandTaskAimGunAtCoord(int, rage::scrVector const&, int, bool, bool)", ["i32", "i64", "i32", "i32", "i32"], []),
+            "mpTaskReloadWeapon": (60785, "task_commands::CommandTaskReloadWeapon(int, bool)", ["i32", "i32"], []),
+            "mpTaskJump": (60565, "task_commands::CommandTaskJump(int, bool, bool, bool)", ["i32", "i32", "i32", "i32"], []),
+        }
+        for name, (index, expected_name, parameters, results) in expected.items():
+            self.assertEqual(export_map(True)[name], (index, expected_name, parameters, results))
+            descriptor = self.original.descriptor(index)
+            self.assertEqual(descriptor["name"], expected_name, name)
+            self.assertEqual(descriptor["signature"], {"parameters": parameters, "results": results}, name)
+            self.assertNotIn(name, self.audits["probe"].exports.get(index, []))
+            for result in (self.audits["replica"], self.audits["public"]):
+                self.assertIn(name, result.exports[index])
+                self.assertEqual(self.body(self.original, index), self.body(result, index), name)
+
+    def test_weapon_sampling_output_memory_layouts_and_current_frame_impact(self):
+        for index, pointer_parameter, store_offset in ((62918, 1, 110), (62942, 2, 135)):
+            decoded = self.original.instructions(index)
+            self.assertTrue(decoded["decode_complete"])
+            store = next(item for item in decoded["instructions"] if item["instruction_offset"] == store_offset)
+            self.assertEqual(store["operation"], "i32.store")
+            self.assertEqual(store["memory"]["offset"], 0, "武器与弹夹输出均为指针起始处的 int32")
+            previous = decoded["instructions"].index(store)
+            if index == 62918:
+                self.assertEqual(decoded["instructions"][previous - 2]["operation"], "local.get")
+                self.assertEqual(decoded["instructions"][previous - 2]["index"], pointer_parameter)
+            else:
+                self.assertTrue(any(item["operation"] == "local.get" and item["index"] == pointer_parameter
+                                    for item in decoded["instructions"][previous - 6:previous]))
+        impact = self.original.instructions(62953)
+        self.assertTrue(impact["decode_complete"])
+        items = impact["instructions"]
+        # 输出低八字节直接拷贝 x/y，接着 f32 写 z 在 +8；+12 为额外原始 padding。
+        copied_xy = next(index for index, item in enumerate(items) if item["instruction_offset"] == 120)
+        self.assertEqual(items[copied_xy - 2]["operation"], "local.get")
+        self.assertEqual(items[copied_xy - 2]["index"], 1)
+        self.assertEqual(items[copied_xy]["operation"], "i64.store")
+        self.assertEqual(items[copied_xy]["memory"]["offset"], 0)
+        z_store = next(item for item in items if item["instruction_offset"] == 113)
+        self.assertEqual(z_store["operation"], "f32.store")
+        self.assertEqual(z_store["memory"]["offset"], 8)
+        self.assertFalse(any(item["operation"] == "f32.store" and item["memory"]["offset"] == 16 for item in items))
+        # 只有 weapon manager 的 impact frame 与全局 frame 相同才写出结果；不能当作持久 last-hit 锁存。
+        guard = [item for item in items if 80 <= item["instruction_offset"] <= 95]
+        self.assertEqual([item["operation"] for item in guard], ["i64.const", "i32.load", "local.get", "i32.load", "i32.ne", "br_if"])
+        self.assertEqual(guard[0]["value"], 12321256)
+        self.assertEqual(guard[3]["memory"]["offset"], 448)
+
+    def test_action_tasks_vector_layout_and_jump_bool_flags(self):
+        aiming = self.original.instructions(60655)
+        self.assertTrue(aiming["decode_complete"])
+        inputs = [item for item in aiming["instructions"] if item["operation"] == "f32.load"
+                  and item["instruction_offset"] < 40]
+        self.assertEqual([item["memory"]["offset"] for item in inputs], [0, 8, 16],
+                         "瞄准任务输入必须为 24-byte scrVector，不能使用紧凑 Vector3")
+        jump = self.original.instructions(60565)
+        self.assertTrue(jump["decode_complete"])
+        task = next(index for index, item in enumerate(jump["instructions"])
+                    if item["operation"] == "call" and item["target"]["function_index"] == 69993)
+        args = jump["instructions"][task - 12:task]
+        self.assertEqual([item["operation"] for item in args], ["local.get", "local.get", "i32.const", "i32.const", "local.get",
+                         "select", "local.tee", "i32.const", "i32.or", "local.get", "local.get", "select"])
+        self.assertEqual([item["value"] for item in args if item["operation"] == "i32.const"], [163842, 2, 262144])
+        self.assertEqual([item["index"] for item in args if item["operation"] == "local.get"], [0, 5, 2, 2, 3])
+        self.assertFalse(any(item["operation"] == "local.get" and item["index"] == 1
+                             for item in jump["instructions"]), "原始 ABI 第二个 bool 在此构建未使用")
+        # 查询使用真实玩家/角色 handle；jump/ducking 是游戏状态观察，不是可靠一次性事件。
+        for index, target in ((58689, 63816), (57240, 41388), (57259, 45903)):
+            decoded = self.original.instructions(index)
+            self.assertTrue(decoded["decode_complete"])
+            self.assertTrue(any(item["operation"] == "call" and item["target"]["function_index"] == target
+                                for item in decoded["instructions"]))
+
+    def test_ducking_setter_preserves_native_persistent_request_defaults(self):
+        setter = self.original.instructions(57258)
+        self.assertTrue(setter["decode_complete"])
+        index = next(index for index, item in enumerate(setter["instructions"])
+                     if item["operation"] == "call" and item["target"]["function_index"] == 45904)
+        args = setter["instructions"][index - 5:index]
+        self.assertEqual([item["operation"] for item in args],
+                         ["local.get", "local.get", "i32.const", "i32.const", "i32.const"])
+        self.assertEqual([item["index"] for item in args[:2]], [3, 1])
+        self.assertEqual([item["value"] for item in args[2:]], [-1, 1, 0])
+        self.assertEqual(setter["instructions"][index]["target"]["signature"],
+                         {"parameters": ["i64", "i32", "i32", "i32", "i32"], "results": []})
+        # native 保存请求持续时间(-1)和布尔值；调用方必须在状态解除或复活后重置/重应用。
+        implementation = self.original.instructions(45904)
+        self.assertTrue(implementation["decode_complete"])
+        stores = [item for item in implementation["instructions"] if item["operation"] == "i32.store"]
+        self.assertEqual([item["memory"]["offset"] for item in stores[-2:]], [1536, 1532])
+        self.assertTrue(any(item["operation"] == "call" and item["target"]["function_index"] == 45905
+                            for item in implementation["instructions"]), "站起仍遵守原生 CanPedStandUp 判断")
+
     def test_public_patch_requires_entity_interfaces(self):
         with self.assertRaisesRegex(ValueError, "必须同时"):
             build(self.original, False, True)

@@ -17,6 +17,30 @@ export function installGameAdapter(worker, network = null) {
   let closed = false;
   let lastReport = '';
   let networkMessage = '', gameMessage = '';
+  let lastCombatNotice = '', lastCombatNoticeAt = -Infinity;
+  function combatFeedback(data) {
+    const rejected = {
+      unsupported_weapon: ['当前武器暂不支持多人伤害同步，请使用普通枪械。', '目前武器暫不支援多人傷害同步，請使用一般槍械。'],
+      weapon_mismatch: ['武器切换尚未同步，请稍后重新射击。', '武器切換尚未同步，請稍後重新射擊。'],
+      player_dead: ['已阵亡，等待服务器重生。', '已陣亡，等待伺服器重生。'],
+      not_ready: ['角色状态尚未同步，请稍后重新射击。', '角色狀態尚未同步，請稍後重新射擊。'],
+      stale_seq: ['本次射击已过期，请重新射击。', '這次射擊已過期，請重新射擊。'],
+      invalid_shot: ['服务器未接受这次射击，请重新瞄准。', '伺服器未接受這次射擊，請重新瞄準。'],
+      rate_limited: ['射击过快，请稍后重试。', '射擊過快，請稍後重試。'],
+    };
+    const lines = data.accepted === false ? (rejected[data.reason] || ['服务器未接受这次射击。', '伺服器未接受這次射擊。'])
+      : data.hit ? (data.health === 0 ? ['击杀已由服务器确认。', '擊殺已由伺服器確認。']
+        : ['命中玩家' + (Number.isInteger(data.damage) ? ' · 伤害 ' + data.damage : ''),
+          '命中玩家' + (Number.isInteger(data.damage) ? ' · 傷害 ' + data.damage : '')]) : null;
+    // 未命中仍由连接模块记录判定，但不让原生通知盖满整个战局。
+    if (!lines) return;
+    gameMessage = lines[0]; renderHud();
+    const key = data.accepted === false ? 'reject:' + (data.reason || '') : data.health === 0 ? 'kill' : 'hit';
+    const now = performance.now();
+    if (key !== lastCombatNotice || now - lastCombatNoticeAt >= 1500) {
+      lastCombatNotice = key; lastCombatNoticeAt = now; notify(lines[1]);
+    }
+  }
   function renderHud() {
     const hud = document.getElementById('hud');
     if (hud) {
@@ -72,8 +96,11 @@ export function installGameAdapter(worker, network = null) {
       if (key !== lastNetworkNotice) {
         lastNetworkNotice = key;
         notify(data.connected ? '公共戰局已連線 · ' + (data.members || 1) + ' 位玩家' : '連線中斷，正在自動重新連線…');
-      } else if (data.phase === 'notice') notify('伺服器暫未接受這次操作');
+      } else if (data.phase === 'notice' && !/武器/.test(data.text || '')) notify('伺服器暫未接受這次操作');
       renderHud();
+      return;
+    } else if (data.type === 'combat_feedback') {
+      combatFeedback(data);
       return;
     } else if (data.type === 'session') {
       session = { connected: data.connected === true, client_id: data.client_id || null,
@@ -158,7 +185,8 @@ export function installGameAdapter(worker, network = null) {
         if (lastKills !== null && message.kills > lastKills) notify('擊殺成功 · 總擊殺 ' + message.kills);
         lastKills = message.kills;
       }
-      reportStatus({ phase, peers: message.peer_count });
+      reportStatus({ phase, peers: message.peer_count,
+        ...(Number.isInteger(message.weapon) ? { weapon: message.weapon, weapon_ready: message.weapon_ready === true } : {}) });
     } else if (message.type === 'lifecycle') {
       reportStatus({ phase: 'lifecycle', ...message });
     } else if (message.type === 'bridge_error') {

@@ -37,7 +37,7 @@ self.prepareMultiplayerBridge = function (imports) {
       'weapon_pistol50', 'weapon_microsmg', 'weapon_smg', 'weapon_assaultsmg', 'weapon_assaultrifle',
       'weapon_carbinerifle', 'weapon_advancedrifle', 'weapon_mg', 'weapon_combatmg', 'weapon_pumpshotgun',
       'weapon_sawnoffshotgun', 'weapon_assaultshotgun', 'weapon_bullpupshotgun', 'weapon_sniperrifle',
-      'weapon_heavysniper', 'weapon_marksmanrifle'].map(joaat));
+      'weapon_heavysniper', 'weapon_marksmanrifle', 'weapon_minigun'].map(joaat));
     const decoder = new TextDecoder();
     let scratch = 0, block = 0, sequence = -1, packet = null, lastTick = 0, nameBuffer = 0;
     let lastShot = 0, lastState = 0, initialPlacement = false, stopped = false;
@@ -52,6 +52,7 @@ self.prepareMultiplayerBridge = function (imports) {
     let modelMismatch = null, modelRestore = null, lastGoodLocal = null;
     let modelDefaultsPending = false;
     let noticeBuffer = 0, lastNoticeAttempt = -Infinity, nativeHudAvailable = null;
+    let shotBuffer = 0, shotSampleAt = -Infinity, weaponSample = null, pendingShots = [];
 
     const post = (value) => self.postMessage({ multiplayer: value });
     const validPosition = (position) => Array.isArray(position) && position.length === 3 &&
@@ -68,6 +69,72 @@ self.prepareMultiplayerBridge = function (imports) {
     function readVector(offset) {
       const data = view();
       return [0, 8, 16].map((part) => data.getFloat32(scratch + offset + part, true));
+    }
+    function actualWeapon(ped) {
+      if (ex.mpGetCurrentPedWeapon) {
+        const ready = ex.mpGetCurrentPedWeapon(ped, BigInt(scratch + 112), 1);
+        if (ready) return { hash: view().getUint32(scratch + 112, true), ready: true };
+        return { hash: ex.mpSelectedWeapon(ped) >>> 0, ready: false };
+      }
+      return { hash: ex.mpSelectedWeapon(ped) >>> 0, ready: true };
+    }
+    function cameraRay() {
+      ex.mpCamCoords(BigInt(scratch + 24)); ex.mpCamRot(BigInt(scratch + 48), 2);
+      const origin = readVector(24), rotation = readVector(48);
+      const pitch = rotation[0] * Math.PI / 180, yaw = rotation[2] * Math.PI / 180;
+      const direction = [-Math.sin(yaw) * Math.cos(pitch), Math.cos(yaw) * Math.cos(pitch), Math.sin(pitch)];
+      return { origin, target: origin.map((value, index) => value + 100 * direction[index]) };
+    }
+    function actionsFor(ped) {
+      return { aiming: Boolean(ex.mpIsAiming?.(ex.mpPlayerId())), reloading: Boolean(ex.mpIsReloading?.(ped)),
+        jumping: Boolean(ex.mpIsJumping?.(ped)), ducking: Boolean(ex.mpIsDucking?.(ped)),
+        sprinting: Boolean(ex.mpIsSprinting?.(ped)) };
+    }
+    // 每个有效 owner 回调只读取本地武器脉冲；较重的实体更新仍每 40ms 执行。
+    function sampleShots(now) {
+      if (now - shotSampleAt < 5 || !packet?.connected || !initialPlacement || modelRestore) return;
+      shotSampleAt = now;
+      const authority = (packet.combat || []).find((player) => player.id === packet.client_id);
+      const ped = ex.mpGetPlayerPed(-1);
+      if (!ped || authority?.alive === false || (ex.mpGetModel(ped) >>> 0) !== avatarTarget) {
+        weaponSample = null; pendingShots = []; return;
+      }
+      const { hash: weapon, ready } = actualWeapon(ped);
+      const shooting = Boolean(ex.mpIsShooting(ped));
+      const reloading = Boolean(ex.mpIsReloading?.(ped));
+      if (!weapon || !ready || reloading) { weaponSample = null; return; }
+      let clip = null;
+      if (ex.mpGetAmmoInClip && ex.mpGetAmmoInClip(ped, weapon | 0, BigInt(scratch + 116))) clip = view().getInt32(scratch + 116, true);
+      const same = weaponSample?.ped === ped && weaponSample.weapon === weapon;
+      const decreased = same && clip !== null && weaponSample.clip !== null && clip < weaponSample.clip;
+      const rising = shooting && (!same || !weaponSample.shooting);
+      const priorFiredAt = same ? weaponSample.firedAt : -Infinity;
+      let pendingDecrease = same ? weaponSample.pendingDecrease : null;
+      if (pendingDecrease && now - pendingDecrease.at > 300) pendingDecrease = null;
+      // 射击位可能比扣弹提前；记住尚未扣弹的已发送脉冲，匹配后续计数而非再算一发。
+      const delayedDecrease = decreased && pendingDecrease && clip === pendingDecrease.clip - 1;
+      if (delayedDecrease) pendingDecrease = null;
+      // 持续无限弹时用慢速脉冲兜底，仍由服务器武器射速校验。
+      const fallback = shooting && !decreased && now - priorFiredAt >= 150;
+      const firedAt = same ? weaponSample.firedAt : -Infinity;
+      weaponSample = { ped, weapon, shooting, clip, firedAt, pendingDecrease };
+      if ((!decreased || delayedDecrease) && !rising && !fallback) return;
+      if (now - firedAt < 50) return;
+      weaponSample.firedAt = now;
+      if (!decreased && clip !== null) weaponSample.pendingDecrease = { clip, at: now };
+      const ray = cameraRay();
+      if (ex.mpLastWeaponImpact) {
+        if (!shotBuffer) shotBuffer = Number(ex.mpAlloc(16n));
+        if (shotBuffer && ex.mpLastWeaponImpact(ped, BigInt(shotBuffer))) {
+          // 此 native 使用紧凑 rage::Vector3，而不是 0/8/16 的 scrVector。
+          const impact = [0, 4, 8].map((offset) => view().getFloat32(shotBuffer + offset, true));
+          const range = Math.hypot(...impact.map((value, index) => value - ray.origin[index]));
+          if (validPosition(impact) && range > .001 && range <= 300) ray.target = impact;
+        }
+      }
+      if (!validPosition(ray.origin) || !validPosition(ray.target)) return;
+      pendingShots.push({ at: now, ped, event: { ...ray, weapon } });
+      if (pendingShots.length > 4) pendingShots.shift();
     }
     function requestModel(hash, now) {
       if (now - (requested.get(hash) ?? -Infinity) >= 1000) {
@@ -359,13 +426,46 @@ self.prepareMultiplayerBridge = function (imports) {
         if (ex.mpClearTasksImmediately) ex.mpClearTasksImmediately(replica.ped);
         ex.mpSetInvincible(replica.ped, 1); ex.mpFreeze(replica.ped, 1);
         replica.dead = false; replica.health = null; replica.position = [...state.position];
+        replica.actions = null;
         ex.mpSetCoordsNoOffset(replica.ped, vector(72, state.position), 1, 1, 1);
+      }
+      if (state.weapon) {
+        const equipped = actualWeapon(replica.ped);
+        // Give/Select 无成功返回，资源加载或其他任务收枪后需验证实际装备并限频重试。
+        if ((!equipped.ready || equipped.hash !== state.weapon) && now - (replica.weaponAt ?? -Infinity) >= 500) {
+          replica.weaponAt = now;
+          if (state.weapon !== 0xa2719263 && ex.mpRequestWeaponAsset && ex.mpHasWeaponAsset && !ex.mpHasWeaponAsset(state.weapon | 0)) {
+            if (now - (weaponRequests.get(state.weapon) ?? -Infinity) >= 1000) {
+              ex.mpRequestWeaponAsset(state.weapon | 0, 31, 0); weaponRequests.set(state.weapon, now);
+            }
+          } else {
+            ex.mpGiveWeapon(replica.ped, state.weapon | 0, 999, 0, 1);
+            ex.mpSetCurrentWeapon(replica.ped, state.weapon | 0, 1);
+          }
+        }
+        const confirmed = actualWeapon(replica.ped);
+        replica.weapon = confirmed.ready ? confirmed.hash : 0;
       }
       const distance = Math.hypot(...state.position.map((value, i) => value - replica.position[i]));
       const newMovement = Math.hypot(...state.position.map((value, i) => value - replica.target[i]));
-      if (!state.shooting && ex.mpTaskGoStraight && now - replica.behaviorAt >= 250) {
+      const actions = state.actions || {};
+      if (typeof actions.ducking === 'boolean' && actions.ducking !== replica.actions?.ducking && ex.mpSetDucking) ex.mpSetDucking(replica.ped, actions.ducking ? 1 : 0);
+      if (actions.jumping && !replica.actions?.jumping && ex.mpTaskJump) ex.mpTaskJump(replica.ped, 0, 0, 0);
+      const readyWeapon = replica.weapon === state.weapon;
+      if (actions.reloading && readyWeapon && !replica.reloadActive && ex.mpTaskReloadWeapon) {
+        ex.mpTaskReloadWeapon(replica.ped, 1); replica.reloadActive = true;
+      } else if (!actions.reloading) replica.reloadActive = false;
+      if (actions.aiming && readyWeapon && !actions.reloading && validPosition(state.aim_target) && ex.mpTaskAimGunAtCoord
+          && now - (replica.aimAt ?? -Infinity) >= 250) {
+        ex.mpTaskAimGunAtCoord(replica.ped, vector(72, state.aim_target), 500, 0, 0); replica.aimAt = now;
+      } else if (!actions.aiming && replica.actions?.aiming && !state.shooting && !actions.reloading && ex.mpTaskStandStill) {
+        ex.mpTaskStandStill(replica.ped, 500);
+      }
+      replica.actions = { ...actions };
+      if (!state.shooting && !actions.aiming && !actions.reloading && !actions.jumping
+          && ex.mpTaskGoStraight && now - replica.behaviorAt >= 250) {
         if (newMovement > .015 || distance > .15) {
-          const speed = Math.min(3, Math.max(1, newMovement / .05));
+          const speed = actions.sprinting ? 3 : Math.min(3, Math.max(1, newMovement / .05));
           ex.mpTaskGoStraight(replica.ped, vector(72, state.position), speed, 500, state.heading, .05);
           replica.moving = true; replica.behaviorAt = now;
         } else if (replica.moving && ex.mpTaskStandStill) {
@@ -386,14 +486,7 @@ self.prepareMultiplayerBridge = function (imports) {
       if (ex.mpSetHealth && Number.isInteger(state.health) && replica.health !== nativeHealth) {
         ex.mpSetHealth(replica.ped, nativeHealth, 0); replica.health = nativeHealth;
       }
-      if (state.weapon && replica.weapon !== state.weapon) {
-        if (VISUAL_WEAPONS.has(state.weapon) && ex.mpRequestWeaponAsset) {
-          ex.mpRequestWeaponAsset(state.weapon | 0, 31, 0); weaponRequests.set(state.weapon, now);
-        }
-        ex.mpGiveWeapon(replica.ped, state.weapon | 0, 999, 0, 1);
-        ex.mpSetCurrentWeapon(replica.ped, state.weapon | 0, 1);
-        replica.weapon = state.weapon;
-      }
+
     }
     // 远端实体和射击队列独立处理，本地角色切换期间仍继续显示其他玩家。
     function updateWorld(now) {
@@ -435,7 +528,7 @@ self.prepareMultiplayerBridge = function (imports) {
     tick = (thread) => {
       try {
         const now = performance.now();
-        if (stopped || now - lastTick < 40) return;
+        if (stopped) return;
         // 跳过没有游戏脚本资源管理器的线程，不能从任意帧回调直接写实体。
         const handler = Number(ex.mpGetCurrentHandler());
         if (Number(ex.mpGetActiveThread()) !== thread || !handler) return;
@@ -448,6 +541,8 @@ self.prepareMultiplayerBridge = function (imports) {
         }
         readPacket();
         if (!useOwner(thread, handler, now)) return;
+        sampleShots(now);
+        if (now - lastTick < 40) return;
         lastTick = now;
         processNotices(now);
         if (!packet?.connected) {
@@ -466,6 +561,7 @@ self.prepareMultiplayerBridge = function (imports) {
           lifeOverride = null; lastAuthorityAlive = null; lastRespawnRevision = -1;
           modelMismatch = null; modelRestore = null; lastGoodLocal = null;
           modelDefaultsPending = false;
+          weaponSample = null; pendingShots = [];
         }
         updateWorld(now);
         // 等待服务器恢复快照，避免刷新时先随机换装或上报单机出生坐标。
@@ -643,28 +739,30 @@ self.prepareMultiplayerBridge = function (imports) {
         const model = ex.mpGetModel(localPed) >>> 0;
         const heading = ((ex.mpHeading(localPed) % 360) + 360) % 360;
         const health = Math.max(0, Math.min(1000, ex.mpGetHealth(localPed)));
-        const weapon = ex.mpSelectedWeapon(localPed) >>> 0;
+        const weapon = actualWeapon(localPed).hash;
         const shooting = !!ex.mpIsShooting(localPed);
+        const actions = actionsFor(localPed);
+        const ray = actions.aiming ? cameraRay() : null;
+        const localState = { position, model, heading, health, weapon, shooting, actions,
+          ...(ray && validPosition(ray.target) ? { aim_target: ray.target } : {}),
+          ...(localAppearance ? { appearance: localAppearance } : {}) };
         if (!authority || authority.alive) lastGoodLocal = { position: [...position], heading, weapon };
         if (now - lastState >= 50) {
           lastState = now;
-          post({ type: 'local_state', state: { position, model, heading, health, weapon, shooting,
-            ...(localAppearance ? { appearance: localAppearance } : {}) } });
+          post({ type: 'local_state', state: localState });
         }
         if (now - lastStatus >= 1000) {
           lastStatus = now;
           post({ type: 'game_status', connected: true, peer_count: replicas.size,
+            weapon, weapon_ready: actualWeapon(localPed).ready,
             ...(authority ? { health: authority.health, alive: authority.alive, kills: authority.kills, deaths: authority.deaths } : {}) });
         }
-        if (shooting && weapon && now - lastShot >= 100) {
+        pendingShots = pendingShots.filter((shot) => now - shot.at <= 250 && shot.ped === localPed && shot.event.weapon === weapon);
+        if (pendingShots.length && now - lastShot >= 50 && (!authority || authority.alive)) {
           lastShot = now;
-          ex.mpCamCoords(BigInt(scratch + 24));
-          ex.mpCamRot(BigInt(scratch + 48), 2);
-          const origin = readVector(24), rotation = readVector(48);
-          const pitch = rotation[0] * Math.PI / 180, yaw = rotation[2] * Math.PI / 180;
-          const direction = [-Math.sin(yaw) * Math.cos(pitch), Math.cos(yaw) * Math.cos(pitch), Math.sin(pitch)];
-          const target = origin.map((value, i) => value + 100 * direction[i]);
-          if (validPosition(origin) && validPosition(target)) post({ type: 'local_shot', event: { origin, target, weapon } });
+          const shot = pendingShots.shift();
+          // 同一武器的新状态随事件交给页面，网络层先发状态再发射击，避免换枪竞态。
+          post({ type: 'local_shot', event: shot.event, state: localState });
         }
       } catch (error) {
         // 不能把 JS 异常抛回 scrThread::Run；它必须继续执行原来的 TLS 清理路径。

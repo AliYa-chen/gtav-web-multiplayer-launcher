@@ -19,6 +19,7 @@ public final class CombatWorld {
     private static final long MAX_UNSIGNED_INT = 4_294_967_295L;
     private static final double MAX_SPEED = 14.0;
     private static final double MAX_RAY_LENGTH = 300.0;
+    private static final List<String> ACTION_FIELDS = List.of("aiming", "reloading", "jumping", "ducking", "sprinting");
     private final LinkedHashMap<String, Player> players = new LinkedHashMap<>();
     private long joins;
 
@@ -112,6 +113,8 @@ public final class CombatWorld {
         integer(input.get("health"), 0, 1000, "本地角色生命值");
         long weapon = integer(input.get("weapon"), 0, MAX_UNSIGNED_INT, "角色武器");
         if (!(input.get("shooting") instanceof Boolean)) throw reject("invalid_message", "射击状态必须为布尔值");
+        Map<String, Object> actions = input.containsKey("actions") ? actions(input.get("actions")) : null;
+        List<Double> aimTarget = input.containsKey("aim_target") ? coordinates(input.get("aim_target"), "瞄准坐标") : null;
         List<Double> previous = player.state == null ? player.spawn : position(player);
         double elapsed = Math.max(0, Math.min(2, (now - player.stateAt) / 1_000.0));
         double travelled = distance(previous, position);
@@ -131,6 +134,8 @@ public final class CombatWorld {
             "model", model, "health", player.health, "alive", player.health > 0,
             "weapon", weapon, "shooting", player.health > 0 && (Boolean) input.get("shooting"));
         if (input.containsKey("appearance")) state.put("appearance", copy(input.get("appearance")));
+        if (actions != null) state.put("actions", actions);
+        if (aimTarget != null) state.put("aim_target", aimTarget);
         player.stateSequence = sequence;
         player.stateAt = now;
         player.state = state;
@@ -154,6 +159,8 @@ public final class CombatWorld {
         if (range <= 0.001 || range > MAX_RAY_LENGTH)
             throw reject("invalid_shot", "射击射线必须在 0–300 米范围内");
         Weapon rule = weapon(weapon);
+        if (rule == null) throw reject("unsupported_weapon", String.format(
+            "暂不支持武器 0x%08x 的战局伤害，请使用普通枪械", weapon));
         if (shooter.shotAt != Long.MIN_VALUE && now - shooter.shotAt < rule.cooldown)
             throw reject("rate_limited", "该武器射击间隔过短");
         shooter.shotSequence = sequence;
@@ -162,8 +169,6 @@ public final class CombatWorld {
         events.add(object("type", "shot_event", "room_id", "PUBLIC", "player_id", id,
             "event", object("seq", sequence, "origin", origin, "target", target, "weapon", weapon),
             "time", Instant.ofEpochMilli(now).toString()));
-        // 未列入支持清单的武器只同步射击表现，避免假装实现爆炸、近战等不同伤害类型。
-        if (rule.damage == 0) return events;
         double[] direction = new double[3];
         for (int index = 0; index < 3; index++) direction[index] = (target.get(index) - origin.get(index)) / range;
         Player victim = null;
@@ -208,6 +213,12 @@ public final class CombatWorld {
                 player.state.put("position", player.spawn);
                 player.state.put("heading", 90.0);
                 player.state.put("shooting", false);
+                if (player.state.containsKey("actions")) {
+                    Map<String, Object> idle = new LinkedHashMap<>();
+                    for (String action : ACTION_FIELDS) idle.put(action, false);
+                    player.state.put("actions", idle);
+                }
+                player.state.remove("aim_target");
                 setHealth(player);
                 // 这是服务端重生，客户端下一帧可在出生点重新提供位置。
                 player.stateAt = now;
@@ -252,7 +263,23 @@ public final class CombatWorld {
         if (hash == 0x1d073a89L || hash == 0x7846a318L || hash == 0x9d61e50fL || hash == 0xe284c527L)
             return new Weapon(50, 800);
         if (hash == 0x05fc3c11L || hash == 0x0c472fe2L || hash == 0xc734385aL) return new Weapon(100, 1_000);
-        return new Weapon(0, 100);
+        // 本项目 MINIGUN 是普通即时命中武器，原枪射击间隔为 20ms。
+        // 每条客户端射击消息仍只有一条射线，不按原生更高射速补算多发伤害。
+        if (hash == 0x42bf8a85L) return new Weapon(25, 20);
+        return null;
+    }
+
+    private static Map<String, Object> actions(Object input) throws Rejection {
+        if (!(input instanceof Map<?, ?> values) || values.size() != ACTION_FIELDS.size()
+                || !values.keySet().containsAll(ACTION_FIELDS))
+            throw reject("invalid_message", "行为状态必须包含完整且固定的五个布尔字段");
+        Map<String, Object> result = new LinkedHashMap<>();
+        for (String action : ACTION_FIELDS) {
+            if (!(values.get(action) instanceof Boolean value))
+                throw reject("invalid_message", "行为状态 " + action + " 必须为布尔值");
+            result.put(action, value);
+        }
+        return result;
     }
 
     /** 有限射线与竖直胶囊相交，返回最近距离；不推测游戏地图的墙体遮挡。 */

@@ -47,6 +47,10 @@ function engine(options = {}) {
   let now = 100, allocated = 4096, nextPed = 100, localPosition = [...(options.localPosition || [711.5, -1088, 22.41])];
   let localPed = options.localPed ?? 7, localModel = options.localModel ?? 0x705e61f2;
   let localHeading = options.localHeading ?? 180, localWeapon = options.localWeapon ?? 0;
+  let localShooting = false, localClip = 30, weaponReady = true, lastImpact = null;
+  let localActions = { aiming: false, reloading: false, jumping: false, ducking: false, sprinting: false };
+  let remoteEquipBlocked = false;
+  const equippedWeapons = new Map();
   let setModelBlockedAttempts = options.setModelBlockedAttempts ?? 0, setModelNoEffect = options.setModelNoEffect ?? false;
   let setModelAsync = options.setModelAsync ?? false, pendingModel = null;
   let noticeResult = options.noticeResult ?? 101, noticeThrows = options.noticeThrows ?? false;
@@ -95,8 +99,28 @@ function engine(options = {}) {
     mpSetHeadOverlay: () => {}, mpSetOverlayTint: () => {}, mpSetHairTint: () => {},
     mpHeading: () => localHeading,
     mpGetHealth: (ped) => health.get(ped) ?? 200,
-    mpIsShooting: () => false,
-    mpSelectedWeapon: () => localWeapon,
+    mpIsShooting: (ped) => ped === localPed ? localShooting : false,
+    mpSelectedWeapon: (ped) => ped === localPed ? localWeapon : equippedWeapons.get(ped) || 0,
+    mpGetCurrentPedWeapon: (ped, pointer) => {
+      if (ped === localPed && !weaponReady) return 0;
+      new DataView(memory.buffer).setUint32(Number(pointer), ped === localPed ? localWeapon : equippedWeapons.get(ped) || 0, true);
+      return 1;
+    },
+    mpGetAmmoInClip: (ped, _weapon, pointer) => {
+      if (ped !== localPed || !weaponReady || options.noClip) return 0;
+      new DataView(memory.buffer).setInt32(Number(pointer), localClip, true); return 1;
+    },
+    mpLastWeaponImpact: (_ped, pointer) => {
+      if (!lastImpact) return 0;
+      lastImpact.forEach((value, index) => new DataView(memory.buffer).setFloat32(Number(pointer) + 4 * index, value, true));
+      return 1;
+    },
+    mpIsAiming: () => localActions.aiming ? 1 : 0,
+    mpIsReloading: (ped) => ped === localPed && localActions.reloading ? 1 : 0,
+    mpIsJumping: () => localActions.jumping ? 1 : 0,
+    mpIsDucking: () => localActions.ducking ? 1 : 0,
+    mpIsSprinting: () => localActions.sprinting ? 1 : 0,
+    mpTaskAimGunAtCoord: () => {}, mpTaskReloadWeapon: () => {}, mpTaskJump: () => {}, mpSetDucking: () => {},
     mpHasModel: (hash) => !unavailableModels.has(hash >>> 0),
     mpRequestModel: () => {},
     mpCreatePed: () => { alive.add(++nextPed); health.set(nextPed, 200); return nextPed; },
@@ -108,8 +132,14 @@ function engine(options = {}) {
     mpSetCoordsNoOffset: (ped, pointer) => { if (ped === localPed) localPosition = readNativeVector(pointer); },
     mpBlockEvents: () => {}, mpFreeze: () => {},
     mpSetHeading: (ped, heading) => { if (ped === localPed) localHeading = heading; },
-    mpGiveWeapon: (ped, weapon) => { if (ped === localPed) localWeapon = weapon >>> 0; },
-    mpSetCurrentWeapon: (ped, weapon) => { if (ped === localPed) localWeapon = weapon >>> 0; },
+    mpGiveWeapon: (ped, weapon) => {
+      if (ped === localPed) localWeapon = weapon >>> 0;
+      else if (!remoteEquipBlocked) equippedWeapons.set(ped, weapon >>> 0);
+    },
+    mpSetCurrentWeapon: (ped, weapon) => {
+      if (ped === localPed) localWeapon = weapon >>> 0;
+      else if (!remoteEquipBlocked) equippedWeapons.set(ped, weapon >>> 0);
+    },
     mpTaskShootAtCoord: () => {},
     mpSetHealth: (ped, value) => {
       health.set(ped, value);
@@ -210,6 +240,13 @@ function engine(options = {}) {
     setPosition: (position) => { localPosition = [...position]; },
     setHeading: (heading) => { localHeading = heading; }, heading: () => localHeading,
     setWeapon: (weapon) => { localWeapon = weapon >>> 0; }, weapon: () => localWeapon,
+    setShooting: (value) => { localShooting = value; },
+    setClip: (value) => { localClip = value; },
+    setWeaponReady: (value) => { weaponReady = value; },
+    setActions: (value) => { localActions = { ...localActions, ...value }; },
+    setLastImpact: (value) => { lastImpact = value; },
+    setRemoteEquipBlocked: (value) => { remoteEquipBlocked = value; },
+    equippedWeapons,
     setModelBlockedAttempts: (count) => { setModelBlockedAttempts = count; },
     setModelNoEffect: (value) => { setModelNoEffect = value; },
     setModelAsync: (value) => { setModelAsync = value; },
@@ -297,6 +334,85 @@ test('角色画面更新不能盖掉真实断线提示，网络恢复后显示�
   page.receive({ type: 'network_status', connected: true, members: 2 });
   assert.ok(page.hud.textContent.includes('服务器在线 · 2 位玩家'));
   assert.ok(!page.hud.textContent.includes('自动重连'));
+});
+
+test('原生子弹脉冲在重帧之间锁存，弹夹减少可补漏单发，附带同武器状态', () => {
+  const bridge = engine({ localWeapon: 0x1b06d571 }); bridge.connect(packet({ peers: [] }));
+  bridge.tick(); // 建立弹夹基线。
+  const start = bridge.now();
+  bridge.setShooting(true); bridge.setClip(29); bridge.tick(start + 5);
+  bridge.setShooting(false); bridge.tick(start + 10);
+  bridge.tick(start + 40);
+  const shots = () => bridge.messages.filter((message) => message.multiplayer?.type === 'local_shot');
+  assert.equal(shots().length, 1);
+  assert.equal(shots()[0].multiplayer.event.weapon, 0x1b06d571);
+  assert.equal(shots()[0].multiplayer.state.weapon, 0x1b06d571);
+  bridge.setClip(28); bridge.tick(start + 200); // 无IsShooting脉冲也根据实际减弹补发。
+  assert.equal(shots().length, 2);
+  for (let index = 0; index < 5; index++) bridge.tick();
+  assert.equal(shots().length, 2, '静止弹夹不能重复发枪');
+});
+
+test('换枪未装备和装填样本不吞掉随后有效脉冲，impact使用紧凑向量', () => {
+  const bridge = engine({ localWeapon: 0x1b06d571 }); bridge.connect(packet({ peers: [] }));
+  bridge.setWeaponReady(false); bridge.setShooting(true); bridge.tick();
+  assert.equal(bridge.messages.filter((message) => message.multiplayer?.type === 'local_shot').length, 0);
+  bridge.setWeaponReady(true); bridge.setLastImpact([710, -1000, 25]); bridge.tick();
+  const shot = bridge.messages.find((message) => message.multiplayer?.type === 'local_shot').multiplayer;
+  assert.deepEqual(JSON.parse(JSON.stringify(shot.event.target)), [710, -1000, 25]);
+  bridge.setActions({ reloading: true }); bridge.setClip(30); bridge.setShooting(false); bridge.tick();
+  bridge.setClip(29); bridge.tick();
+  assert.equal(bridge.messages.filter((message) => message.multiplayer?.type === 'local_shot').length, 1);
+});
+
+test('同一发先有射击位随后才减弹不会重复上报，有限弹和无限弹持续开火可限频', () => {
+  const bridge = engine({ localWeapon: 0x1b06d571 }); bridge.connect(packet({ peers: [] }));
+  bridge.setShooting(true); bridge.tick();
+  const shots = () => bridge.messages.filter((message) => message.multiplayer?.type === 'local_shot');
+  assert.equal(shots().length, 1);
+  bridge.setShooting(false); bridge.tick(); bridge.setClip(29); bridge.tick();
+  assert.equal(shots().length, 1);
+  bridge.setShooting(true);
+  for (let index = 0; index < 10; index++) bridge.tick();
+  assert.ok(shots().length > 1);
+});
+
+test('远端武器未就绪先请求，装备失败限频重试，任务收枪后再次恢复', () => {
+  const bridge = engine({ weaponAssetReady: false }); bridge.connect();
+  assert.ok(bridge.calls.some((call) => call.name === 'mpRequestWeaponAsset'));
+  assert.equal(bridge.calls.filter((call) => call.name === 'mpGiveWeapon').length, 0);
+  bridge.setWeaponAssetReady(true); bridge.setRemoteEquipBlocked(true);
+  for (let index = 0; index < 8; index++) bridge.tick();
+  const before = bridge.calls.filter((call) => call.name === 'mpGiveWeapon').length;
+  assert.ok(before > 0);
+  bridge.setRemoteEquipBlocked(false);
+  for (let index = 0; index < 6; index++) bridge.tick();
+  const ped = [...bridge.equippedWeapons.keys()][0];
+  assert.equal(bridge.equippedWeapons.get(ped), 0x1b06d571);
+  bridge.equippedWeapons.set(ped, 0);
+  for (let index = 0; index < 6; index++) bridge.tick();
+  assert.equal(bridge.equippedWeapons.get(ped), 0x1b06d571);
+  assert.ok(bridge.calls.filter((call) => call.name === 'mpGiveWeapon').length > before);
+});
+
+test('服务器动作快照驱动远端瞄准、装填、跳跃和蹲下，边沿动作不重复', () => {
+  const actions = { aiming: true, reloading: true, jumping: true, ducking: true, sprinting: true };
+  const value = packet({ peers: [{ player_id: 'REMOTE', state: peerState({ actions, aim_target: [711, -1082, 23] }) }] });
+  const bridge = engine(); bridge.connect(value);
+  const ped = [...bridge.equippedWeapons.keys()][0];
+  assert.equal(bridge.calls.filter((call) => call.name === 'mpTaskJump').length, 1);
+  assert.equal(bridge.calls.filter((call) => call.name === 'mpTaskReloadWeapon').length, 1);
+  assert.deepEqual(bridge.calls.find((call) => call.name === 'mpSetDucking').arguments, [ped, 1]);
+  for (let index = 0; index < 5; index++) { bridge.publish(value); bridge.tick(); }
+  assert.equal(bridge.calls.filter((call) => call.name === 'mpTaskJump').length, 1);
+  assert.equal(bridge.calls.filter((call) => call.name === 'mpTaskReloadWeapon').length, 1);
+  actions.reloading = false; actions.jumping = false; actions.ducking = false;
+  bridge.publish(value); bridge.tick();
+  assert.ok(bridge.calls.some((call) => call.name === 'mpTaskAimGunAtCoord'));
+  assert.deepEqual(bridge.calls.filter((call) => call.name === 'mpSetDucking').at(-1).arguments, [ped, 0]);
+  bridge.setActions(actions); bridge.tick();
+  assert.deepEqual(lastSample(bridge).actions, actions);
+  assert.ok(lastSample(bridge).aim_target.length === 3);
 });
 
 test('native 上下文与错误通知异常都被吸收，允许 WASM 执行 TLS 清理', () => {

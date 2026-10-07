@@ -16,13 +16,15 @@ const dependencies = Promise.all([
 ]);
 const source = fs.readFileSync(path.join(root, 'client/multiplayer/public-session.js'), 'utf8')
   .replace(/^import .*$/gm, '').replace('export async function startPublicSession', 'async function startPublicSession');
-const capabilities = ['public_session', 'player_state', 'shoot_events', 'appearance', 'combat', 'resume', 'heartbeat', 'snapshot'];
+const capabilities = ['public_session', 'player_state', 'shoot_events', 'appearance', 'combat', 'resume', 'heartbeat', 'snapshot', 'actions', 'combat_feedback'];
 const preferences = (name = '玩家甲') => ({ server: '183.66.27.21:47485', name, preset: 'npc_male', seed: 73 });
 const playerState = (seq = 1) => ({ seq, position: [711.5, -1088.1, 22.4], heading: 90,
   model: 0x705e61f2, health: 200, weapon: 0x1b06d571, shooting: false });
 const room = (id = 'LOCAL', extras = []) => ({ id: 'PUBLIC', map: 'gta5', phase: 'launched', host_id: null,
   members: [{ id, name: '玩家甲', connected: true }, ...extras] });
 const copy = (value) => JSON.parse(JSON.stringify(value));
+const actionState = (changes = {}) => ({ aiming: false, reloading: false, jumping: false, ducking: false, sprinting: false, ...changes });
+const shotEvent = (weapon = playerState().weapon) => ({ origin: [711, -1088, 24], target: [720, -1088, 24], weapon });
 
 async function harness(options = {}) {
   const [addressModule, appearanceModule] = await dependencies;
@@ -36,8 +38,14 @@ async function harness(options = {}) {
   const document = { visibilityState: 'visible', addEventListener, removeEventListener };
   class Socket {
     static OPEN = 1;
-    constructor(address) { this.address = address; this.readyState = 0; this.bufferedAmount = 0; this.sent = []; sockets.push(this); }
-    send(value) { assert.equal(this.readyState, Socket.OPEN); this.sent.push(JSON.parse(value)); }
+    constructor(address) { this.address = address; this.readyState = 0; this.bufferedAmount = 0; this.sent = []; this.sentTimes = []; sockets.push(this); }
+    send(value) {
+      assert.equal(this.readyState, Socket.OPEN);
+      const parsed = JSON.parse(value);
+      if (this.failSendType === parsed.type) throw new Error('受控连接发送失败');
+      this.sent.push(parsed);
+      this.sentTimes.push({ type: parsed.type, at: now });
+    }
     close() { this.readyState = 3; this.onclose?.({}); }
     welcome(features = capabilities, id = 'TEMP') {
       this.readyState = Socket.OPEN;
@@ -194,7 +202,7 @@ test('两个同来源游戏页的外观、角色状态与射击只进入各自�
   first.api.setReceiver((value) => firstPackets.push(copy(value)));
   second.api.setReceiver((value) => secondPackets.push(copy(value)));
   first.api.onWorkerMessage({ type: 'local_state', state: playerState() });
-  first.api.onWorkerMessage({ type: 'local_shot', event: { origin: [711, -1088, 24], target: [720, -1088, 24], weapon: 1 } });
+  first.api.onWorkerMessage({ type: 'local_shot', event: { origin: [711, -1088, 24], target: [720, -1088, 24], weapon: playerState().weapon } });
   assert.equal(firstSocket.messages('player_state').length, 1); assert.equal(firstSocket.messages('shot_event').length, 1);
   assert.equal(secondSocket.messages('player_state').length, 0); assert.equal(secondSocket.messages('shot_event').length, 0);
   assert.equal(firstPackets[0].seed, 10); assert.equal(secondPackets[0].seed, 20);
@@ -210,7 +218,7 @@ test('断线后以指数退避重连，恢复相同身份与服务端序号，�
   assert.equal(next.messages('hello')[0].resume_token, 'private-resume-token');
   page.enter(next, 'LOCAL', { last_state_seq: 40, last_shot_seq: 60 });
   page.api.onWorkerMessage({ type: 'local_state', state: playerState() });
-  page.api.onWorkerMessage({ type: 'local_shot', event: { origin: [711, -1088, 24], target: [720, -1088, 24], weapon: 1 } });
+  page.api.onWorkerMessage({ type: 'local_shot', event: { origin: [711, -1088, 24], target: [720, -1088, 24], weapon: playerState().weapon } });
   assert.equal(next.messages('player_state')[0].seq, 41); assert.equal(next.messages('shot_event')[0].seq, 61);
   assert.equal(page.active().length, 1);
   page.api.close();
@@ -385,4 +393,281 @@ test('仅发送过有效凭据且 profile 返回相同身份时才标记 resumed
     assert.equal(packets[0].resumed, false); assert.equal(packets[0].resume_state, null);
     page.api.close();
   }
+});
+
+test('行为状态与瞄准点只在服务端支持时传送，合法完整字段保持一致', async () => {
+  const page = await harness(); const socket = page.enter();
+  assert.ok(socket.messages('hello')[0].capabilities.includes('actions'));
+  assert.ok(socket.messages('hello')[0].capabilities.includes('combat_feedback'));
+  const state = { ...playerState(), actions: actionState({ aiming: true, sprinting: true }), aim_target: [750, -1075, 24] };
+  page.api.onWorkerMessage({ type: 'local_state', state });
+  assert.deepEqual(socket.messages('player_state')[0].actions, state.actions);
+  assert.deepEqual(socket.messages('player_state')[0].aim_target, state.aim_target);
+  socket.receive({ type: 'room_state', room: room('LOCAL', [{ id: 'REMOTE', name: '玩家乙' }]) });
+  socket.receive({ type: 'world_state', room_id: 'PUBLIC', states: [{ player_id: 'REMOTE', state }] });
+  const packets = []; page.api.setReceiver((value) => packets.push(copy(value)));
+  assert.deepEqual(packets[0].peers[0].state.actions, state.actions);
+  assert.deepEqual(packets[0].peers[0].state.aim_target, state.aim_target);
+  page.api.close();
+  const legacy = await harness(); const oldSocket = legacy.enter(undefined, 'LOCAL', {}, capabilities.filter((feature) => !['actions', 'combat_feedback'].includes(feature)));
+  legacy.api.onWorkerMessage({ type: 'local_state', state });
+  assert.ok(!Object.hasOwn(oldSocket.messages('player_state')[0], 'actions'));
+  assert.ok(!Object.hasOwn(oldSocket.messages('player_state')[0], 'aim_target'));
+  assert.ok(!oldSocket.messages('hello')[0].capabilities.includes('combat_feedback')); legacy.api.close();
+});
+
+test('行为固定布尔键与瞄准坐标严格校验，非法本地快照不会上传或触发断线', async () => {
+  const page = await harness(); const socket = page.enter();
+  const invalid = [
+    { actions: { aiming: true } }, { actions: { ...actionState(), sprinting: 1 } },
+    { actions: { ...actionState(), custom: false } }, { actions: [] }, { actions: null },
+    { aim_target: [17000, 1, 1] }, { aim_target: ['1', 1, 1] }, { aim_target: [1, 2] }, { aim_target: null },
+  ];
+  for (const fields of invalid) {
+    page.api.onWorkerMessage({ type: 'local_state', state: { ...playerState(), ...fields } });
+    page.advance(50);
+  }
+  assert.equal(socket.messages('player_state').length, 0); assert.equal(page.sockets.length, 1);
+  page.api.onWorkerMessage({ type: 'local_state', state: playerState() });
+  assert.equal(socket.messages('player_state').length, 1, '旧版没有行为字段的状态仍可上报'); page.api.close();
+});
+
+test('快换枪时强制提前发送待同步的新武器状态，状态始终排在射击事件前', async () => {
+  const page = await harness(); const socket = page.enter();
+  page.api.onWorkerMessage({ type: 'local_state', state: playerState() }); page.advance(40);
+  const weapon = 0x83bf0278, next = { ...playerState(), weapon, actions: actionState({ aiming: true }), aim_target: [750, -1075, 24] };
+  page.api.onWorkerMessage({ type: 'local_state', state: next });
+  assert.equal(socket.messages('player_state').length, 1, '普通状态仍有50毫秒节流');
+  page.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(weapon) });
+  assert.deepEqual(socket.sent.slice(-2).map((message) => message.type), ['player_state', 'shot_event']);
+  assert.equal(socket.sent.at(-2).weapon, weapon); assert.equal(socket.sent.at(-1).weapon, weapon);
+  assert.equal(socket.messages('player_state').length, 2); page.advance(10);
+  assert.equal(socket.messages('player_state').length, 2, '原延迟计时器必须取消，不能再重复上报'); page.api.close();
+});
+
+test('射击携带的同帧完整状态优先于旧待发快照，并避免重复发送刚成功的同一状态', async () => {
+  const page = await harness(); const socket = page.enter();
+  page.api.onWorkerMessage({ type: 'local_state', state: playerState() }); page.advance(40);
+  page.api.onWorkerMessage({ type: 'local_state', state: { ...playerState(), weapon: 0x83bf0278 } });
+  const shotState = { ...playerState(), position: [712, -1087, 22.4], weapon: 0xbfefff6d, shooting: true,
+    actions: actionState({ aiming: true }), aim_target: [725, -1080, 24] };
+  page.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(shotState.weapon), state: shotState });
+  assert.equal(socket.sent.at(-2).weapon, shotState.weapon);
+  assert.deepEqual(socket.sent.at(-2).position, shotState.position); assert.equal(socket.sent.at(-1).type, 'shot_event');
+  page.advance(50); const count = socket.messages('player_state').length;
+  page.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(shotState.weapon), state: shotState });
+  assert.equal(socket.messages('player_state').length, count); assert.equal(socket.messages('shot_event').length, 2);
+  page.api.close();
+});
+
+test('发送失败、背压、无状态和不同武器状态均不能越过状态步骤单独发送射击', async () => {
+  const page = await harness(); const socket = page.enter();
+  page.api.onWorkerMessage({ type: 'local_shot', event: shotEvent() });
+  assert.equal(socket.messages('shot_event').length, 0, '没有本地状态不能让服务器猜测玩家武器');
+  page.api.onWorkerMessage({ type: 'local_state', state: playerState() }); page.advance(50);
+  const next = { ...playerState(), weapon: 0x83bf0278 };
+  page.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(next.weapon), state: playerState() });
+  assert.equal(socket.messages('shot_event').length, 0, '射击与快照武器不一致不能发送');
+  socket.bufferedAmount = 65537;
+  page.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(next.weapon), state: next });
+  assert.equal(socket.messages('shot_event').length, 0);
+  socket.bufferedAmount = 0; socket.failSendType = 'player_state';
+  page.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(next.weapon), state: next });
+  assert.equal(socket.messages('shot_event').length, 0, '状态 send 抛错不能紧接着发送射击');
+  socket.failSendType = null; page.advance(50);
+  page.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(next.weapon), state: next });
+  assert.equal(socket.sent.at(-1).type, 'shot_event'); assert.equal(socket.messages('player_state').at(-1).seq, 2,
+    '发送失败不能推进已经确认发送的状态序号'); page.api.close();
+});
+
+test('强制射击状态仍遵守30Hz预算，射击事件不超过20Hz', async () => {
+  const page = await harness(); const socket = page.enter();
+  page.api.onWorkerMessage({ type: 'local_state', state: playerState() }); page.advance(10);
+  const next = { ...playerState(), position: [712, -1087, 22.4] };
+  page.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(), state: next });
+  assert.equal(socket.messages('player_state').length, 1); assert.equal(socket.messages('shot_event').length, 0);
+  page.advance(29); assert.equal(socket.messages('shot_event').length, 0);
+  page.advance(1);
+  assert.equal(socket.messages('shot_event').length, 1);
+  assert.ok(socket.sentTimes.filter((entry) => entry.type === 'player_state')[1].at >= 1000 / 30);
+  page.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(), state: next });
+  page.advance(49);
+  assert.equal(socket.messages('shot_event').length, 1); page.advance(1);
+  assert.equal(socket.messages('shot_event').length, 2);
+  const shots = socket.sentTimes.filter((entry) => entry.type === 'shot_event');
+  assert.ok(shots[1].at - shots[0].at >= 50); page.api.close();
+});
+
+test('短暂背压解除后自动发送最新一条单发，先发送对应新武器状态，不要求再次扣动扳机', async () => {
+  const page = await harness(); const socket = page.enter();
+  page.api.onWorkerMessage({ type: 'local_state', state: playerState() }); page.advance(50);
+  socket.bufferedAmount = 70000;
+  const state = { ...playerState(), weapon: 0x83bf0278 };
+  page.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(state.weapon), state });
+  page.advance(50);
+  const latest = { ...shotEvent(state.weapon), target: [727, -1086, 24] };
+  page.api.onWorkerMessage({ type: 'local_shot', event: latest, state });
+  assert.equal(socket.messages('shot_event').length, 0);
+  socket.bufferedAmount = 0; page.advance(10);
+  assert.deepEqual(socket.sent.slice(-2).map((message) => message.type), ['player_state', 'shot_event']);
+  assert.equal(socket.sent.at(-2).weapon, state.weapon); assert.deepEqual(socket.sent.at(-1).target, latest.target);
+  page.advance(500); assert.equal(socket.messages('shot_event').length, 1, '队列只能保留最新一条，不补发过时的连续射线');
+  page.api.close();
+});
+
+test('状态发送暂时失败后自动补上同一次射击，状态与射击各只成功发送一次', async () => {
+  const page = await harness(); const socket = page.enter();
+  page.api.onWorkerMessage({ type: 'local_state', state: playerState() }); page.advance(50);
+  const state = { ...playerState(), weapon: 0x83bf0278 };
+  socket.failSendType = 'player_state';
+  page.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(state.weapon), state });
+  page.advance(30); assert.equal(socket.messages('shot_event').length, 0);
+  socket.failSendType = null; page.advance(20);
+  assert.deepEqual(socket.sent.slice(-2).map((message) => message.type), ['player_state', 'shot_event']);
+  assert.equal(socket.messages('player_state').at(-1).seq, 2); assert.equal(socket.messages('shot_event')[0].seq, 1);
+  page.advance(200); assert.equal(socket.messages('shot_event').length, 1); page.api.close();
+});
+
+test('超过250毫秒的待发射击、换枪后的旧射击和断线前射击均清除，不重放过期动作', async () => {
+  const expired = await harness(); const expiredSocket = expired.enter();
+  expiredSocket.bufferedAmount = 70000;
+  expired.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(), state: playerState() });
+  expired.advance(251); expiredSocket.bufferedAmount = 0; expired.advance(50);
+  assert.equal(expiredSocket.messages('shot_event').length, 0); expired.api.close();
+  const swapped = await harness(); const swappedSocket = swapped.enter();
+  swappedSocket.bufferedAmount = 70000;
+  swapped.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(), state: playerState() });
+  swapped.api.onWorkerMessage({ type: 'local_state', state: { ...playerState(), weapon: 0x83bf0278 } });
+  swappedSocket.bufferedAmount = 0; swapped.advance(100);
+  assert.equal(swappedSocket.messages('shot_event').length, 0); swapped.api.close();
+  const disconnected = await harness(); const first = disconnected.enter(); first.bufferedAmount = 70000;
+  disconnected.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(), state: playerState() });
+  first.close(); disconnected.advance(500); const second = disconnected.enter(undefined, 'LOCAL');
+  disconnected.advance(100); assert.equal(second.messages('shot_event').length, 0);
+  disconnected.api.close(); assert.equal(disconnected.timers.size, 0, '关闭时必须清理射击和状态重试计时器');
+  const closed = await harness(); const closingSocket = closed.enter(); closingSocket.bufferedAmount = 70000;
+  closed.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(), state: playerState() });
+  closed.api.close(); assert.equal(closed.timers.size, 0);
+  closingSocket.bufferedAmount = 0; closed.advance(1000);
+  assert.equal(closingSocket.messages('shot_event').length, 0, '关闭战局后待发事件不能通过旧计时器继续上传');
+});
+
+test('旧版没有同帧射击快照仍使用待同步状态，旧服务器剥离动作后同帧比较不重复发送状态', async () => {
+  const page = await harness(); const socket = page.enter(undefined, 'LOCAL', {}, capabilities.filter((feature) => feature !== 'actions'));
+  const state = { ...playerState(), actions: actionState({ aiming: true }), aim_target: [720, -1088, 24] };
+  page.api.onWorkerMessage({ type: 'local_state', state });
+  page.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(), state });
+  assert.equal(socket.messages('player_state').length, 1); assert.equal(socket.messages('shot_event').length, 1);
+  page.advance(10);
+  const next = { ...state, weapon: 0x83bf0278 };
+  page.api.onWorkerMessage({ type: 'local_state', state: next });
+  page.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(next.weapon) });
+  assert.equal(socket.messages('shot_event').length, 1);
+  page.advance(40); assert.equal(socket.messages('shot_event').length, 2);
+  assert.equal(socket.messages('player_state').at(-1).weapon, next.weapon);
+  assert.ok(socket.messages('player_state').every((message) => !Object.hasOwn(message, 'actions')));
+  page.api.close();
+});
+
+test('服务端命中和拒绝反馈不注销玩家身份，日志区分结果且不包含坐标或恢复凭据', async () => {
+  const page = await harness(); const socket = page.enter();
+  const packets = []; page.api.setReceiver((value) => packets.push(copy(value)));
+  const results = [
+    { seq: 1, weapon: 0x83bf0278, accepted: true, hit: false },
+    { seq: 2, weapon: 0x83bf0278, accepted: true, hit: true, victim_id: 'REMOTE', damage: 40, health: 160 },
+    { seq: 3, weapon: 0xb1ca77b1, accepted: false, hit: false, reason: 'unsupported_weapon' },
+    { seq: 4, weapon: 0x83bf0278, accepted: false, hit: false, reason: 'weapon_mismatch' },
+  ];
+  for (const result of results) socket.receive({ type: 'shot_result', ...result });
+  assert.deepEqual(packets.filter((value) => value.type === 'combat_feedback'), results.map((result) => ({ type: 'combat_feedback', ...result })));
+  const logs = page.logs.filter((line) => line.startsWith('[public-combat] ')).map((line) => JSON.parse(line.slice('[public-combat] '.length)));
+  assert.equal(logs.length, 4); assert.equal(logs[0].hit, false); assert.equal(logs[1].hit, true);
+  assert.equal(logs[2].reason, 'unsupported_weapon'); assert.equal(logs[2].accepted, false);
+  assert.ok(logs.every((value) => value.stage === 'result'
+    && Object.keys(value).every((key) => ['stage', 'seq', 'weapon', 'accepted', 'hit', 'reason'].includes(key))));
+  assert.ok(page.logs.every((line) => !line.includes('private-resume-token')));
+  assert.equal(socket.readyState, 1); assert.equal(page.sockets.length, 1); page.api.close();
+});
+
+test('实际服务器省略 hit 的拒绝反馈仍记录结果并提示，成功结果缺少 hit 则忽略', async () => {
+  const page = await harness(); const socket = page.enter(), packets = [];
+  page.api.setReceiver((value) => packets.push(copy(value)));
+  socket.receive({ type: 'shot_result', seq: 1, weapon: 0xb1ca77b1, accepted: false,
+    reason: 'unsupported_weapon', message: '暂不支持此武器' });
+  assert.deepEqual(packets.filter((value) => value.type === 'combat_feedback'), [{
+    type: 'combat_feedback', seq: 1, weapon: 0xb1ca77b1, accepted: false, hit: false, reason: 'unsupported_weapon' }]);
+  const results = page.logs.filter((line) => line.startsWith('[public-combat] ')).map((line) => JSON.parse(line.slice('[public-combat] '.length)));
+  assert.deepEqual(results, [{ stage: 'result', seq: 1, weapon: 0xb1ca77b1, accepted: false, hit: false, reason: 'unsupported_weapon' }]);
+  socket.receive({ type: 'shot_result', seq: 2, weapon: 1, accepted: true });
+  socket.receive({ type: 'shot_result', seq: 2, weapon: 1, accepted: false, hit: true, reason: 'invalid_shot' });
+  socket.receive({ type: 'shot_result', seq: 2, weapon: 1, accepted: false, hit: null, reason: 'invalid_shot' });
+  assert.equal(packets.filter((value) => value.type === 'combat_feedback').length, 1);
+  assert.equal(socket.readyState, 1); page.api.close();
+});
+
+test('射击成功发送才记录 sent 阶段，等待、失败、过期不制造日志且日志不包含玩家信息', async () => {
+  const page = await harness(); const socket = page.enter();
+  const combatLogs = () => page.logs.filter((line) => line.startsWith('[public-combat] ')).map((line) => JSON.parse(line.slice('[public-combat] '.length)));
+  socket.failSendType = 'shot_event';
+  page.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(), state: playerState() });
+  page.advance(30); assert.deepEqual(combatLogs(), []);
+  socket.failSendType = null; page.advance(10);
+  assert.deepEqual(combatLogs(), [{ stage: 'sent', seq: 1, weapon: playerState().weapon }]);
+  socket.receive({ type: 'shot_result', seq: 1, weapon: playerState().weapon, accepted: true, hit: false });
+  assert.deepEqual(combatLogs().map((value) => value.stage), ['sent', 'result']);
+  socket.bufferedAmount = 70000;
+  page.api.onWorkerMessage({ type: 'local_shot', event: shotEvent(), state: playerState() });
+  page.advance(300); assert.equal(combatLogs().length, 2);
+  const sent = combatLogs()[0]; assert.deepEqual(Object.keys(sent).sort(), ['seq', 'stage', 'weapon']);
+  assert.ok(combatLogs().every((value) => !['position', 'origin', 'target', 'client_id', 'name', 'resume_token'].some((key) => Object.hasOwn(value, key))));
+  page.api.close();
+});
+
+test('重复、非法和未协商的射击反馈被忽略，旧版普通武器错误也不会触发重连', async () => {
+  const page = await harness(); const socket = page.enter(), packets = [];
+  page.api.setReceiver((value) => packets.push(copy(value)));
+  socket.receive({ type: 'shot_result', seq: 5, weapon: 1, accepted: true, hit: false });
+  socket.receive({ type: 'shot_result', seq: 5, weapon: 1, accepted: true, hit: false });
+  for (const invalid of [{ seq: -1 }, { hit: 'yes' }, { accepted: false, hit: true }, { damage: 1000 },
+    { health: -1 }, { victim_id: {} }, { reason: 'untrusted message' }]) {
+    socket.receive({ type: 'shot_result', seq: 6, weapon: 1, accepted: true, hit: false, ...invalid });
+  }
+  assert.equal(packets.filter((value) => value.type === 'combat_feedback').length, 1); assert.equal(socket.readyState, 1);
+  page.api.close();
+  const legacy = await harness(); const oldSocket = legacy.enter(undefined, 'LOCAL', {}, capabilities.filter((feature) => feature !== 'combat_feedback'));
+  const oldPackets = []; legacy.api.setReceiver((value) => oldPackets.push(copy(value)));
+  oldSocket.receive({ type: 'shot_result', seq: 1, weapon: 1, accepted: true, hit: false });
+  assert.equal(oldPackets.filter((value) => value.type === 'combat_feedback').length, 0);
+  oldSocket.receive({ type: 'error', code: 'unsupported_weapon', message: 'unsupported weapon' });
+  assert.equal(legacy.statuses.at(-1).connected, true); assert.ok(legacy.statuses.at(-1).text.includes('普通枪械'));
+  assert.equal(oldSocket.readyState, 1); legacy.api.close();
+});
+
+test('战斗反馈的原生通知明确说明武器不支持，命中限频，普通未命中不刷屏', () => {
+  const source = fs.readFileSync(path.join(root, 'client/multiplayer/game-adapter.js'), 'utf8')
+    .replace('export function installGameAdapter', 'function installGameAdapter');
+  let now = 0, receiver = null;
+  const hud = { textContent: '', style: {} }, memory = { buffer: new SharedArrayBuffer(8192) }, block = 256, capacity = 4096;
+  const callbacks = new Map(); let nextTimer = 0;
+  const context = vm.createContext({ TextEncoder, Atomics, Int32Array, Uint8Array,
+    BroadcastChannel: class { close() {} }, addEventListener() {}, document: { getElementById: () => hud },
+    performance: { now: () => now }, fetch: () => Promise.resolve({ ok: true }),
+    setTimeout: (callback) => { callbacks.set(++nextTimer, callback); return nextTimer; },
+    clearTimeout: (id) => callbacks.delete(id) });
+  vm.runInContext(source + '\nglobalThis.installAdapter=installGameAdapter;', context);
+  const adapter = context.installAdapter({}, { setReceiver: (value) => { receiver = value; }, onWorkerMessage() {} });
+  adapter.onWorkerMessage({ multiplayer: { type: 'memory', memory, block, capacity } });
+  const read = () => {
+    for (const callback of [...callbacks.values()]) callback(); callbacks.clear();
+    return JSON.parse(new TextDecoder().decode(new Uint8Array(memory.buffer, block + 16, Atomics.load(new Int32Array(memory.buffer, block, 4), 1))));
+  };
+  receiver({ type: 'combat_feedback', accepted: true, hit: false }); assert.equal(read().notices.length, 0);
+  receiver({ type: 'combat_feedback', accepted: false, hit: false, reason: 'unsupported_weapon' });
+  assert.ok(hud.textContent.includes('普通枪械')); assert.ok(read().notices[0].text.includes('一般槍械'));
+  receiver({ type: 'combat_feedback', accepted: false, hit: false, reason: 'unsupported_weapon' });
+  assert.equal(read().notices.length, 1, '相同拒绝不能每个射击 tick 盖满原生通知');
+  receiver({ type: 'combat_feedback', accepted: true, hit: true, damage: 40, health: 160 });
+  assert.equal(read().notices.length, 2); assert.ok(read().notices.at(-1).text.includes('傷害 40'));
+  receiver({ type: 'combat_feedback', accepted: true, hit: true, damage: 40, health: 120 }); assert.equal(read().notices.length, 2);
+  now = 1501; receiver({ type: 'combat_feedback', accepted: true, hit: true, damage: 40, health: 80 }); assert.equal(read().notices.length, 3);
 });

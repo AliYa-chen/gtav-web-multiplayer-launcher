@@ -1,4 +1,4 @@
-# GTA V 公共战局服务端 0.2.2-public
+# GTA V 公共战局服务端 0.2.3-public
 
 所有玩家连接同一台服务器后，输入昵称就会自动进入唯一的 `PUBLIC` 公共战局。战局常驻，即使没有玩家也保留；无需创建房间、输入房间码、准备或等待房主开始。地图固定为 GTA V，游戏使用沙盒模式。
 
@@ -107,7 +107,7 @@ runtime\python.exe serve_local.py --start-room-server --room-server 127.0.0.1:87
 | `game_sync: false` | 真实游戏同步尚未完成稳定验证 |
 | `idle_timeout_seconds`、`hello_timeout_seconds` | 当前应用消息空闲超时与初次加入期限 |
 
-这些统计不包含姓名或角色位置。`capabilities` 为 `public_session`、`chat`、`player_state`、`shoot_events`、`appearance`、`combat`、`resume`、`heartbeat`、`snapshot`。
+这些统计不包含姓名或角色位置。`capabilities` 为 `public_session`、`chat`、`player_state`、`shoot_events`、`appearance`、`combat`、`resume`、`heartbeat`、`snapshot`、`actions`、`combat_feedback`。
 
 ## 公共战局协议
 
@@ -246,7 +246,7 @@ python3 -B tools/tests/test_multiplayer.py
 不会重置玩家身份、生命值、分数或消息序号。浏览器客户端每五秒心跳、十秒快照，
 二十五秒没有服务器响应则自动重连；网络恢复与页面激活时及时尝试恢复连接。
 
-新增回归测试：`python3 -B tools/tests/test_combat_world.py`。目前公共协议 10 项和权威战斗/恢复 10 项通过。
+新增回归测试：`python3 -B tools/tests/test_combat_world.py`。测试覆盖公共协议、权威战斗、身份恢复和严格字段验证。
 
 ## 无响应连接清理（0.2.2）
 
@@ -266,3 +266,34 @@ python3 -B tools/tests/test_connection_timeout.py
 ```
 
 测试覆盖空连接、静默玩家、半帧阻塞、无效消息、五秒应用心跳、只有自动 `pong` 的连接、身份恢复及读写资源释放。实际部署保留三十秒默认值，允许加载和网络的短暂波动。
+
+## 行为同步与射击回执（0.2.3）
+
+角色状态可增加以下两个可选字段，原客户端不发送它们时保持兼容：
+
+```json
+{
+  "actions": {
+    "aiming": true,
+    "reloading": false,
+    "jumping": false,
+    "ducking": false,
+    "sprinting": false
+  },
+  "aim_target": [720.0, -1088.1, 23.1]
+}
+```
+
+`actions` 必须完整包含这五个布尔字段，不接受额外键；`aim_target` 必须是三个有限坐标，范围与角色坐标相同。服务器验证后转发给其他玩家并保存至世界快照。这些表现字段不能指定受害者、扣血或击杀，也不代替射击射线。服务器重生时清除瞄准点并把行为状态重置为空闲。
+
+支持回执的客户端在 `hello.capabilities` 声明 `combat_feedback`。每个被接收的射击事件会向射手单独返回 `shot_result`：
+
+```json
+{"type":"shot_result","seq":12,"weapon":453432689,"accepted":true,"hit":false}
+```
+
+命中时另含 `victim_id`、`damage` 与剩余 `health`；被拒绝时 `accepted: false`，并含 `reason` 错误代码和中文 `message`。能验证为合法整数时会附上原 `seq` 和 `weapon`。原 `error` 事件仍保留；没有声明该能力的客户端不会收到新回执类型。伤害和死亡继续由服务端权威事件广播，客户端不能自行指定命中对象或用 `shot_count` 放大伤害。
+
+项目自带的普通加特林 `WEAPON_MINIGUN`（`0x42bf8a85`）现支持即时命中，每条射击消息只计算一条射线、最多 25 点伤害。原枪冷却为 20 毫秒，现有射击消息限流仍生效；客户端较低采样频率不会触发补算多发。
+
+未支持的武器返回明确的 `unsupported_weapon`，文案含十六进制武器哈希，不再静默广播零伤害。爆炸、近战、载具武器和未知枪型仍未扩展为完整权威玩法。回执可以区分消息被拒绝、合法射线未命中和真正命中，但当前判定仍没有地图遮挡。

@@ -35,8 +35,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** 独立公共战局服务：鉴权恢复、权威移动校验、伤害、死亡、重生及状态分发。 */
 public final class Main {
-    private static final String VERSION = "0.2.2-public";
-    private static final List<String> CAPABILITIES = List.of("public_session", "chat", "player_state", "shoot_events", "appearance", "combat", "resume", "heartbeat", "snapshot");
+    private static final String VERSION = "0.2.3-public";
+    private static final List<String> CAPABILITIES = List.of("public_session", "chat", "player_state", "shoot_events", "appearance", "combat", "resume", "heartbeat", "snapshot", "actions", "combat_feedback");
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final int MAX_MESSAGE_BYTES = 64 * 1024;
 
@@ -418,6 +418,7 @@ public final class Main {
                                 List<String> declared = new ArrayList<>();
                                 if (client.combatCapable) declared.add("combat");
                                 if (client.resumeCapable) declared.add("resume");
+                                if (client.combatFeedbackCapable) declared.add("combat_feedback");
                                 hello(client, object("type", "hello", "name", client.name, "capabilities", declared));
                             } else {
                                 requireSession(client);
@@ -446,9 +447,9 @@ public final class Main {
                     // 收到字节、错误 JSON 或被拒绝的动作都不能延长连接寿命。
                     client.recordActivity();
                 } catch (LobbyProblem problem) {
-                    client.error(problem.code, problem.getMessage());
+                    reportError(client, message, problem.code, problem.getMessage());
                 } catch (CombatWorld.Rejection rejection) {
-                    client.error(rejection.code, rejection.getMessage());
+                    reportError(client, message, rejection.code, rejection.getMessage());
                 }
             }
         }
@@ -458,12 +459,14 @@ public final class Main {
             String name = string(message.get("name"), "昵称", 24, false);
             boolean combatCapable = false;
             boolean resumeCapable = false;
+            boolean combatFeedbackCapable = false;
             if (message.containsKey("capabilities")) {
                 if (!(message.get("capabilities") instanceof List<?> values) || values.size() > 16
                         || values.stream().anyMatch(value -> !(value instanceof String text) || text.length() > 40))
                     throw problem("invalid_message", "客户端能力声明必须是文本数组");
                 combatCapable = values.contains("combat");
                 resumeCapable = values.contains("resume");
+                combatFeedbackCapable = values.contains("combat_feedback");
             }
             boolean hasId = message.containsKey("client_id");
             boolean hasToken = message.containsKey("resume_token");
@@ -495,6 +498,7 @@ public final class Main {
             client.session = session;
             client.combatCapable = combatCapable;
             client.resumeCapable = resumeCapable;
+            client.combatFeedbackCapable = combatFeedbackCapable;
             Map<String, Object> profile = object("type", "profile", "client_id", session.id, "name", name);
             profile.putAll(combat.join(session.id));
             if (resumeCapable) profile.put("resume_token", session.token);
@@ -513,7 +517,7 @@ public final class Main {
 
         private void playerState(Client client, Map<String, Object> message) throws LobbyProblem, CombatWorld.Rejection {
             Session session = requireSession(client);
-            fields(message, List.of("type", "seq", "position", "heading", "model", "health", "weapon", "shooting", "appearance"));
+            fields(message, List.of("type", "seq", "position", "heading", "model", "health", "weapon", "shooting", "appearance", "actions", "aim_target"));
             Map<String, Object> checked = new LinkedHashMap<>(message);
             if (message.containsKey("appearance")) checked.put("appearance", appearance(message.get("appearance")));
             if (!client.stateRate.take()) throw problem("rate_limited", "角色状态更新过快，持续更新上限为每秒 30 次");
@@ -532,6 +536,41 @@ public final class Main {
             List<Map<String, Object>> events = combat.shoot(session.id, message, System.currentTimeMillis());
             shotEventsReceived++;
             events.forEach(this::broadcast);
+            if (client.combatFeedbackCapable) {
+                Map<String, Object> result = object("type", "shot_result", "seq", message.get("seq"),
+                    "weapon", message.get("weapon"), "accepted", true, "hit", false);
+                for (Map<String, Object> event : events) {
+                    if (!"damage".equals(event.get("type"))) continue;
+                    result.put("hit", true);
+                    result.put("victim_id", event.get("victim_id"));
+                    result.put("damage", event.get("damage"));
+                    result.put("health", event.get("health"));
+                    break;
+                }
+                // 判定回执只发射手，伤害与死亡广播仍由权威结果驱动。
+                client.send(result);
+            }
+        }
+
+        private void reportError(Client client, Map<String, Object> message, String code, String description) {
+            Map<String, Object> error = object("type", "error", "code", code, "message", description);
+            boolean shot = "shot_event".equals(message.get("type"));
+            if (shot) {
+                try { error.put("seq", safeInteger(message.get("seq"), "射击序号")); }
+                catch (LobbyProblem ignored) {}
+                try {
+                    long weapon = safeInteger(message.get("weapon"), "射击武器");
+                    if (weapon <= 0xffffffffL) error.put("weapon", weapon);
+                } catch (LobbyProblem ignored) {}
+            }
+            client.send(error);
+            if (shot && client.combatFeedbackCapable) {
+                Map<String, Object> result = object("type", "shot_result", "accepted", false,
+                    "reason", code, "message", description);
+                if (error.containsKey("seq")) result.put("seq", error.get("seq"));
+                if (error.containsKey("weapon")) result.put("weapon", error.get("weapon"));
+                client.send(result);
+            }
         }
 
         private void fields(Map<String, Object> message, List<String> allowed) throws LobbyProblem {
@@ -731,6 +770,7 @@ public final class Main {
         volatile Session session;
         boolean combatCapable;
         boolean resumeCapable;
+        boolean combatFeedbackCapable;
         final AtomicBoolean closed = new AtomicBoolean();
         final ArrayBlockingQueue<Outbound> outgoing = new ArrayBlockingQueue<>(128);
         final CountDownLatch disconnected = new CountDownLatch(1);
