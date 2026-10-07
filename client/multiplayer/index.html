@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>公共战局 · GTA V 离线版</title>
+  <link rel="icon" href="/favicon.ico">
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <div class="page">
+    <header class="page-header">
+      <a class="brand" href="/">GTA V <span>离线版</span></a>
+      <a class="back-link" href="/">返回单人游戏 <span aria-hidden="true">↗</span></a>
+    </header>
+    <main>
+      <section class="intro" aria-labelledby="page-title">
+        <div>
+          <p class="eyebrow">所有玩家，加入同一个战局</p>
+          <h1 id="page-title">GTA V 公共战局</h1>
+          <p class="intro-text">输入服务器地址和昵称即可加入，无需创建房间或等待准备。</p>
+        </div>
+        <div class="status-badge" id="connection-badge" data-state="offline">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="connection-status" role="status">未连接</span>
+        </div>
+      </section>
+
+      <section class="connection-card card" aria-labelledby="connect-title">
+        <h2 id="connect-title">连接服务器</h2>
+        <form id="connect-form">
+          <div class="field server-field">
+            <label for="server-address">服务器 IP 或地址</label>
+            <input id="server-address" name="server" type="text" spellcheck="false" autocomplete="off" placeholder="例如 192.168.1.10:8787" required aria-describedby="server-help">
+            <p class="field-help" id="server-help">省略端口时使用 8787；也可填写完整的 ws:// 或 wss:// 地址。</p>
+          </div>
+          <div class="field">
+            <label for="nickname">你的昵称</label>
+            <input id="nickname" name="name" type="text" maxlength="24" autocomplete="nickname" placeholder="输入昵称" required>
+            <label for="avatar" style="margin-top: 12px">角色</label>
+            <select id="avatar" name="avatar">
+              <option value="male" selected>男性自由模式角色</option>
+              <option value="female">女性自由模式角色</option>
+            </select>
+          </div>
+          <button class="button primary" id="connect-button" type="submit">加入公共战局</button>
+          <button class="button subtle" id="disconnect-button" type="button" hidden>断开连接</button>
+        </form>
+        <p class="notice" id="notice" role="status" aria-live="polite">连接成功后会自动加入服务器的公共战局。</p>
+      </section>
+
+      <div class="lobby-grid">
+        <section class="members-card card" aria-labelledby="members-title">
+          <div class="section-heading">
+            <h2 id="members-title">在线玩家 <span class="count" id="member-count">0</span></h2>
+            <span class="session-label">GTA V 沙盒</span>
+          </div>
+          <p class="field-help session-description">连接同一服务器的玩家都会进入这个公共战局。</p>
+          <div id="session-empty" class="empty-state session-empty">加入战局后，在这里查看在线玩家。</div>
+          <ul id="member-list" class="member-list" aria-label="公共战局成员" hidden></ul>
+        </section>
+
+        <section class="game-chat-card card" aria-labelledby="game-title">
+          <h2 id="game-title">进入 GTA V</h2>
+          <p id="game-status" class="game-status" role="status">等待连接公共战局。</p>
+          <a class="button primary game-link" id="game-link" href="/play/" target="_blank" hidden>进入 GTA V 沙盒 <span aria-hidden="true">↗</span></a>
+          <p id="game-help" class="field-help" hidden>在新标签页打开本地游戏。保留此页，可继续查看在线成员和聊天。</p>
+          <div class="chat-heading"><h3>战局聊天</h3><span>发送给战局内所有玩家</span></div>
+          <ol id="chat-log" class="chat-log" aria-label="聊天记录" aria-live="polite" aria-relevant="additions"></ol>
+          <form id="chat-form" class="chat-form">
+            <label class="sr-only" for="chat-input">聊天消息</label>
+            <input id="chat-input" name="chat" type="text" maxlength="500" autocomplete="off" placeholder="和战局里的玩家说点什么…" disabled>
+            <button class="button" id="chat-button" type="submit" disabled>发送</button>
+          </form>
+        </section>
+      </div>
+      <aside class="scope-note"><span class="scope-label">实验版本</span><p>已接入角色位置与射击事件，正在验证双方互见和移动。击杀与载具同步暂未实现。</p></aside>
+    </main>
+    <footer>公共战局 · GTA V 沙盒</footer>
+  </div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

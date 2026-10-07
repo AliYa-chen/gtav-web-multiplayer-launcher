@@ -1,0 +1,41 @@
+# 游戏数据与完整运行资源：禁止提交。
+/gta5data/
+/mirror/
+/runtime/
+/archive/
+/docs/snapshot/
+
+# 编译、部署包与本地校验产物。
+/server/VERSION.json
+/server/SHA256SUMS.txt
+*.jar
+*.class
+*.zip
+*.wasm
+*.rpf
+*.gfx
+*.ytd
+*.ydd
+*.yft
+*.ymt
+*.fxc
+*.bik
+*.bk2
+*.ttf
+*.otf
+*.woff
+*.woff2
+
+# 缓存、日志与机器配置。
+__pycache__/
+*.py[cod]
+*.log
+*.tmp
+*.part
+.DS_Store
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+node_modules/
