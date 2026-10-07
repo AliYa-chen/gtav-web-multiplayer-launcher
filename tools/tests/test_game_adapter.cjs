@@ -46,12 +46,28 @@ function engine(options = {}) {
   const health = new Map([[7, options.localHealth ?? 200]]), invincible = new Set(), dead = new Set();
   let now = 100, allocated = 4096, nextPed = 100, localPosition = [...(options.localPosition || [711.5, -1088, 22.41])];
   let localPed = options.localPed ?? 7, localModel = options.localModel ?? 0x705e61f2;
+  let localHeading = options.localHeading ?? 180, localWeapon = options.localWeapon ?? 0;
+  let setModelBlockedAttempts = options.setModelBlockedAttempts ?? 0, setModelNoEffect = options.setModelNoEffect ?? false;
+  let setModelAsync = options.setModelAsync ?? false, pendingModel = null;
+  let noticeResult = options.noticeResult ?? 101, noticeThrows = options.noticeThrows ?? false;
+  const unavailableModels = new Set(options.unavailableModels || []), notifications = [];
+  let currentNotification = null;
   let weaponAssetReady = options.weaponAssetReady ?? true;
   let localRecoveryBlocked = options.localRecoveryBlocked ?? false;
   const state = { active: 11n, handler: 12n, fadedOut: false, controlsEnabled: true,
     deathState: false, deathRestartPaused: false, gamePlaying: true };
   const vector = (pointer, values) => values.forEach((value, index) => new DataView(memory.buffer).setFloat32(Number(pointer) + 8 * index, value, true));
   const readNativeVector = (pointer) => [0, 8, 16].map((offset) => new DataView(memory.buffer).getFloat32(Number(pointer) + offset, true));
+  const readString = (pointer) => {
+    const start = Number(pointer), length = Math.min(8192, memory.buffer.byteLength - start);
+    const bytes = new Uint8Array(memory.buffer, start, length).slice(), nul = bytes.indexOf(0);
+    assert.ok(nul >= 0, 'native 字符串必须在内存范围内以 NUL 结尾');
+    return { text: new TextDecoder().decode(bytes.subarray(0, nul)), bytes: [...bytes.subarray(0, nul)], pointer: start };
+  };
+  const changeModel = (model) => {
+    localModel = model >>> 0; alive.delete(localPed); localPed = 8; alive.add(localPed); health.set(localPed, 200);
+    localWeapon = 0;
+  };
   const implementations = {
     mpGetActiveThread: () => { if (options.throwActive) throw new Error('活动线程读取失败'); return state.active; },
     mpGetCurrentHandler: () => { if (options.throwHandler) throw new Error('handler 读取失败'); return state.handler; },
@@ -61,7 +77,10 @@ function engine(options = {}) {
     mpGetModel: () => localModel,
     mpPlayerId: () => 0,
     mpSetPlayerModel: (_player, model) => {
-      localModel = model >>> 0; alive.delete(localPed); localPed = 8; alive.add(localPed); health.set(localPed, 200);
+      if (setModelNoEffect) return;
+      if (setModelBlockedAttempts > 0) { setModelBlockedAttempts--; return; }
+      if (setModelAsync) { pendingModel = model; return; }
+      changeModel(model);
     },
     mpDefaultVariation: () => {},
     mpRandomComponents: () => {}, mpRandomProps: () => {},
@@ -74,11 +93,11 @@ function engine(options = {}) {
     mpDrawableCount: () => 100, mpTextureCount: () => 10,
     mpHeadOverlayCount: () => options.overlayCount ?? 10,
     mpSetHeadOverlay: () => {}, mpSetOverlayTint: () => {}, mpSetHairTint: () => {},
-    mpHeading: () => 180,
+    mpHeading: () => localHeading,
     mpGetHealth: (ped) => health.get(ped) ?? 200,
     mpIsShooting: () => false,
-    mpSelectedWeapon: () => 0,
-    mpHasModel: () => true,
+    mpSelectedWeapon: () => localWeapon,
+    mpHasModel: (hash) => !unavailableModels.has(hash >>> 0),
     mpRequestModel: () => {},
     mpCreatePed: () => { alive.add(++nextPed); health.set(nextPed, 200); return nextPed; },
     mpExists: (ped) => alive.has(ped) ? 1 : 0,
@@ -87,8 +106,11 @@ function engine(options = {}) {
       alive.delete(ped); data.setInt32(Number(pointer), 0, true);
     },
     mpSetCoordsNoOffset: (ped, pointer) => { if (ped === localPed) localPosition = readNativeVector(pointer); },
-    mpBlockEvents: () => {}, mpFreeze: () => {}, mpSetHeading: () => {}, mpGiveWeapon: () => {},
-    mpSetCurrentWeapon: () => {}, mpTaskShootAtCoord: () => {},
+    mpBlockEvents: () => {}, mpFreeze: () => {},
+    mpSetHeading: (ped, heading) => { if (ped === localPed) localHeading = heading; },
+    mpGiveWeapon: (ped, weapon) => { if (ped === localPed) localWeapon = weapon >>> 0; },
+    mpSetCurrentWeapon: (ped, weapon) => { if (ped === localPed) localWeapon = weapon >>> 0; },
+    mpTaskShootAtCoord: () => {},
     mpSetHealth: (ped, value) => {
       health.set(ped, value);
       if (value <= 0) {
@@ -124,7 +146,24 @@ function engine(options = {}) {
       const data = new DataView(memory.buffer); blips.delete(data.getInt32(Number(pointer), true));
       data.setInt32(Number(pointer), 0, true);
     },
-    mpBeginSetBlipName: () => {}, mpAddTextPlayerSubstring: () => {}, mpEndSetBlipName: () => {},
+    mpBeginSetBlipName: () => {}, mpEndSetBlipName: () => {},
+    mpAddTextPlayerSubstring: (pointer) => {
+      if (currentNotification) {
+        if (noticeThrows) throw new Error('受控原生文字添加失败');
+        currentNotification.parts.push(readString(pointer));
+      }
+    },
+    mpBeginTheFeedPost: (pointer) => {
+      if (noticeThrows) throw new Error('受控原生通知构造失败');
+      currentNotification = { command: readString(pointer), parts: [], result: null };
+    },
+    mpEndTheFeedPostTicker: () => {
+      if (noticeThrows) throw new Error('受控原生通知发送失败');
+      if (currentNotification) {
+        currentNotification.result = noticeResult; notifications.push(currentNotification); currentNotification = null;
+      }
+      return noticeResult;
+    },
   };
   const ex = {};
   for (const [name, implementation] of Object.entries(implementations)) ex[name] = (...arguments_) => {
@@ -132,6 +171,7 @@ function engine(options = {}) {
     return implementation(...arguments_);
   };
   if (options.noLocalPlayerResurrection) delete ex.mpResurrectLocalPlayer;
+  if (options.noNativeNotices) { delete ex.mpBeginTheFeedPost; delete ex.mpEndTheFeedPostTicker; }
   const self = { postMessage(value) { if (options.throwPost) throw new Error('页面已关闭'); messages.push(value); } };
   const context = vm.createContext({ self, performance: { now: () => now }, TextDecoder: BrowserTextDecoder, TextEncoder, Atomics,
     Int32Array, Uint8Array, DataView, BigInt, SharedArrayBuffer });
@@ -163,11 +203,20 @@ function engine(options = {}) {
     // 受控替身只能证明桥的选举分支；不证明实际游戏脚本的生命周期。
     for (let index = 0; index < 13; index++) tick();
   };
-  return { memory, calls, messages, state, tick, setup, publish, connect, alive, blips, health, invincible, dead,
+  return { memory, calls, messages, state, tick, setup, publish, connect, alive, blips, health, invincible, dead, notifications,
     now: () => now, setLocalModel: (model) => { localModel = model >>> 0; },
     localPed: () => localPed, position: () => [...localPosition],
     setLocalPed: (ped) => { alive.delete(localPed); localPed = ped; if (ped) alive.add(ped); },
     setPosition: (position) => { localPosition = [...position]; },
+    setHeading: (heading) => { localHeading = heading; }, heading: () => localHeading,
+    setWeapon: (weapon) => { localWeapon = weapon >>> 0; }, weapon: () => localWeapon,
+    setModelBlockedAttempts: (count) => { setModelBlockedAttempts = count; },
+    setModelNoEffect: (value) => { setModelNoEffect = value; },
+    setModelAsync: (value) => { setModelAsync = value; },
+    completeModelChange: () => { if (pendingModel !== null) { changeModel(pendingModel); pendingModel = null; } },
+    setModelAvailable: (hash, value) => { if (value) unavailableModels.delete(hash >>> 0); else unavailableModels.add(hash >>> 0); },
+    setNoticeResult: (result) => { noticeResult = result; },
+    setNoticeThrows: (value) => { noticeThrows = value; },
     setLocalRecoveryBlocked: (value) => { localRecoveryBlocked = value; },
     setWeaponAssetReady: (value) => { weaponAssetReady = value; },
     hit: (ped, damage) => {
@@ -177,7 +226,7 @@ function engine(options = {}) {
 
 function adapter(network = null) {
   const channels = [], timers = new Map(), requests = [];
-  const hud = { textContent: '' };
+  const hud = { textContent: '', style: {} };
   let nextTimer = 1;
   class Channel {
     constructor(name) { this.name = name; this.posts = []; channels.push(this); }
@@ -380,6 +429,139 @@ test('本地换模只初始化一次，短暂恢复主角模型不会反复换�
   assert.equal(bridge.messages.filter((entry) => entry.multiplayer?.type === 'local_state').length, count);
   bridge.setLocalModel(0x705e61f2); bridge.tick();
   assert.equal(bridge.messages.filter((entry) => entry.multiplayer?.type === 'local_state').length, count + 1);
+});
+
+const modelCalls = (bridge) => bridge.calls.filter((call) => call.name === 'mpSetPlayerModel');
+const advanceUntil = (bridge, check, limit = 8000) => {
+  const end = bridge.now() + limit;
+  while (!check() && bridge.now() < end) bridge.tick();
+  assert.ok(check(), '有效脚本上下文中应在有限重试窗口内继续处理事务');
+};
+const lastSample = (bridge) => {
+  const value = bridge.messages.filter((entry) => entry.multiplayer?.type === 'local_state').at(-1)?.multiplayer.state;
+  return value && JSON.parse(JSON.stringify(value));
+};
+const recoveringMessages = (bridge) => bridge.messages.filter((entry) => entry.multiplayer?.type === 'game_status'
+  && entry.multiplayer.role_recovering === true);
+const assertNoBridgeError = (bridge) => assert.ok(!bridge.messages.some((entry) => entry.multiplayer?.type === 'bridge_error'));
+
+test('稳定的脚本换模自动恢复原位置、朝向、武器、服饰与权威血量，不重新随机或出生', () => {
+  const bridge = engine({ localModel: 0x0d7114c9 });
+  const value = packet({ peers: [], combat: [{ id: 'LOCAL', health: 176, alive: true, revision: 1 }] });
+  bridge.connect(value);
+  bridge.setPosition([732, -1074, 23]); bridge.setHeading(137); bridge.setWeapon(0x1b06d571); bridge.tick();
+  const previous = lastSample(bridge), changes = modelCalls(bridge).length;
+  bridge.setLocalPed(19); bridge.setLocalModel(0x0d7114c9);
+  bridge.setPosition([298, -584, 43]); bridge.setHeading(5); bridge.setWeapon(0);
+  for (let index = 0; index < 10; index++) bridge.tick();
+  assert.equal(modelCalls(bridge).length, changes, '不到一秒的替换观察期不能抢着再次换模');
+  advanceUntil(bridge, () => modelCalls(bridge).length > changes);
+  bridge.tick();
+  assert.deepEqual(bridge.position(), previous.position); assert.equal(bridge.heading(), 137);
+  assert.equal(bridge.weapon(), 0x1b06d571); assert.equal(bridge.health.get(bridge.localPed()), 188);
+  assert.deepEqual(lastSample(bridge).appearance, previous.appearance);
+  assert.equal(bridge.calls.filter((call) => call.name === 'mpRandomComponents').length, 1);
+  assert.equal(bridge.calls.filter((call) => call.name === 'mpRandomProps').length, 1);
+  assert.ok(bridge.calls.some((call) => call.name === 'mpSetComponent' && call.arguments[0] === bridge.localPed()));
+  assert.ok(recoveringMessages(bridge).length); assertNoBridgeError(bridge);
+  assert.equal(modelCalls(bridge).length, changes + 1);
+  for (let index = 0; index < 10; index++) bridge.tick();
+  assert.equal(modelCalls(bridge).length, changes + 1, '成功恢复后不能按每帧反复初始化角色');
+});
+
+test('替换后的角色坐标归零仍可利用最后有效在线位置恢复；正常模型坐标无效时不发送伪造状态', () => {
+  const recovering = engine(); recovering.connect(packet({ peers: [] }));
+  recovering.setPosition([732, -1074, 23]); recovering.setHeading(137); recovering.tick();
+  const good = lastSample(recovering), changes = modelCalls(recovering).length;
+  recovering.setLocalPed(19); recovering.setLocalModel(0x0d7114c9); recovering.setPosition([0, 0, 0]);
+  advanceUntil(recovering, () => modelCalls(recovering).length > changes);
+  recovering.tick();
+  assert.deepEqual(recovering.position(), good.position);
+  assert.equal(lastSample(recovering).model, 0x705e61f2); assertNoBridgeError(recovering);
+  const invalid = engine(); invalid.connect();
+  const count = invalid.messages.filter((entry) => entry.multiplayer?.type === 'local_state').length;
+  invalid.setPosition([0, 0, 0]);
+  for (let index = 0; index < 20; index++) invalid.tick();
+  assert.equal(invalid.messages.filter((entry) => entry.multiplayer?.type === 'local_state').length, count,
+    '模型未被替换时不能把最后在线位置冒充新的本地采样持续发送');
+  assert.equal(modelCalls(invalid).length, 0);
+  assertNoBridgeError(invalid);
+});
+
+test('连续换模 native 无效果时保留三秒冷却，并在后续成功时恢复，不永久停止桥', () => {
+  const bridge = engine(); bridge.connect();
+  bridge.setModelNoEffect(true); bridge.setLocalModel(0x0d7114c9);
+  const attempts = [], start = modelCalls(bridge).length;
+  for (let index = 0; index < 160; index++) {
+    const before = modelCalls(bridge).length; bridge.tick();
+    if (modelCalls(bridge).length > before) attempts.push(bridge.now());
+  }
+  assert.ok(attempts.length >= 3, '失败后仍应有限频率继续尝试，不能锁死在第一次失败');
+  assert.ok(attempts.every((time, index) => index === 0 || time - attempts[index - 1] >= 3000));
+  assertNoBridgeError(bridge);
+  const previousSamples = bridge.messages.filter((entry) => entry.multiplayer?.type === 'local_state').length;
+  bridge.setModelNoEffect(false);
+  advanceUntil(bridge, () => bridge.messages.filter((entry) => entry.multiplayer?.type === 'local_state').length > previousSamples);
+  assert.ok(modelCalls(bridge).length > start); assert.equal(lastSample(bridge).model, 0x705e61f2);
+  assert.equal(bridge.calls.filter((call) => call.name === 'mpRandomComponents').length, 1);
+  assertNoBridgeError(bridge);
+});
+
+test('异步换模完成后采用新句柄，恢复服装且继续上报，不重复调用 native', () => {
+  const bridge = engine(); bridge.connect(packet({ peers: [] }));
+  const changes = modelCalls(bridge).length, appearance = lastSample(bridge).appearance;
+  bridge.setModelAsync(true); bridge.setLocalModel(0x0d7114c9); bridge.setLocalPed(19);
+  advanceUntil(bridge, () => modelCalls(bridge).length > changes);
+  for (let index = 0; index < 8; index++) bridge.tick();
+  assert.equal(modelCalls(bridge).length, changes + 1, '异步事务期间仍受三秒冷却限制');
+  bridge.completeModelChange(); bridge.tick();
+  assert.equal(lastSample(bridge).model, 0x705e61f2); assert.equal(bridge.localPed(), 8);
+  assert.deepEqual(lastSample(bridge).appearance, appearance);
+  assert.equal(bridge.calls.filter((call) => call.name === 'mpRandomComponents').length, 1);
+  assertNoBridgeError(bridge);
+});
+
+test('服务端宣布死亡时延后本地模型恢复，统一复活事务完成后才修复角色', () => {
+  const bridge = engine(); bridge.connect(packet({ peers: [], combat: [combatPlayer()] }));
+  const count = modelCalls(bridge).length;
+  bridge.setLocalModel(0x0d7114c9);
+  bridge.publish(packet({ peers: [], combat: [combatPlayer({ alive: false, health: 0, revision: 2 })] }));
+  for (let index = 0; index < 60; index++) bridge.tick();
+  assert.equal(modelCalls(bridge).length, count, '死亡倒计时不能提前换成存活角色或绕过服务器重生');
+  assert.equal(bridge.health.get(bridge.localPed()), 0);
+  bridge.publish(packet({ peers: [], combat: [combatPlayer({ revision: 3 })], controls: [respawnControl()] }));
+  advanceUntil(bridge, () => modelCalls(bridge).length > count);
+  assertRecovered(bridge); assert.equal(lastSample(bridge).model, 0x705e61f2);
+  assertNoBridgeError(bridge);
+});
+
+test('本地角色缺失、稳定换模或模型未加载均不阻塞远端移动与射击确认', () => {
+  const setups = [
+    { options: {}, prepare: (bridge) => bridge.setLocalPed(0) },
+    { options: {}, prepare: (bridge) => { bridge.setLocalModel(0x0d7114c9); bridge.setModelNoEffect(true); } },
+    { options: { localModel: 0x0d7114c9, unavailableModels: [0x705e61f2] }, prepare: () => {} },
+  ];
+  for (const fixture of setups) {
+    const bridge = engine(fixture.options);
+    const remote = peerState({ model: 0x9c9effd8, weapon: 0 });
+    bridge.connect(packet({ peers: [{ player_id: 'REMOTE', state: remote }] }));
+    fixture.prepare(bridge);
+    const existing = bridge.calls.find((call) => call.name === 'mpCreatePed');
+    const previousMoves = bridge.calls.filter((call) => call.name === 'mpSetCoordsNoOffset').length;
+    const moved = { ...remote, position: [713, -1078, 22] };
+    bridge.publish(packet({ peers: [{ player_id: 'REMOTE', state: moved }], shots: [{ id: 27, player_id: 'REMOTE',
+      event: { origin: [710, -1080, 23], target: [715, -1080, 23], weapon: 0x1b06d571 } }] }));
+    bridge.tick();
+    assert.ok(bridge.calls.some((call) => call.name === 'mpCreatePed'), '本地模型没载入也应创建远端角色');
+    const remotePed = bridge.calls.find((call) => call.name === 'mpFreeze').arguments[0];
+    assert.ok(bridge.calls.some((call) => call.name === 'mpSetCoordsNoOffset' && call.arguments[0] === remotePed));
+    assert.ok(bridge.calls.filter((call) => call.name === 'mpSetCoordsNoOffset').length > previousMoves,
+      '本地同步等待期间必须继续消费新的远端移动状态');
+    if (existing) assert.equal(bridge.calls.filter((call) => call.name === 'mpCreatePed').length, 1);
+    assert.ok(bridge.messages.some((entry) => entry.multiplayer?.type === 'shot_ack' && entry.multiplayer.ids.includes(27)));
+    assert.ok(bridge.calls.some((call) => call.name === 'mpShootBullet'));
+    assertNoBridgeError(bridge);
+  }
 });
 
 test('小范围移动保留同一实体并关闭瞬移，生命值不变时不会重复写入', () => {
@@ -965,4 +1147,88 @@ test('公共战局仅暂停一次单机死亡重启，暂停发生于服务端�
   bridge.publish(packet({ peers: [], combat: [combatPlayer({ revision: 3 })], controls: [respawnControl()] })); bridge.tick();
   assert.equal(bridge.calls.filter((call) => call.name === 'mpPauseDeathRestart').length, 1);
   assertRecovered(bridge);
+});
+
+const noticeAcknowledged = (bridge, id) => bridge.messages.some((entry) => entry.multiplayer?.type === 'notice_ack'
+  && entry.multiplayer.ids?.includes(id));
+
+test('原生战局通知以独立 NUL 终止 UTF-8 构造，成功后确认，重发相同 ID 只展示一次', () => {
+  const bridge = engine();
+  const text = '公共戰局已連線，玩家「阿麗雅」加入了遊戲。';
+  const value = packet({ peers: [], notices: [{ id: 81, text }] });
+  bridge.connect(value);
+  advanceUntil(bridge, () => noticeAcknowledged(bridge, 81));
+  assert.equal(bridge.notifications.length, 1);
+  const notification = bridge.notifications[0];
+  assert.equal(notification.command.text, 'STRING');
+  assert.equal(notification.parts.map((part) => part.text).join(''), text);
+  assert.ok(notification.parts.every((part) => part.pointer !== notification.command.pointer));
+  assert.deepEqual(notification.parts.flatMap((part) => part.bytes), [...new TextEncoder().encode(text)]);
+  const calls = bridge.calls.filter((call) => ['mpBeginTheFeedPost', 'mpAddTextPlayerSubstring', 'mpEndTheFeedPostTicker'].includes(call.name));
+  assert.equal(calls[0].name, 'mpBeginTheFeedPost'); assert.equal(calls.at(-1).name, 'mpEndTheFeedPostTicker');
+  assert.ok(bridge.messages.some((entry) => entry.multiplayer?.type === 'native_hud' && entry.multiplayer.available === true));
+  for (let index = 0; index < 20; index++) { bridge.publish(value); bridge.tick(); }
+  assert.equal(bridge.notifications.length, 1, '跨共享快照重发不能产生重复通知');
+  assertNoBridgeError(bridge);
+});
+
+test('原生通知缺失、返回 -1 或抛异常时不确认、不停止角色同步', () => {
+  for (const options of [{ noNativeNotices: true }, { noticeResult: -1 }, { noticeThrows: true }]) {
+    const bridge = engine(options);
+    bridge.connect(packet({ peers: [], notices: [{ id: 82, text: '原生通知失败仍应同步角色' }] }));
+    const before = bridge.messages.filter((entry) => entry.multiplayer?.type === 'local_state').length;
+    for (let index = 0; index < 20; index++) bridge.tick();
+    assert.ok(!noticeAcknowledged(bridge, 82));
+    assert.ok(bridge.messages.filter((entry) => entry.multiplayer?.type === 'local_state').length > before);
+    assertNoBridgeError(bridge);
+  }
+});
+
+test('原生通知发送失败后保留 ID，feed 恢复时重试并且只在成功后确认', () => {
+  const bridge = engine({ noticeResult: -1 });
+  const value = packet({ peers: [], notices: [{ id: 83, text: '通知成功后再移除待发送消息' }] });
+  bridge.connect(value); bridge.tick();
+  assert.ok(!noticeAcknowledged(bridge, 83));
+  bridge.setNoticeResult(123);
+  advanceUntil(bridge, () => noticeAcknowledged(bridge, 83));
+  assert.equal(bridge.notifications.filter((notification) => notification.result >= 0).length, 1);
+  for (let index = 0; index < 20; index++) { bridge.publish(value); bridge.tick(); }
+  assert.equal(bridge.notifications.filter((notification) => notification.result >= 0).length, 1);
+  assertNoBridgeError(bridge);
+});
+
+test('适配器保存未确认原生通知，完整战局与控制快照不会清空它，确认只移除匹配 ID', () => {
+  const page = adapter(directNetwork());
+  page.receive({ type: 'session', connected: true, client_id: 'LOCAL', members: [{ id: 'LOCAL' }], peers: [] });
+  page.receive({ type: 'network_status', connected: true, members: 2, text: '服务器已连接' });
+  page.api.onWorkerMessage({ multiplayer: { type: 'game_status', peer_count: 1, alive: true, health: 200 } });
+  page.flush();
+  assert.ok(Array.isArray(page.read().notices) && page.read().notices.length > 0);
+  const ids = page.read().notices.map((notice) => notice.id);
+  assert.ok(page.read().notices.every((notice) => typeof notice.text === 'string' && Number.isSafeInteger(notice.id)));
+  page.receive({ type: 'session', connected: true, client_id: 'LOCAL', members: [{ id: 'LOCAL' }], peers: [] });
+  page.receive({ type: 'combat_state', players: [combatPlayer()] });
+  page.receive({ type: 'respawn', player_id: 'LOCAL', revision: 3, position: [711.5, -1088.1, 22.4], health: 200 });
+  page.flush();
+  assert.ok(ids.every((id) => page.read().notices.some((notice) => notice.id === id)));
+  page.api.onWorkerMessage({ multiplayer: { type: 'notice_ack', ids: [ids[0]] } }); page.flush();
+  assert.ok(!page.read().notices.some((notice) => notice.id === ids[0]));
+  assert.ok(ids.slice(1).every((id) => page.read().notices.some((notice) => notice.id === id)));
+  const count = page.read().notices.length;
+  page.api.onWorkerMessage({ multiplayer: { type: 'notice_ack', ids: [ids[0]] } }); page.flush();
+  assert.equal(page.read().notices.length, count, '重复通知确认无害');
+});
+
+test('原生 HUD 可用后隐藏网页浮层，原生失败保留网页提示且继续网络同步', () => {
+  const page = adapter(directNetwork());
+  page.receive({ type: 'network_status', connected: true, members: 2 });
+  page.api.onWorkerMessage({ multiplayer: { type: 'game_status', peer_count: 1, health: 200, alive: true } });
+  page.api.onWorkerMessage({ multiplayer: { type: 'native_hud', available: true } });
+  assert.equal(page.hud.style.display, 'none');
+  page.receive({ type: 'network_status', connected: false, text: '正在自动重连服务器' });
+  page.api.onWorkerMessage({ multiplayer: { type: 'game_status', role_recovering: true, peer_count: 1 } });
+  assert.equal(page.hud.style.display, 'none', '原生可用期间不重新显示网页悬浮层');
+  page.api.onWorkerMessage({ multiplayer: { type: 'native_hud', available: false } });
+  assert.notEqual(page.hud.style.display, 'none');
+  assert.ok(page.hud.textContent.includes('自动重连'));
 });

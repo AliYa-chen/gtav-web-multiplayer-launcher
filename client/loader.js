@@ -32,7 +32,7 @@ self.onmessage = (ev) => {
 	const fetchWasm = async () => {
 		for (let attempt = 0; ; attempt++) {
 			let res = null, err = null;
-			try { res = await fetch(B + (m.multiplayer ? '/game-multiplayer.wasm?v=public-respawn-2' : '/game.wasm')); } catch (e) { err = e; }
+			try { res = await fetch(B + (m.multiplayer ? '/game-multiplayer.wasm?v=public-recovery-feed-3' : '/game.wasm')); } catch (e) { err = e; }
 			if (res && res.ok) return res;
 			if (attempt >= 7) { if (res) throw new Error('HTTP ' + res.status + ' for game.wasm'); throw err; }
 			bc0.postMessage({ label: 'The server is busy, retrying (' + (attempt + 1) + ')' });

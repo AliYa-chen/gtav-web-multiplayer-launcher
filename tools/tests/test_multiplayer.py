@@ -160,7 +160,8 @@ class MultiplayerIntegrationTests(unittest.TestCase):
         cls.server_log = cls.log_path.open("w+b")
         cls.port = None
         cls.process = subprocess.Popen(
-            [JAVA_COMMAND, "-jar", str(JAR_PATH), "--host", "127.0.0.1", "--port", "0"],
+            [JAVA_COMMAND, "-jar", str(JAR_PATH), "--host", "127.0.0.1", "--port", "0",
+             *getattr(cls, "SERVER_ARGUMENTS", [])],
             cwd=str(ROOT), stdout=cls.server_log, stderr=subprocess.STDOUT,
         )
         deadline = time.monotonic() + 12
@@ -264,7 +265,7 @@ class MultiplayerIntegrationTests(unittest.TestCase):
         client = WebSocketClient(self.port)
         self.clients.append(client)
         welcome = client.expect("welcome")
-        self.assertEqual(welcome["server_version"], "0.2.1-public")
+        self.assertEqual(welcome["server_version"], "0.2.2-public")
         self.assertTrue({"heartbeat", "snapshot"}.issubset(welcome["capabilities"]))
         for nonce in (0, 123456, 9007199254740991):
             client.send({"type": "ping", "nonce": nonce})

@@ -35,7 +35,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** 独立公共战局服务：鉴权恢复、权威移动校验、伤害、死亡、重生及状态分发。 */
 public final class Main {
-    private static final String VERSION = "0.2.1-public";
+    private static final String VERSION = "0.2.2-public";
     private static final List<String> CAPABILITIES = List.of("public_session", "chat", "player_state", "shoot_events", "appearance", "combat", "resume", "heartbeat", "snapshot");
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final int MAX_MESSAGE_BYTES = 64 * 1024;
@@ -56,11 +56,13 @@ public final class Main {
         }
     }
 
-    private record Config(String host, int port, int maxClients) {
+    private record Config(String host, int port, int maxClients, int idleTimeoutSeconds, int helloTimeoutSeconds) {
         static Config parse(String[] args) {
             String host = "0.0.0.0";
             int port = 8787;
             int maxClients = 128;
+            int idleTimeoutSeconds = 30;
+            int helloTimeoutSeconds = 15;
             for (int index = 0; index < args.length; index++) {
                 String argument = args[index];
                 if (argument.equals("--help") || argument.equals("-h")) {
@@ -69,6 +71,8 @@ public final class Main {
                         + "  --host 地址          监听地址，默认 0.0.0.0\n"
                         + "  --port 端口          监听端口，默认 8787；0 为系统分配\n"
                         + "  --max-clients 人数   连接上限，默认 128（1–1024）\n"
+                        + "  --idle-timeout 秒    无有效消息的连接超时，默认 30（1–300）\n"
+                        + "  --hello-timeout 秒   WebSocket 建立后加入期限，默认 15（1–300）\n"
                         + "所有玩家自动进入同一个公共战局；无需房间码、准备或房主。\n"
                         + "服务端负责移动校验、枪械伤害、击杀、重生与断线恢复；客户端加载游戏资源。\n"
                         + "按 Ctrl+C 停止服务。");
@@ -83,10 +87,12 @@ public final class Main {
                     }
                     case "--port" -> port = boundedInteger(value, 0, 65535, "端口");
                     case "--max-clients" -> maxClients = boundedInteger(value, 1, 1024, "连接上限");
+                    case "--idle-timeout" -> idleTimeoutSeconds = boundedInteger(value, 1, 300, "空闲超时");
+                    case "--hello-timeout" -> helloTimeoutSeconds = boundedInteger(value, 1, 300, "加入期限");
                     default -> throw new IllegalArgumentException("未知选项：" + argument);
                 }
             }
-            return new Config(host, port, maxClients);
+            return new Config(host, port, maxClients, idleTimeoutSeconds, helloTimeoutSeconds);
         }
 
         private static int boundedInteger(String value, int min, int max, String name) {
@@ -117,7 +123,7 @@ public final class Main {
                 listener.close();
                 throw exception;
             }
-            lobby = new Lobby(config.maxClients());
+            lobby = new Lobby(config);
             // 请求线程池有界；每个 WebSocket 使用一个读线程及一个发送线程。
             // 大厅锁只保护状态修改和消息入队，绝不等待网络写入。
             requests = new ThreadPoolExecutor(0, config.maxClients() + 16, 30,
@@ -137,7 +143,8 @@ public final class Main {
         void run() throws IOException {
             String displayHost = config.host().contains(":") ? "[" + config.host() + "]" : config.host();
             System.out.println("多人大厅已启动：http://" + displayHost + ":" + listener.getLocalPort()
-                + "（WebSocket：/ws，单个 GTA V 公共战局；移动与战斗校验已就绪，断线身份保留 60 秒）");
+                + "（WebSocket：/ws，单个 GTA V 公共战局；无有效消息 " + config.idleTimeoutSeconds()
+                + " 秒会断开，断线身份保留 60 秒）");
             while (!closed.get()) {
                 try {
                     Socket socket = listener.accept();
@@ -337,13 +344,23 @@ public final class Main {
         private final LinkedHashMap<String, Client> clients = new LinkedHashMap<>();
         private final LinkedHashMap<String, Session> sessions = new LinkedHashMap<>();
         private final int maxClients;
+        private final int idleTimeoutSeconds;
+        private final long idleTimeoutNanos;
+        private final int helloTimeoutSeconds;
+        private final long helloTimeoutNanos;
         private final CombatWorld combat = new CombatWorld();
         private long shotEventsReceived;
         private boolean closed;
         private static final long SESSION_TTL_MILLIS = 60_000;
         private static final List<String> COMBAT_EVENTS = List.of("combat_state", "damage", "death", "respawn", "correction");
 
-        Lobby(int maxClients) { this.maxClients = maxClients; }
+        Lobby(Config config) {
+            maxClients = config.maxClients();
+            idleTimeoutSeconds = config.idleTimeoutSeconds();
+            idleTimeoutNanos = TimeUnit.SECONDS.toNanos(idleTimeoutSeconds);
+            helloTimeoutSeconds = config.helloTimeoutSeconds();
+            helloTimeoutNanos = TimeUnit.SECONDS.toNanos(helloTimeoutSeconds);
+        }
 
         void register(Client client) throws HttpProblem {
             synchronized (lock) {
@@ -367,7 +384,8 @@ public final class Main {
                     "retained_players", sessions.size(), "state_players", combat.statePlayers(),
                     "shot_events_received", shotEventsReceived, "rooms", 1, "public_session", true,
                     "capabilities", CAPABILITIES, "map", "gta5", "game_sync", false, "state_transport", true,
-                    "combat_authoritative", true, "transport", "websocket", "resume_ttl_seconds", 60);
+                    "combat_authoritative", true, "transport", "websocket", "resume_ttl_seconds", 60,
+                    "idle_timeout_seconds", idleTimeoutSeconds, "hello_timeout_seconds", helloTimeoutSeconds);
             }
         }
 
@@ -391,7 +409,7 @@ public final class Main {
                             client.send(combat.worldState());
                             if (client.combatCapable) client.send(combat.combatState());
                         }
-                        case "list_rooms" -> client.send(roomList());
+                        case "list_rooms" -> { fields(message, List.of("type")); client.send(roomList()); }
                         case "create_room", "set_ready", "launch" -> throw problem("public_session_only", "所有玩家共用一个公共战局，无需建房、准备或开始");
                         case "join_room" -> {
                             fields(message, List.of("type", "room_id"));
@@ -425,6 +443,8 @@ public final class Main {
                         case "shot_event" -> shotEvent(client, message);
                         default -> throw problem("unknown_type", "不支持的消息类型：" + type);
                     }
+                    // 收到字节、错误 JSON 或被拒绝的动作都不能延长连接寿命。
+                    client.recordActivity();
                 } catch (LobbyProblem problem) {
                     client.error(problem.code, problem.getMessage());
                 } catch (CombatWorld.Rejection rejection) {
@@ -500,8 +520,7 @@ public final class Main {
             CombatWorld.Outcome outcome = combat.updateState(session.id, checked, System.currentTimeMillis());
             if (!outcome.accepted()) {
                 if (client.combatCapable) outcome.events().forEach(client::send);
-                client.error("invalid_movement", "移动距离超过服务端限制，已纠正角色位置");
-                return;
+                throw problem("invalid_movement", "移动距离超过服务端限制，已纠正角色位置");
             }
             outcome.events().forEach(this::broadcast);
         }
@@ -570,6 +589,7 @@ public final class Main {
         private void leave(Client client, boolean retain) {
             Session session = client.session;
             client.session = null;
+            client.unjoinedAt = System.nanoTime();
             if (session == null || session.client != client) return;
             session.client = null;
             session.disconnectedAt = System.currentTimeMillis();
@@ -636,19 +656,31 @@ public final class Main {
             for (Client client : current) {
                 if (client.closed.get()) continue;
                 // 未完成 hello 的连接不应永久占用名额。
-                if (client.session == null && now - client.acceptedAt > TimeUnit.SECONDS.toNanos(15)) {
+                if (client.session == null && now - client.unjoinedAt >= helloTimeoutNanos) {
                     client.disconnect();
+                    remove(client);
+                    continue;
+                }
+                if (client.session != null && now - client.lastActivityAt >= idleTimeoutNanos) {
+                    // 主动关 socket 会解除阻塞中的 read；立即释放连接名额，恢复身份另行保留。
+                    client.disconnect();
+                    remove(client);
                     continue;
                 }
                 long writingSince = client.writingSince;
                 if (writingSince != 0 && now - writingSince > TimeUnit.SECONDS.toNanos(5)) {
                     client.disconnect();
+                    remove(client);
                     continue;
                 }
                 synchronized (client.heartbeatLock) {
+                    long interval = Math.min(TimeUnit.SECONDS.toNanos(15), idleTimeoutNanos / 2);
                     if (client.pingSentAt != 0) {
-                        if (now - client.pingSentAt > TimeUnit.SECONDS.toNanos(15)) client.disconnect();
-                    } else if (now - client.lastPongAt > TimeUnit.SECONDS.toNanos(15)) {
+                        if (now - client.pingSentAt >= interval) {
+                            client.disconnect();
+                            remove(client);
+                        }
+                    } else if (now - client.lastPongAt >= interval) {
                         client.ping = ByteBuffer.allocate(8).putLong(RANDOM.nextLong()).array();
                         client.pingSentAt = now;
                         client.enqueue(frame(9, client.ping), false);
@@ -695,6 +727,7 @@ public final class Main {
         String id = connectionId;
         String name = "玩家";
         final long acceptedAt = System.nanoTime();
+        volatile long unjoinedAt = acceptedAt;
         volatile Session session;
         boolean combatCapable;
         boolean resumeCapable;
@@ -706,6 +739,8 @@ public final class Main {
         final TokenBucket stateRate = new TokenBucket(30, 60);
         final TokenBucket shotRate = new TokenBucket(30, 30);
         volatile long writingSince;
+        volatile long lastActivityAt = System.nanoTime();
+        volatile Thread writer;
         long lastPongAt = System.nanoTime();
         long pingSentAt;
         byte[] ping;
@@ -731,7 +766,12 @@ public final class Main {
                 } finally { disconnect(); }
             }, "大厅发送-" + id.substring(0, 8));
             thread.setDaemon(true);
+            writer = thread;
             thread.start();
+        }
+
+        void recordActivity() {
+            lastActivityAt = System.nanoTime();
         }
 
         void send(Map<String, Object> message) { enqueue(textFrame(message), false); }
@@ -783,11 +823,16 @@ public final class Main {
                         beginClose(payload);
                         break;
                     }
-                    if (opcode == 9) { enqueue(frame(10, payload), false); continue; }
+                    if (opcode == 9) {
+                        if (!messageRate.take()) { error("rate_limited", "心跳发送过快，请稍后重试"); continue; }
+                        enqueue(frame(10, payload), false);
+                        continue;
+                    }
                     if (opcode == 10) {
                         synchronized (heartbeatLock) {
                             if (pingSentAt != 0 && Arrays.equals(payload, ping)) {
                                 pingSentAt = 0;
+                                // 浏览器即使页面脚本停顿也会自动回应，不能替应用层消息续命。
                                 lastPongAt = System.nanoTime();
                                 ping = null;
                             }
@@ -835,6 +880,8 @@ public final class Main {
             try { socket.shutdownOutput(); } catch (IOException ignored) {}
             try { socket.close(); } catch (IOException ignored) {}
             outgoing.clear();
+            Thread sending = writer;
+            if (sending != null && sending != Thread.currentThread()) sending.interrupt();
             disconnected.countDown();
         }
     }

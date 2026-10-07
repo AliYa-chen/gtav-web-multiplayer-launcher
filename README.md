@@ -88,7 +88,9 @@ python3 serve_local.py --instances 2 --multiplayer --room-server 127.0.0.1:8787 
 每个游戏页独占远程连接和桥接，避免同端口多标签页串用角色状态。
 新版采用五秒应用心跳、二十五秒无响应自动重连、十秒完整战局快照；
 网络恢复或标签页重新显示时会及时重连，过期身份凭据会自动重新加入。
-底部同时显示服务器在线人数与已经创建的其他玩家数量，便于区分连接和引擎同步状态。
+服务端在 15 秒内未收到加入请求，或 30 秒未收到有效应用消息时主动关闭连接并释放读写线程；
+正常五秒 JSON 心跳可保活，浏览器自动回应的协议 PONG 不会掩盖页面脚本停滞。
+进入游戏后，连线、角色恢复、阵亡和重生提示通过游戏原生通知显示；引擎加载中或通知不可用时使用网页提示。
 
 ### 局域网查看
 
@@ -114,6 +116,8 @@ python3 serve_local.py --host 0.0.0.0 --port 8010 --instances 2 --room-server 12
 客户端调用游戏自身角色命令显示远端实体、服饰、移动和普通枪械射击效果。
 存活替身不会在各端独立被击杀，死亡及重生统一应用服务端结果。
 公共引擎副本隔离单机脚本的角色换模入口，在线角色只初始化一次，角色所属脚本上下文保持稳定。
+存档恢复等路径仍可能替换本地角色；模型稳定不匹配一秒后启动限频恢复，保留最后在线位置、朝向、服饰、武器和服务器血量。
+恢复期间远端玩家和射击队列继续更新；换模暂未完成会再次尝试，不再永久等待或停止同步桥。
 收到重生时同时恢复本地玩家、游戏状态、控制和画面淡入，避免实体复活后仍卡在单机医院黑屏流程；
 重生使用服务器版本号，旧死亡快照不会再次杀死刚恢复的角色。
 
@@ -140,6 +144,7 @@ python3 tools/build_multiplayer_server.py
 python3 tools/build_multiplayer_client.py
 python3 -B tools/tests/test_multiplayer.py
 python3 -B tools/tests/test_combat_world.py
+python3 -B tools/tests/test_connection_timeout.py
 node tools/tests/test_game_adapter.cjs
 node --test tools/tests/test_public_session.cjs tools/tests/test_join_modal.cjs
 ```

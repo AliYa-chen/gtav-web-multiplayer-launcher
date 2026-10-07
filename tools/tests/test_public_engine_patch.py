@@ -131,6 +131,60 @@ class PublicEnginePatchTests(unittest.TestCase):
             self.assertEqual([item["operation"] for item in defaults], ["i32.const"] * 8)
             self.assertEqual([item["value"] for item in defaults], [0, 0, 0, 0, 1, 0, 0, 0])
 
+    def test_native_notification_exports_abis_and_isolation(self):
+        expected = {
+            "mpBeginTheFeedPost": (51457, "hud_commands::CommandBeginTheFeedPost(char const*)", ["i64"], []),
+            "mpAddTextPlayerSubstring": (51504, "hud_commands::CommandAddTextComponentSubStringPlayerName(char const*)", ["i64"], []),
+            "mpEndTheFeedPostTicker": (51464, "hud_commands::CommandEndTheFeedPostTicker(bool, bool)", ["i32", "i32"], ["i32"]),
+        }
+        for name, (index, expected_name, parameters, results) in expected.items():
+            self.assertEqual(export_map(True)[name], (index, expected_name, parameters, results))
+            descriptor = self.original.descriptor(index)
+            self.assertEqual(descriptor["name"], expected_name, name)
+            self.assertEqual(descriptor["signature"], {"parameters": parameters, "results": results}, name)
+            self.assertNotIn(name, self.audits["probe"].exports.get(index, []))
+            for result in (self.audits["replica"], self.audits["public"]):
+                self.assertIn(name, result.exports[index])
+                self.assertEqual(self.body(self.original, index), self.body(result, index), name)
+        # Begin 与正文添加器直接转发 i64 指针；Ticker 包装器补第三个默认布尔值 0。
+        for index, target in ((51457, 64096), (51504, 64131)):
+            decoded = self.original.instructions(index)
+            self.assertTrue(decoded["decode_complete"])
+            self.assertEqual([item["operation"] for item in decoded["instructions"]], ["local.get", "call", "end"])
+            self.assertEqual(decoded["instructions"][0]["index"], 0)
+            self.assertEqual(decoded["instructions"][1]["target"]["function_index"], target)
+        decoded = self.original.instructions(51464)
+        self.assertTrue(decoded["decode_complete"])
+        self.assertEqual([item["operation"] for item in decoded["instructions"]],
+                         ["local.get", "local.get", "i32.const", "call", "end"])
+        self.assertEqual([item["index"] for item in decoded["instructions"][:2]], [0, 1])
+        self.assertEqual(decoded["instructions"][2]["value"], 0)
+        self.assertEqual(decoded["instructions"][3]["target"]["function_index"], 64099)
+        self.assertEqual(decoded["instructions"][3]["target"]["signature"],
+                         {"parameters": ["i32", "i32", "i32"], "results": ["i32"]})
+
+    def test_native_notification_construction_retains_memory_contract(self):
+        # Begin 保存文字标签指针供 End 读取，因此调用方的 UTF-8 缓冲至少应活到 End 返回。
+        begin = self.original.instructions(64096)
+        self.assertTrue(begin["decode_complete"])
+        pointer_store = [item["operation"] for item in begin["instructions"]]
+        self.assertIn("i64.store", pointer_store)
+        self.assertEqual(begin["instructions"][-4]["operation"], "local.get")
+        self.assertEqual(begin["instructions"][-4]["index"], 0)
+        self.assertEqual(begin["instructions"][-3]["operation"], "i64.store")
+        # End 先拼接文字再交给 feed；feed 内部把文字复制到自有字符串，而非保存 JS 缓冲。
+        end = self.original.instructions(64099)
+        self.assertTrue(end["decode_complete"])
+        calls = [item["target"]["function_index"] for item in end["instructions"] if item["operation"] == "call"]
+        self.assertEqual(calls, [77479, 77488, 37511])
+        feed = self.original.instructions(37511)
+        self.assertTrue(feed["decode_complete"])
+        self.assertTrue(any(item["operation"] == "call" and item["target"]["function_index"] == 651
+                            for item in feed["instructions"]))
+        constraints = "\n".join(self.reports["public"]["entity_probe_constraints"])
+        self.assertIn("NUL 结尾 UTF-8", constraints)
+        self.assertIn("End 返回前不可释放或覆写", constraints)
+
     def test_public_patch_requires_entity_interfaces(self):
         with self.assertRaisesRegex(ValueError, "必须同时"):
             build(self.original, False, True)

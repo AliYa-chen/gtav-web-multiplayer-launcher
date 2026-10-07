@@ -84,6 +84,10 @@ ENTITY_EXPORTS = {
     "mpBeginSetBlipName": (51491, "hud_commands::CommandBeginTextCommandSetBlipName(char const*)", ["i64"], []),
     "mpAddTextPlayerSubstring": (51504, "hud_commands::CommandAddTextComponentSubStringPlayerName(char const*)", ["i64"], []),
     "mpEndSetBlipName": (51492, "hud_commands::CommandEndTextCommandSetBlipName(int)", ["i32"], []),
+    # 通知沿用原生文字构造：Begin("STRING")、AddTextPlayerSubstring(正文)、EndTicker(blink, brief)。
+    # 两个字符串均为当前 WASM 内存中 NUL 结尾的 UTF-8，三个调用须在同一有效脚本上下文完成。
+    "mpBeginTheFeedPost": (51457, "hud_commands::CommandBeginTheFeedPost(char const*)", ["i64"], []),
+    "mpEndTheFeedPostTicker": (51464, "hud_commands::CommandEndTheFeedPostTicker(bool, bool)", ["i32", "i32"], ["i32"]),
     "mpSetPlayerModel": (58625, "player_commands::CommandChangePlayerModel(int, int)", ["i32", "i32"], []),
     "mpPlayerId": (58714, "player_commands::CommandPlayerId()", [], ["i32"]),
     "mpDefaultVariation": (57395, "ped_commands::CommandSetPedDefaultComponentVariation(int)", ["i32"], []),
@@ -270,7 +274,7 @@ def build(audit: WasmAudit, entity_probe: bool = False, public_client: bool = Fa
                  "magic_hex": hex(MAGIC), "magic_i32": MAGIC, "inserted_bytes_hex": hook_bytes.hex(),
                  "meaning": "活动线程 this 已写入 TLS；JS 必须识别 magic 后再使用指针，不能当作字符串读取。"},
         "additional_exports": [{"export_name": name, **audit.descriptor(value[0])} for name, value in exports.items()],
-        "entity_probe_constraints": (["仅在活动脚本线程和有效 handler 上测试；不得当作已完成的同步功能。", "坐标向量为三个 f32，分别位于 scratch 指针的 0/8/16 字节偏移。", "模型需要在当前有效脚本上下文请求并确认 mpHasModel 已完成；同本地角色模型可直接复用。", "创建本地测试角色时 pedType=4、network=false、scriptHost=false。", "mpDeleteEntity/mpDeletePed 的参数为 i64 指向 int32 句柄，而不是句柄本身。", "测试角色归属于当前脚本上下文；清理/重生/掉线时必须先检查 mpExists。", "mpSetCoords 含角色高度补偿；直接同步世界坐标应验证并使用 mpSetCoordsNoOffset。", "mpCamCoords/mpCamRot 是结构体返回，首 i64 为结果缓冲区；不是返回 JS 坐标数组。"] if entity_probe else []),
+        "entity_probe_constraints": (["仅在活动脚本线程和有效 handler 上测试；不得当作已完成的同步功能。", "坐标向量为三个 f32，分别位于 scratch 指针的 0/8/16 字节偏移。", "模型需要在当前有效脚本上下文请求并确认 mpHasModel 已完成；同本地角色模型可直接复用。", "创建本地测试角色时 pedType=4、network=false、scriptHost=false。", "mpDeleteEntity/mpDeletePed 的参数为 i64 指向 int32 句柄，而不是句柄本身。", "测试角色归属于当前脚本上下文；清理/重生/掉线时必须先检查 mpExists。", "mpSetCoords 含角色高度补偿；直接同步世界坐标应验证并使用 mpSetCoordsNoOffset。", "mpCamCoords/mpCamRot 是结构体返回，首 i64 为结果缓冲区；不是返回 JS 坐标数组。", "原生通知按 mpBeginTheFeedPost(STRING)、mpAddTextPlayerSubstring(正文)、mpEndTheFeedPostTicker(blink, brief) 连续构造；两个 i64 字符串指针均指向 NUL 结尾 UTF-8，直到 End 返回前不可释放或覆写。", "mpEndTheFeedPostTicker 返回 int32 消息句柄，-1 表示当前文字构造或 feed 不可用；不使用会直接解引用全局对象的 Show/RemoveItem 包装器。"] if entity_probe else []),
         "unchanged_sections": unchanged_sections,
         "invariants": {"function_indices_unchanged": True, "imports_unchanged": True, "types_unchanged": True,
                        "data_and_elements_unchanged": True, "patched_function_bodies": patched_bodies},

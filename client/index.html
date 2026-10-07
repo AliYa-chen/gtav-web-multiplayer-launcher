@@ -421,8 +421,7 @@ if (ROOM_GAME && onlinePreferences) {
 		publicSession = await startPublicSession(onlinePreferences, ({ phase, text }) => {
 			const label = document.getElementById('label');
 			if (label && !onlineConnectionReady) label.textContent = phase === 'joined' ? ONLINE_LOADING : text;
-			if (onlineConnectionReady && phase === 'reconnecting') { hud.textContent = text; hud.style.color = '#f2b178'; }
-			else if (onlineConnectionReady && phase === 'joined') { hud.textContent = '公共战局连接已恢复'; hud.style.color = ''; }
+			// 游戏开始后的连接提示由适配器交给原生通知，入口只负责加载前提示。
 		}, { reconnect: ONLINE_RECONNECT });
 		await publicSession.ready;
 		onlineConnectionReady = true;

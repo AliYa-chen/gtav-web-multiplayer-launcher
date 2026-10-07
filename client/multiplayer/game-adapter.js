@@ -10,6 +10,8 @@ export function installGameAdapter(worker, network = null) {
   let nextShotId = 0;
   let combat = [];
   let controls = [], nextControlId = 0;
+  let notices = [], nextNoticeId = 0;
+  let nativeHud = false, lastNetworkNotice = '', lastGamePhase = '', lastKills = null;
   let shared = null;
   let timer = 0;
   let closed = false;
@@ -17,7 +19,15 @@ export function installGameAdapter(worker, network = null) {
   let networkMessage = '', gameMessage = '';
   function renderHud() {
     const hud = document.getElementById('hud');
-    if (hud) hud.textContent = [networkMessage, gameMessage].filter(Boolean).join(' · ');
+    if (hud) {
+      hud.style.display = nativeHud ? 'none' : '';
+      hud.textContent = nativeHud ? '' : [networkMessage, gameMessage].filter(Boolean).join(' · ');
+    }
+  }
+  function notify(text) {
+    notices.push({ id: ++nextNoticeId, text });
+    if (notices.length > 16) notices.shift();
+    schedule();
   }
 
   function reportStatus(value) {
@@ -37,7 +47,7 @@ export function installGameAdapter(worker, network = null) {
   function publish() {
     timer = 0;
     if (!shared || closed) return;
-    const packet = { ...session, peers: [...peers.values()], shots, combat, controls };
+    const packet = { ...session, peers: [...peers.values()], shots, combat, controls, notices };
     const bytes = new TextEncoder().encode(JSON.stringify(packet));
     if (bytes.length > shared.capacity) return;
     const header = new Int32Array(shared.memory.buffer, shared.block, 4);
@@ -58,6 +68,11 @@ export function installGameAdapter(worker, network = null) {
     if (data.type === 'network_status') {
       networkMessage = data.connected ? '服务器在线 · ' + (data.members || 1) + ' 位玩家'
         : (data.text || '服务器连接中断，正在自动重连…');
+      const key = data.connected ? 'online:' + (data.members || 1) : 'offline';
+      if (key !== lastNetworkNotice) {
+        lastNetworkNotice = key;
+        notify(data.connected ? '公共戰局已連線 · ' + (data.members || 1) + ' 位玩家' : '連線中斷，正在自動重新連線…');
+      } else if (data.phase === 'notice') notify('伺服器暫未接受這次操作');
       renderHud();
       return;
     } else if (data.type === 'session') {
@@ -83,6 +98,10 @@ export function installGameAdapter(worker, network = null) {
     } else if (['damage', 'death', 'respawn', 'correction'].includes(data.type)) {
       controls.push({ id: ++nextControlId, event: data });
       if (controls.length > 32) controls.shift();
+      if (data.type === 'respawn' && data.player_id === session.client_id) notify('已重生，正在恢復角色');
+      if (data.type === 'death' && data.player_id === session.client_id) {
+        lastGamePhase = 'dead'; notify('已陣亡，等待伺服器重生');
+      }
     } else if (data.type === 'player_state' && data.player_id !== session.client_id && data.state) {
       peers.set(data.player_id, { player_id: data.player_id, state: data.state });
     } else if (data.type === 'shot_event' && data.player_id !== session.client_id && data.event) {
@@ -110,20 +129,42 @@ export function installGameAdapter(worker, network = null) {
       const consumed = new Set(message.ids);
       controls = controls.filter((control) => !consumed.has(control.id));
       schedule();
+    } else if (message.type === 'notice_ack' && Array.isArray(message.ids)) {
+      const consumed = new Set(message.ids);
+      notices = notices.filter((notice) => !consumed.has(notice.id));
+      schedule();
+    } else if (message.type === 'native_hud') {
+      nativeHud = message.available === true;
+      renderHud();
     } else if (message.type === 'local_state' || message.type === 'local_shot') {
       sendLocal(message);
     } else if (message.type === 'game_status') {
-      gameMessage = message.role_loading ? '正在加载在线角色…'
+      gameMessage = message.role_recovering ? '正在自动恢复在线角色…'
+        : message.role_loading ? '正在加载在线角色…'
         : message.alive === false ? '已阵亡 · 等待服务器重生'
         : '已显示 ' + message.peer_count + ' 位其他玩家' + (Number.isInteger(message.health)
           ? ' · 生命值 ' + message.health + ' · 击杀 ' + (message.kills || 0) + ' / 阵亡 ' + (message.deaths || 0) : '');
       renderHud();
-      reportStatus({ phase: message.role_loading ? 'loading_avatar' : 'synchronizing', peers: message.peer_count });
+      const phase = message.role_recovering ? 'recovering_avatar' : message.role_loading ? 'loading_avatar'
+        : message.alive === false ? 'dead' : 'synchronizing';
+      if (phase !== lastGamePhase) {
+        const previous = lastGamePhase; lastGamePhase = phase;
+        notify(phase === 'recovering_avatar' ? '正在自動恢復線上角色…'
+          : phase === 'loading_avatar' ? '正在載入線上角色…'
+          : phase === 'dead' ? '已陣亡，等待伺服器重生'
+          : previous === 'recovering_avatar' ? '角色已恢復，同步繼續' : '公共戰局已就緒');
+      }
+      if (Number.isInteger(message.kills)) {
+        if (lastKills !== null && message.kills > lastKills) notify('擊殺成功 · 總擊殺 ' + message.kills);
+        lastKills = message.kills;
+      }
+      reportStatus({ phase, peers: message.peer_count });
     } else if (message.type === 'lifecycle') {
       reportStatus({ phase: 'lifecycle', ...message });
     } else if (message.type === 'bridge_error') {
+      nativeHud = false;
       const hud = document.getElementById('hud');
-      if (hud) { hud.textContent = '角色同步已暂停：' + message.message; hud.style.color = '#f96'; }
+      if (hud) { hud.style.display = ''; hud.textContent = '角色同步已暂停：' + message.message; hud.style.color = '#f96'; }
       reportStatus({ phase: 'error', message: message.message });
     }
   }

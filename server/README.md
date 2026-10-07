@@ -1,4 +1,4 @@
-# GTA V 公共战局服务端 0.2.1-public
+# GTA V 公共战局服务端 0.2.2-public
 
 所有玩家连接同一台服务器后，输入昵称就会自动进入唯一的 `PUBLIC` 公共战局。战局常驻，即使没有玩家也保留；无需创建房间、输入房间码、准备或等待房主开始。地图固定为 GTA V，游戏使用沙盒模式。
 
@@ -43,6 +43,8 @@ java -jar multiplayer-server.jar --host 127.0.0.1 --port 8787
 | `--host` | `0.0.0.0` | 监听地址 |
 | `--port` | `8787` | 端口，范围 0～65535；0 表示系统分配，实际端口会打印到终端 |
 | `--max-clients` | `128` | 同时连接上限，范围 1～1024，也作为公共战局的最大人数 |
+| `--idle-timeout` | `30` | 已加入玩家连续多久没有有效应用消息就关闭连接，单位秒，范围 1～300 |
+| `--hello-timeout` | `15` | WebSocket 建立后发送 `hello` 加入战局的期限，单位秒，范围 1～300 |
 | `--help` | — | 显示帮助并退出 |
 
 战局、成员和最新状态只保存在内存中。断线六十秒内可以用恢复凭据保留身份、生命值、分数与位置；服务器进程重启后需要重新加入。空战局一直存在。
@@ -95,15 +97,17 @@ runtime\python.exe serve_local.py --start-room-server --room-server 127.0.0.1:87
 | --- | --- |
 | `protocol: 1` | 协议版本 |
 | `clients` | 已建立的 WebSocket 连接数 |
-| `players` | 已加入公共战局人数 |
+| `players` | 公共战局当前在线人数；不包含保留身份的断线玩家 |
+| `retained_players` | 内存中保存的身份总数，包含在线玩家和六十秒内可恢复的断线玩家 |
 | `state_players` | 公共战局中已有有效最新角色状态的玩家数；离开后移除 |
 | `shot_events_received` | 本次服务运行中通过校验和限流的射击事件累计数 |
 | `rooms: 1`、`public_session: true` | 唯一公共战局始终保留 |
 | `map: "gta5"` | 固定地图 |
 | `state_transport: true` | 状态转发已实现 |
 | `game_sync: false` | 真实游戏同步尚未完成稳定验证 |
+| `idle_timeout_seconds`、`hello_timeout_seconds` | 当前应用消息空闲超时与初次加入期限 |
 
-这些统计不包含姓名或角色位置。`capabilities` 为 `public_session`、`chat`、`player_state`、`shoot_events`、`appearance`、`combat`、`resume`。
+这些统计不包含姓名或角色位置。`capabilities` 为 `public_session`、`chat`、`player_state`、`shoot_events`、`appearance`、`combat`、`resume`、`heartbeat`、`snapshot`。
 
 ## 公共战局协议
 
@@ -133,12 +137,12 @@ runtime\python.exe serve_local.py --start-room-server --room-server 127.0.0.1:87
   "phase": "launched",
   "host_id": null,
   "members": [
-    { "id": "客户端 UUID", "name": "玩家昵称", "ready": false }
+    { "id": "客户端 UUID", "name": "玩家昵称", "ready": false, "connected": true }
   ]
 }
 ```
 
-进入、离开、改昵称和断线后会广播新的成员名单。退出者收到 `room_state`，其中 `room: null`。客户端以成员名单删除已离开玩家的状态与本地实体；没有独立的 `player_left` 事件。
+进入、离开、改昵称和断线后会广播新的成员名单。退出者收到 `room_state`，其中 `room: null`。断线后可恢复的身份会暂留名单并标记 `connected: false`；客户端用在线成员名单删除已离开或断线玩家的状态与本地实体，没有独立的 `player_left` 事件。
 
 `chat` 广播包含 `room_id`、`sender_id`、`name`、`text` 和 UTC 时间 `time`。错误统一为 `{ "type": "error", "code": "错误代码", "message": "中文原因" }`。
 
@@ -242,4 +246,23 @@ python3 -B tools/tests/test_multiplayer.py
 不会重置玩家身份、生命值、分数或消息序号。浏览器客户端每五秒心跳、十秒快照，
 二十五秒没有服务器响应则自动重连；网络恢复与页面激活时及时尝试恢复连接。
 
-新增回归测试：`python3 -B tools/tests/test_combat_world.py`。目前旧协议 8 项和权威战斗/恢复 10 项通过。
+新增回归测试：`python3 -B tools/tests/test_combat_world.py`。目前公共协议 10 项和权威战斗/恢复 10 项通过。
+
+## 无响应连接清理（0.2.2）
+
+HTTP 升级握手最多等待八秒。WebSocket 建立后，默认十五秒内必须用 `hello` 加入公共战局；空连接持续发送心跳也不能延长加入期限。
+
+已经加入的玩家默认连续三十秒没有有效应用消息时会被断开。有效消息包括五秒一次的 JSON `ping`、有效角色状态、聊天和 `sync` 等通过校验的请求；加载游戏时只需正常发送心跳，尚无角色状态不会被误踢。坏 JSON、非法字段、过期序号、非法移动和被拒绝的射击都不刷新活性。
+
+浏览器会自动回应 RFC 6455 控制帧 `pong`，即使页面脚本已经停止也可能继续回应。因此服务端分别检测传输和应用活性：控制帧只用于检查网络连接，不延长上述三十秒期限。
+
+到期后服务端主动关闭 socket、退出读写循环并释放 WebSocket 连接名额。公共战局的该成员变为 `connected: false`，不计入在线人数或在线角色快照；其恢复身份、生命值、分数与位置仍保留六十秒，可凭原 `resume_token` 重连恢复。没有声明 `resume` 的旧客户端断线后立即移除身份。
+
+本地验证可以临时缩短期限，例如：
+
+```sh
+java -jar multiplayer-server.jar --host 127.0.0.1 --port 8787 --idle-timeout 2 --hello-timeout 1
+python3 -B tools/tests/test_connection_timeout.py
+```
+
+测试覆盖空连接、静默玩家、半帧阻塞、无效消息、五秒应用心跳、只有自动 `pong` 的连接、身份恢复及读写资源释放。实际部署保留三十秒默认值，允许加载和网络的短暂波动。
