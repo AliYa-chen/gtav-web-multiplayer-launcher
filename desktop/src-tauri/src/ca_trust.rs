@@ -95,43 +95,39 @@ pub fn install() -> Result<String, String> {
 #[cfg(target_os = "macos")]
 mod platform {
     use super::*;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
-    // POSIX shell 单引号以及 AppleScript 字符串分别转义；两层均只接收公共证书路径。
-    fn shell_literal(value: &str) -> String {
-        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    fn user_keychain_from_output(output: &[u8]) -> Result<PathBuf, String> {
+        let invalid = || "无法读取当前用户的默认钥匙串，请在钥匙串访问中将“登录”设为默认钥匙串后重试。".to_string();
+        if output.len() > 16 * 1024 { return Err(invalid()); }
+        let value = std::str::from_utf8(output).map_err(|_| invalid())?.trim();
+        let value = if value.starts_with('"') {
+            value.strip_prefix('"').and_then(|value| value.strip_suffix('"')).ok_or_else(invalid)?
+        } else { value };
+        let path = PathBuf::from(value);
+        if value.is_empty() || value.contains('"') || value.chars().any(char::is_control)
+            || !path.is_absolute() || path.starts_with("/Library/Keychains") {
+            return Err(invalid());
+        }
+        Ok(path)
     }
 
-    fn applescript_literal(value: &str) -> String {
-        format!(
-            "\"{}\"",
-            value
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"")
-                .replace('\r', "\\r")
-                .replace('\n', "\\n")
-                .replace('\t', "\\t")
-        )
+    fn default_user_keychain() -> Result<PathBuf, String> {
+        let output = Command::new("/usr/bin/security")
+            .args(["default-keychain", "-d", "user"])
+            .output().map_err(|error| format!("无法读取当前用户的默认钥匙串：{error}"))?;
+        if !output.status.success() {
+            return Err(format!("无法读取当前用户的默认钥匙串：{}", command_diagnostic(&output)));
+        }
+        user_keychain_from_output(&output.stdout)
     }
 
-    fn install_script(path: &str) -> String {
-        let shell_command = [
-            "/usr/bin/security",
-            "add-trusted-cert",
-            "-d",
-            "-r",
-            "trustRoot",
-            "-k",
-            "/Library/Keychains/System.keychain",
-            path,
-        ]
-        .map(shell_literal)
-        .join(" ");
-        format!(
-            "do shell script {} with administrator privileges",
-            applescript_literal(&shell_command)
-        )
+    fn install_command(path: &Path, keychain: &Path) -> Command {
+        let mut command = Command::new("/usr/bin/security");
+        // 不加 -d：在当前用户信任域安装；授权由 security 自行请求，不能以 root 身份执行。
+        command.args(["add-trusted-cert", "-r", "trustRoot", "-k"]).arg(keychain).arg(path);
+        command
     }
 
     fn exact_certificate_in_listing(output: &[u8], der: &[u8]) -> bool {
@@ -150,53 +146,54 @@ mod platform {
         } else { message }
     }
 
-    fn verify_certificate(path: &Path) -> Result<(), String> {
+    fn verify_certificate(path: &Path, keychain: &Path) -> Result<(), String> {
         // 交由 Security.framework 处理用户/管理员信任域、SSL policy 和显式拒绝。
         // 不指定 -r：传入公共 CA 不能把它当作临时信任锚，必须已在系统中受信任。
         let output = Command::new("/usr/bin/security")
-            .args(["verify-cert", "-p", "ssl", "-L", "-l", "-c"])
+            .args(["verify-cert", "-p", "ssl", "-L", "-l", "-c", "-k"])
+            .arg(keychain)
             .arg(path).output().map_err(|error| format!("无法验证 CA 的系统信任：{error}"))?;
         if output.status.success() { Ok(()) } else { Err(command_diagnostic(&output)) }
     }
 
-    fn trusted_exact_certificate(path: &Path, der: &[u8]) -> Result<(), String> {
-        // 默认钥匙串搜索列表包括当前用户和 System；精确 DER 匹配不接受同名证书。
+    fn certificate_installed_in_keychain(keychain: &Path, der: &[u8]) -> Result<bool, String> {
+        // 只查当前用户默认钥匙串；系统钥匙串中的旧安装不算本次用户安装完成。
         let found = Command::new("/usr/bin/security")
             .args(["find-certificate", "-a", "-p"])
+            .arg(keychain)
             .output().map_err(|error| format!("无法读取本机钥匙串：{error}"))?;
+        // errSecItemNotFound：钥匙串没有证书时属于未安装，不能把它当成检测故障。
+        if found.status.code() == Some(44) { return Ok(false); }
         if !found.status.success() { return Err(command_diagnostic(&found)); }
-        if found.stdout.len() > 16 * 1024 * 1024 || !exact_certificate_in_listing(&found.stdout, der) {
-            return Err("本机钥匙串中未找到启动器的精确 CA 证书。".into());
+        Ok(found.stdout.len() <= 16 * 1024 * 1024 && exact_certificate_in_listing(&found.stdout, der))
+    }
+
+    fn trusted_exact_certificate(path: &Path, keychain: &Path, der: &[u8]) -> Result<(), String> {
+        if !certificate_installed_in_keychain(keychain, der)? {
+            return Err("当前用户默认钥匙串中未找到启动器的精确 CA 证书。".into());
         }
         // trust-settings-export 中的 NSData/NSDate 不能转为 JSON；直接验证真实 SSL 信任。
-        verify_certificate(path)
+        verify_certificate(path, keychain)
     }
 
     pub fn status(der: &[u8], fingerprint: &str) -> Result<super::Status, String> {
+        let keychain = default_user_keychain()?;
         let certificate = temporary_public_certificate(der)?;
-        let found = Command::new("/usr/bin/security")
-            .args(["find-certificate", "-a", "-p"])
-            .output()
-            .map_err(|error| format!("无法读取本机钥匙串：{error}"))?;
-        if !found.status.success() {
-            return Err(command_diagnostic(&found));
-        }
-        let installed = found.stdout.len() <= 16 * 1024 * 1024
-            && exact_certificate_in_listing(&found.stdout, der);
+        let installed = certificate_installed_in_keychain(&keychain, der)?;
         if !installed {
             return Ok(Status {
                 installed: false,
                 trusted: false,
                 fingerprint: fingerprint.to_owned(),
-                message: "尚未找到 BinGo Root CA，请点击安装或下载 CA 证书。".into(),
+                message: "当前用户默认钥匙串中尚未找到 BinGo Root CA，请点击安装或下载 CA 证书。".into(),
             });
         }
-        match verify_certificate(certificate.path()) {
+        match verify_certificate(certificate.path(), &keychain) {
             Ok(()) => Ok(Status {
                 installed: true,
                 trusted: true,
                 fingerprint: fingerprint.to_owned(),
-                message: "BinGo Root CA 已安装并通过系统 SSL 信任验证。".into(),
+                message: "BinGo Root CA 已安装到当前用户默认钥匙串，并通过系统 SSL 信任验证。".into(),
             }),
             Err(error) => Ok(Status {
                 installed: true,
@@ -208,32 +205,29 @@ mod platform {
     }
 
     pub fn install(path: &Path, der: &[u8]) -> Result<String, String> {
-        if trusted_exact_certificate(path, der).is_ok() {
-            return Ok("CA 已安装并通过系统信任验证，可刷新浏览器进入 HTTPS 游戏。".into());
+        let keychain = default_user_keychain()?;
+        if trusted_exact_certificate(path, &keychain, der).is_ok() {
+            return Ok("CA 已安装到当前用户默认钥匙串并通过系统信任验证，可刷新浏览器进入 HTTPS 游戏。".into());
         }
-        let path_text = path
-            .to_str()
-            .ok_or_else(|| "证书暂存路径无法使用，请下载 CA 证书后手动安装并信任。".to_string())?;
-        let output = Command::new("/usr/bin/osascript")
-            .args(["-e", &install_script(path_text)])
+        let output = install_command(path, &keychain)
             .output()
-            .map_err(|error| format!("无法请求管理员授权，请下载 CA 后手动安装并信任。系统错误：{error}"))?;
+            .map_err(|error| format!("无法请求钥匙串授权，请下载 CA 后手动安装并信任。系统错误：{error}"))?;
         if !output.status.success() {
             let error = String::from_utf8_lossy(&output.stderr);
             if error.contains("-128") || error.to_ascii_lowercase().contains("canceled") {
                 return Err(
-                    "已取消管理员授权，CA 未完成安装。可重试，或下载证书后手动安装并信任。".into(),
+                    "已取消钥匙串授权，CA 未完成安装。可重试，或下载证书后手动安装并信任。".into(),
                 );
             }
             return Err(format!(
-                "系统未能完成 CA 安装，请下载证书后在钥匙串中手动安装并设为始终信任。系统错误：{}",
+                "系统未能完成 CA 安装，请下载证书后导入“登录”钥匙串并设为始终信任。系统错误：{}",
                 command_diagnostic(&output)
             ));
         }
-        trusted_exact_certificate(path, der).map_err(|error| format!(
-            "安装命令已完成，但系统 SSL 信任验证未通过。请检查钥匙串中的 CA 信任设置。系统错误：{error}"
+        trusted_exact_certificate(path, &keychain, der).map_err(|error| format!(
+            "安装命令已完成，但系统 SSL 信任验证未通过。请检查当前用户默认钥匙串中的 CA 信任设置。系统错误：{error}"
         ))?;
-        Ok("CA 已安装并通过系统信任验证。请刷新浏览器；若仍有证书错误，请重启浏览器。".into())
+        Ok("CA 已安装到当前用户默认钥匙串并通过系统信任验证。请刷新浏览器；若仍有证书错误，请重启浏览器。".into())
     }
 
     #[cfg(test)]
@@ -242,20 +236,27 @@ mod platform {
 
 
         #[test]
-        fn administrator_script_quotes_special_paths_without_executing_them() {
-            let path = "/tmp/公共 CA 'quote' \"double\" $(touch nope) `false` \\ slash.cer";
-            let shell = shell_literal(path);
-            assert!(shell.starts_with('\'') && shell.ends_with('\''));
-            assert!(shell.contains("'\"'\"'quote'\"'\"'"));
-            let script = install_script(path);
-            assert!(script.starts_with("do shell script \""));
-            assert!(script.ends_with(" with administrator privileges"));
-            assert!(script.contains("add-trusted-cert"));
-            assert!(!script.contains("PRIVATE KEY") && !script.contains("BingoRootCA.key"));
-            assert_eq!(
-                applescript_literal("a\nb\r\t\\\""),
-                "\"a\\nb\\r\\t\\\\\\\"\""
-            );
+        fn user_install_keeps_special_paths_as_arguments_and_uses_user_trust_domain() {
+            let path = Path::new("/tmp/公共 CA 'quote' \"double\" $(touch nope) `false` \\ slash.cer");
+            let keychain = Path::new("/Users/用户/Library/Keychains/login.keychain-db");
+            let command = install_command(path, keychain);
+            assert_eq!(command.get_program(), "/usr/bin/security");
+            let args: Vec<_> = command.get_args().collect();
+            assert_eq!(args, ["add-trusted-cert", "-r", "trustRoot", "-k"].iter()
+                .map(std::ffi::OsStr::new).chain([keychain.as_os_str(), path.as_os_str()]).collect::<Vec<_>>());
+            assert!(!args.contains(&std::ffi::OsStr::new("-d")));
+        }
+
+        #[test]
+        fn default_user_keychain_output_accepts_login_and_rejects_system_or_invalid_paths() {
+            assert_eq!(user_keychain_from_output(b"    \"/Users/test/Library/Keychains/login.keychain-db\"\n").unwrap(),
+                Path::new("/Users/test/Library/Keychains/login.keychain-db"));
+            assert_eq!(user_keychain_from_output(" \"/Users/用户 名/Library/Keychains/login.keychain-db\"\n".as_bytes()).unwrap(),
+                Path::new("/Users/用户 名/Library/Keychains/login.keychain-db"));
+            for output in [b"".as_slice(), b"login.keychain-db", b"\"/tmp/keychain", b"/tmp/one\n/tmp/two", b"\"/tmp/one\" \"/tmp/two\"",
+                b"\"/Library/Keychains/System.keychain\"", b"\"/Library/Keychains/System.keychain-db\""] {
+                assert!(user_keychain_from_output(output).is_err());
+            }
         }
 
         #[test]
@@ -277,9 +278,10 @@ mod platform {
         fn system_ssl_verification_rejects_untrusted_generated_root() {
             let der = decode_public_ca(&super::super::tests::public_fixture(true)).unwrap();
             let certificate = temporary_public_certificate(&der).unwrap();
-            let error = verify_certificate(certificate.path()).unwrap_err();
+            let keychain = default_user_keychain().unwrap();
+            let error = verify_certificate(certificate.path(), &keychain).unwrap_err();
             assert!(!error.is_empty());
-            assert!(trusted_exact_certificate(certificate.path(), &der).is_err());
+            assert!(trusted_exact_certificate(certificate.path(), &keychain, &der).is_err());
         }
 
         #[test]

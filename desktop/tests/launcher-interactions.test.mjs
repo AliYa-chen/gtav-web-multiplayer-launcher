@@ -35,8 +35,9 @@ async function launcher(desktop = true, options = {}) {
     .filter((match) => !/\bdisabled\b/.test(match[0])).map((match) => button(match[1]));
   const lanDialog = { focus() { document.activeElement = this; }, querySelectorAll: lanControls, contains: (node) => node === lanDialog || lanControls().includes(node) };
   const details = { get clientHeight() { return layout.detailsHeight; }, scrollTop: 0, getBoundingClientRect: () => ({ top: 100 }) };
-  const addresses = { getBoundingClientRect: () => ({ top: 100 + layout.addressTop }),
-    querySelectorAll: () => [...app.innerHTML.matchAll(/data-client-id="[^"]+"/g)].map(() => ({ getBoundingClientRect: () => ({ height: layout.cardHeight }) })) };
+  const addresses = { get clientWidth() { return layout.width || 400; }, getBoundingClientRect: () => ({ top: 100 + layout.addressTop }),
+    querySelectorAll: () => [...app.innerHTML.matchAll(/data-client-id="([^"]+)"/g)].map((match) => ({ dataset: { clientId: match[1] },
+      getBoundingClientRect: () => ({ height: clients.find((client) => String(client.id) === match[1])?.primary ? layout.primaryHeight ?? layout.cardHeight : layout.cardHeight }) })) };
   const document = { activeElement: null, documentElement: { style: { setProperty() {} } }, querySelector(selector) {
     if (selector === '#app') return app;
     if (selector === '.launch-details') return details;
@@ -237,6 +238,8 @@ test('实际启动界面仅通过后端读取远程配置，并从目录选择�
   ]);
   const beforeAdditional = ui.calls.length; await ui.click('additional');
   assert.deepEqual(ui.calls.slice(beforeAdditional).map(call => call.command), ['start_game']);
+  assert.match(ui.app.innerHTML, /客户端 1 · 本机/);
+  assert.doesNotMatch(ui.app.innerHTML, /data-copy-client="1"/);
   await ui.click('', { copyClient: '2' });
   assert.equal(ui.copied.at(-1), 'http://192.168.31.225:8444/');
   assert.match(ui.app.innerHTML, /2 个客户端已启动/);
@@ -421,6 +424,41 @@ test('新增客户端自动展示邀请地址，分页保留全局编号并打�
   assert.doesNotMatch(ui.app.innerHTML, /data-open="1"/);
 });
 
+test('本机仅显示 HTTPS 服务地址和停止服务，朋友保留邀请操作，重建本机后继续禁止复制', async () => {
+  const ui = await launcher();
+  await ui.click('launch');
+  assert.match(ui.app.innerHTML, /data-client-id="1"/);
+  assert.match(ui.app.innerHTML, /<code title="https:\/\/192\.168\.31\.225:8443\/">https:\/\/192\.168\.31\.225:8443\/<\/code>/);
+  assert.doesNotMatch(ui.app.innerHTML, /data-copy-client|data-open|client-address__actions|复制后发给朋友/);
+  await ui.click('', { copyClient: '1' }); assert.equal(ui.copied.length, 0);
+  await ui.click('additional');
+  assert.match(ui.app.innerHTML, /data-open="2"/);
+  assert.match(ui.app.innerHTML, /data-copy-client="2"/);
+  assert.match(ui.app.innerHTML, /复制后发给朋友/);
+  await ui.click('', { copyClient: '2' }); assert.equal(ui.copied.at(-1), 'http://192.168.31.225:8444/');
+  await ui.click('', { stopClient: '1' }); await ui.click('launch');
+  assert.match(ui.app.innerHTML, /客户端 3 · 本机/);
+  assert.doesNotMatch(ui.app.innerHTML, /data-copy-client="3"|data-open="3"/);
+  const copied = ui.copied.length;
+  await ui.click('', { copyClient: '3' }); assert.equal(ui.copied.length, copied);
+});
+
+test('仅本机卡片较矮时，末页和重开本机不会导致容量来回变化', async () => {
+  const ui = await launcher(true, { layout: { primaryHeight: 30, detailsHeight: 170 } });
+  await ui.click('launch');
+  for (let count = 1; count < 5; count++) await ui.click('additional');
+  await ui.click('', { stopClient: '1' });
+  await ui.click('launch');
+  // Four friend cards use two rows; the shorter local card can occupy the next page.
+  assert.deepEqual(clientIds(ui), [2, 3, 4, 5]);
+  await ui.click('clients-next');
+  assert.deepEqual(clientIds(ui), [6]);
+  assert.match(ui.app.innerHTML, /id="clients-next"[^>]*>2 \/ 2/);
+  ui.resize({ detailsHeight: 180 });
+  assert.deepEqual(clientIds(ui), [6]);
+  assert.doesNotMatch(ui.app.innerHTML, /data-copy-client="6"/);
+});
+
 test('真实剩余空间容纳八项就完整显示，缩小后分页，尺寸变化保持正在阅读的客户端', async () => {
   const ui = await launcher(true, { layout: { detailsHeight: 285 } });
   await ui.click('launch');
@@ -536,8 +574,11 @@ test('设置只提交 IP 和双端口，启动默认共享，朋友客户端不�
   ]);
   assert.doesNotMatch(ui.app.innerHTML, /class="lan-overlay"/);
   await ui.click('launch');
-  assert.match(ui.app.innerHTML, /http:\/\/192\.168\.1\.8:8445\//);
-  await ui.click('', { copyClient: '1' }); assert.equal(ui.copied.at(-1), 'http://192.168.1.8:8445/');
+  assert.doesNotMatch(ui.app.innerHTML, /http:\/\/192\.168\.1\.8:8445\//);
+  assert.match(ui.app.innerHTML, /https:\/\/192\.168\.1\.8:8444\//);
+  assert.doesNotMatch(ui.app.innerHTML, /data-copy-client="1"/);
+  const copiedBeforePrimary = ui.copied.length;
+  await ui.click('', { copyClient: '1' }); assert.equal(ui.copied.length, copiedBeforePrimary);
   const opening = ui.calls.filter(call => call.command === 'open_game').length;
   await ui.click('additional');
   assert.equal(ui.calls.filter(call => call.command === 'open_game').length, opening);
@@ -559,7 +600,7 @@ test('保存失败保持输入以便修复重试，剪贴板失败不误报成�
   assert.match(ui.app.innerHTML, /save_lan_settings failed/);
   assert.match(ui.app.innerHTML, /id="lan-address"[^>]*value="192\.168\.1\.8"/);
   ui.failCommand('save_lan_settings', false); await ui.click('lan-save');
-  await ui.click('launch'); await ui.click('', { copyClient: '1' });
+  await ui.click('launch'); await ui.click('additional'); await ui.click('', { copyClient: '2' });
   assert.match(ui.app.innerHTML, /无法访问剪贴板，请手动复制/);
   assert.doesNotMatch(ui.app.innerHTML, /邀请地址已复制/);
 });
@@ -706,7 +747,7 @@ test('系统信任生效清理安装错误，同时保留后来的其他错误',
   assert.doesNotMatch(ui.app.innerHTML, /install_lan_ca failed|自动安装未完成/);
   const other = await launcher(true, { clipboard: false });
   other.failCommand('install_lan_ca'); await other.click('ca-install');
-  await other.click('launch'); await other.click('', { copyClient: '1' });
+  await other.click('launch'); await other.click('additional'); await other.click('', { copyClient: '2' });
   other.setCaSystemStatus({ installed: true, trusted: true, fingerprint: caFingerprint });
   await other.runTimer(4000);
   assert.match(other.app.innerHTML, /无法访问剪贴板，请手动复制/);

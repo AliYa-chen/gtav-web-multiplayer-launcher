@@ -18,6 +18,7 @@ const state = {
 };
 let caSystemRequest = null, caSystemRetryTimer = null;
 let clientMeasureFrame = null;
+let measuredFriendHeight = 0;
 const clientResizeObserver = typeof ResizeObserver === 'function' ? new ResizeObserver(scheduleClientMeasurement) : null;
 function findClient(id) { return state.clients.find((client) => String(client.id) === String(id)); }
 function primaryClient() { return state.clients.find((client) => client.primary); }
@@ -35,10 +36,14 @@ function scheduleClientMeasurement() {
     if (!details || !addresses || !cards.length) return;
     const top = addresses.getBoundingClientRect().top - details.getBoundingClientRect().top + details.scrollTop;
     const style = typeof getComputedStyle === 'function' ? getComputedStyle(addresses) : null;
+    const friendCards = cards.filter((card) => findClient(card.dataset.clientId)?.primary === false);
+    if (friendCards.length) measuredFriendHeight = Math.max(...friendCards.map((card) => card.getBoundingClientRect().height));
+    // A page containing only the shorter local card must keep the capacity used by the friend cards.
+    const cardHeight = Math.max(...cards.map((card) => card.getBoundingClientRect().height), state.clients.some((client) => !client.primary) ? measuredFriendHeight : 0);
     const capacity = clientCapacity({ availableHeight: details.clientHeight - top,
-      cardHeight: Math.max(...cards.map((card) => card.getBoundingClientRect().height)), rowGap: parseFloat(style?.rowGap) });
-    if (capacity === null || capacity === state.clientCapacity) { state.clientFocusId = null; return; }
-    const anchorId = state.clientFocusId ?? state.clients[state.clientPage * state.clientCapacity]?.id ?? null;
+      cardHeight, rowGap: parseFloat(style?.rowGap) });
+    if (capacity === null || capacity === state.clientCapacity) return;
+    const anchorId = findClient(state.clientFocusId)?.id ?? state.clients[state.clientPage * state.clientCapacity]?.id ?? null;
     state.clientCapacity = capacity;
     state.clientPage = clientPage(state.clients, capacity, state.clientPage, anchorId);
     render();
@@ -161,9 +166,9 @@ function render() {
           ${running ? `<button id="additional" class="secondary" ${actions.additional ? '' : 'disabled'}>另开一个客户端</button>` : `<button id="verify" class="text-button" ${actions.launch ? '' : 'disabled'}>检查资源</button>`}
           ${state.desktop ? `<button id="lan-setup" class="secondary" ${sharing.configure ? '' : 'disabled'}>共享设置</button>` : ''}</div>
         <div class="launch-details">${caSystemTrusted ? '' : `<div class="ca-trust-actions"><div><span>本机浏览器证书信任</span><small title="${html(state.caSystemStatus?.message || state.caSystemStatus?.error || '')}">${html(state.caSystemStatus?.installed === true ? '系统已安装但未信任，请完成系统信任' : state.caSystemStatus?.message || 'BinGo Root CA · 只需安装一次')}</small></div><div class="ca-trust-actions__buttons"><button id="ca-install" class="secondary" ${caEnabled ? '' : 'disabled'}>安装并信任 CA</button><button id="ca-save" class="text-button" ${caEnabled ? '' : 'disabled'}>下载 CA 证书</button></div>${state.caInstallFailed ? '<p class="ca-trust-fallback" role="status">自动安装未完成，可下载证书手动信任。系统确认信任后会自动隐藏此提示。</p>' : ''}</div>`}
-        ${running ? `<div class="client-list"><div class="client-list__heading"><span>客户端邀请地址</span>${clientPages > 1 ? `<button id="clients-next" class="text-button client-page" aria-label="显示下一组客户端">${state.clientPage + 1} / ${clientPages} ${icons.arrow}</button>` : '<small>复制后发给朋友</small>'}</div><div class="addresses">${visibleClients.map((client) => {
-          const invitation = client.invitation_url || (client.primary ? state.lan?.guide_url : ''), number = html(client.number), id = html(client.id);
-          return `<div class="client-address" data-client-id="${id}"><div class="client-address__heading"><span><span class="status-dot live"></span>客户端 ${number}${client.primary ? ' · 本机' : ' · 朋友'}</span></div><button data-stop-client="${id}" class="text-button client-close" aria-label="停止客户端 ${number} 的游戏与共享服务" title="只停止此客户端的游戏与共享服务" ${state.busy ? 'disabled' : ''}>停止服务</button><div class="client-address__actions">${!client.primary ? `<button data-open="${id}" class="text-button" ${state.busy || state.updateRequired ? 'disabled' : ''}>本机打开 ↗</button>` : ''}<button data-copy-client="${id}" class="secondary client-copy" ${state.busy || !invitation ? 'disabled' : ''}>复制邀请地址</button></div><code title="${html(invitation || client.running_url)}">${html(invitation || client.running_url)}</code></div>`;
+        ${running ? `<div class="client-list"><div class="client-list__heading"><span>客户端</span>${clientPages > 1 ? `<button id="clients-next" class="text-button client-page" aria-label="显示下一组客户端">${state.clientPage + 1} / ${clientPages} ${icons.arrow}</button>` : state.clients.some((client) => !client.primary) ? '<small>复制后发给朋友</small>' : ''}</div><div class="addresses">${visibleClients.map((client) => {
+          const invitation = client.invitation_url, address = client.primary ? client.running_url : invitation, number = html(client.number), id = html(client.id);
+          return `<div class="client-address" data-client-id="${id}"><div class="client-address__heading"><span><span class="status-dot live"></span>客户端 ${number}${client.primary ? ' · 本机' : ' · 朋友'}</span></div><button data-stop-client="${id}" class="text-button client-close" aria-label="停止客户端 ${number} 的游戏与共享服务" title="只停止此客户端的游戏与共享服务" ${state.busy ? 'disabled' : ''}>停止服务</button>${client.primary ? '' : `<div class="client-address__actions"><button data-open="${id}" class="text-button" ${state.busy || state.updateRequired ? 'disabled' : ''}>本机打开 ↗</button><button data-copy-client="${id}" class="secondary client-copy" ${state.busy || !invitation ? 'disabled' : ''}>复制邀请地址</button></div>`}<code title="${html(address)}">${html(address)}</code></div>`;
         }).join('')}</div></div>` : ''}</div></section></div>
       <aside class="community-column"><section class="glass announcement-card"><div class="card-heading"><h2>${icons.bell} 战局公告</h2><span class="config-source">${html(remote.sourceText)}</span></div>
         ${announcement ? `<div class="announcements"><article><div class="announcement-heading"><h3 title="${html(announcement.title)}">${html(announcement.title)}</h3>${announcement.date ? `<time>${html(announcement.date)}</time>` : ''}</div><p>${html(announcement.body)}</p></article><div class="announcement-actions"><button class="text-button" data-read="announcement">查看详情 ↗</button>${remote.announcements.length > 1 ? `<div class="pager"><button id="announcement-prev" aria-label="上一条公告" ${state.announcementIndex ? '' : 'disabled'}>‹</button><span>${state.announcementIndex + 1} / ${remote.announcements.length}</span><button id="announcement-next" aria-label="下一条公告" ${state.announcementIndex < remote.announcements.length - 1 ? '' : 'disabled'}>›</button></div>` : ''}</div></div>` : '<p class="empty-note">-</p>'}
@@ -276,7 +281,8 @@ app.addEventListener('click', async (event) => {
   } else if (target.dataset.copyClient !== undefined) {
     if (state.busy) return;
     const client = findClient(target.dataset.copyClient);
-    const value = client?.invitation_url || (client?.primary ? state.lan?.guide_url : '');
+    if (!client || client.primary) return;
+    const value = client.invitation_url;
     if (value) {
       try { if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable'); await navigator.clipboard.writeText(value); state.error = ''; state.message = '邀请地址已复制，可以发给朋友。'; render(); }
       catch { state.error = '无法访问剪贴板，请手动复制。'; render(); }
@@ -297,8 +303,9 @@ app.addEventListener('click', async (event) => {
     state.announcementIndex = Math.max(0, Math.min(count - 1, state.announcementIndex + (target.id === 'announcement-next' ? 1 : -1))); render();
   } else if (target.id === 'clients-next') {
     if (!state.clients.length) return;
-    state.clientFocusId = null;
-    state.clientPage = (state.clientPage + 1) % Math.ceil(state.clients.length / state.clientCapacity); render();
+    state.clientPage = (state.clientPage + 1) % Math.ceil(state.clients.length / state.clientCapacity);
+    state.clientFocusId = state.clients[state.clientPage * state.clientCapacity]?.id ?? null;
+    render();
   } else if (target.dataset.background) {
     if (!backgroundIds.includes(target.dataset.background)) return;
     state.background = target.dataset.background; saveBackground(storage, state.background, backgroundIds); render();
