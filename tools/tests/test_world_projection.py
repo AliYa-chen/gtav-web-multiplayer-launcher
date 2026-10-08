@@ -11,20 +11,21 @@ import unittest
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_multiplayer as protocol
-from test_combat_world import CombatWorldIntegrationTests as CombatIntegrationTests, APPEARANCE
+import test_combat_world as combat_helpers
+APPEARANCE = combat_helpers.APPEARANCE
 
 
 class WorldProjectionTests(unittest.TestCase):
     get_json = classmethod(protocol.MultiplayerIntegrationTests.get_json.__func__)
-    setUp = CombatIntegrationTests.setUp
-    tearDown = CombatIntegrationTests.tearDown
-    raw_client = CombatIntegrationTests.raw_client
-    client = CombatIntegrationTests.client
-    state = CombatIntegrationTests.state
-    body = staticmethod(CombatIntegrationTests.body)
-    shot = CombatIntegrationTests.shot
-    accepted_shot = CombatIntegrationTests.accepted_shot
-    error = CombatIntegrationTests.error
+    setUp = combat_helpers.CombatWorldIntegrationTests.setUp
+    tearDown = combat_helpers.CombatWorldIntegrationTests.tearDown
+    raw_client = combat_helpers.CombatWorldIntegrationTests.raw_client
+    client = combat_helpers.CombatWorldIntegrationTests.client
+    state = combat_helpers.CombatWorldIntegrationTests.state
+    body = staticmethod(combat_helpers.CombatWorldIntegrationTests.body)
+    shot = combat_helpers.CombatWorldIntegrationTests.shot
+    accepted_shot = combat_helpers.CombatWorldIntegrationTests.accepted_shot
+    error = combat_helpers.CombatWorldIntegrationTests.error
 
     def entity(self, client):
         _, snapshot = self.get_json('/world')
@@ -90,7 +91,7 @@ class WorldProjectionTests(unittest.TestCase):
         deadline = time.monotonic() + 3
         while True:
             _, snapshot = self.get_json('/world')
-            if not snapshot['entities']: break
+            if not any(item.get('player_id') == player.player_id for item in snapshot['entities']): break
             self.assertLess(time.monotonic(), deadline); time.sleep(.03)
         self.assertTrue(any(item['entity_id'] == initial['entity_id'] for item in snapshot['tombstones']))
 
@@ -99,7 +100,7 @@ class WorldProjectionTests(unittest.TestCase):
         snapshot, initial = self.entity(player)
         player.send({'type': 'entity_input', 'entity_id': initial['entity_id'],
                      'owner_epoch': initial['owner_epoch'], 'health': 0, 'owner_id': 'other'})
-        self.error(player, 'unknown_type')
+        self.error(player, 'capability_required')
         _, after = self.entity(player)
         self.assertEqual(after['revision'], initial['revision'])
         self.assertEqual(after['components']['combat']['health'], 200)

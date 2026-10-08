@@ -130,16 +130,28 @@ python3 serve_local.py --host 0.0.0.0 --port 8010 --instances 2 --room-server 12
 重生使用服务器版本号，旧死亡快照不会再次杀死刚恢复的角色。
 
 **当前仍是实验版。命中判定使用玩家胶囊与射线，服务端尚无墙体和地形碰撞数据，不能验证遮挡。**
-**载具同步、爆炸和近战伤害、全部动画与物理行为尚未完成，也不兼容原 GTA Online/FiveM 协议。**
+**原公网版本尚无载具或近战同步；隔离实验版已接入这些路径，但游戏内验收未完成。爆炸、全部动画与完整物理复制仍未完成，也不兼容原 GTA Online/FiveM 协议。**
 远端跳跃与蹲下使用原生动作命令，空间位置仍按服务器坐标复制，不在每个客户端独立模拟同一角色物理。
 实时传输保留 WebSocket；当前公网为 WS，WSS 需要另外部署 TLS 证书和通常配套的域名。
 
 ### 共同世界的后续范围
 
-服务端 `0.2.5-public` 已接入 `WorldRegistry`，统一登记实体 ID、组件、版本、重生代次、所有权租约及删除记录。
-当前已确认的玩家状态经 `WorldProjection` 进入同一份 `/world` 只读一致快照，断线撤销租约、重连保留实体 ID。
-这份快照明确标记 `shared_population=false`、`native_clone_transport=false`，当前没有声称 NPC、交通或原生克隆已接通。
-内核的车辆座位事务、租约迁移与删除机制已通过独立 Java 场景测试；客户端的原生车辆／NPC 适配仍待实现和实测。
+隔离实验服务为 `0.3.0-world-experimental`，默认最多八人。`WorldService` 统一处理命令，`WorldRegistry` 唯一保存实体、战斗、挂接、版本和租约；旧 `CombatWorld` 只保留输入校验与冷却等规则运行数据，广播后的 `WorldProjection` 镜像已经移除。
+新 `world_v2` 通过 WebSocket 传输分块快照与连续增量，客户端按世界 epoch、实体代际和版本过滤。已接入共享车辆的姿态、线速度、角速度、座位和驾驶权，以及指定客户端代算的区域 NPC／交通。
+角色近战、环境生命候选和逮捕由服务器确认；死亡或被捕四秒后统一重部署。原生医院／警局重启及淡出受到在线模式约束，客户端不自行裁决世界死亡。
+每个 256 米活动格登记八位路人、八位司机和八辆交通车；其他端抑制并清理未登记的随机人口，保留玩家、登记实体和任务对象。人口出生点仍使用实验性附近偏移，尚未完成全地图道路／地面选点验证。
+状态批次每 100 毫秒最多 24 个实体，一个批次仅提交一个世界事务，坏输入全部回滚。服务器确认资源就绪后激活五秒租约，断线移交不复用旧所有者权限。
+
+当前公网 `47485` 保持 `0.2.5-public`；实验服务使用 `47486`，游戏入口仍从主页按 `O`，填写同一实验服务地址。默认加入面板继续保留原公网地址，需要自行改成实验端口。
+实际游戏双端验收尚未完成，`game_sync=false` 与 `native_clone_transport=false` 保留。原生同步树没有有效的运行态就绪记录，因此当前使用统一组件适配路线，没有假设网络对象可直接调用。
+
+```sh
+python3 -B tools/build_multiplayer_server.py --output server/multiplayer-world-experimental.jar
+java -jar server/multiplayer-world-experimental.jar --host 0.0.0.0 --port 47486 --max-clients 8
+python3 -B tools/world_protocol_soak.py --jar server/multiplayer-world-experimental.jar --seconds 1800
+```
+
+持续验证工具只验证协议，不能代替两台 GTA 客户端驾驶、交互、环境事件与三十分钟玩法验收。切换原公网前须通过这些实测；旧服务和引擎回滚副本已保留。
 
 系统级审计见 [原生网络复制可行性](docs/原生网络复制可行性审计.md)、
 [游戏世界状态与资源](docs/游戏世界状态与资源审计.md) 与 [统一世界服务端设计](docs/统一世界服务端设计.md)。
@@ -147,10 +159,8 @@ python3 serve_local.py --host 0.0.0.0 --port 8010 --instances 2 --room-server 12
 但原 peer I/O 有空实现、网络脚本上下文与对象初始化尚待验证，不能只换 Java 服务器地址恢复 GTA Online。
 客户端新增只读的同步树／网络脚本上下文就绪观测，结果写入本地日志；不创建假网络对象或调用未验证的树应用函数。
 
-目前玩家和基础战斗使用共同战局，但各客户端的环境 NPC、交通车辆仍各自生成。
-要同步 NPC 交互、抢车、上下车和交通，需要服务端维护全局实体 ID、模拟权归属、版本化事件、
-加入时快照、断线移交以及按玩家附近范围订阅。客户端负责渲染和分配给它的 AI/物理模拟，
-服务器确认关键结果并把同一事件发给相关玩家。仅一个房间 ID 或状态转发不能保证整个 GTA 世界完全一致。
+旧服务只共享玩家和基础战斗；实验版已将 NPC、交通、抢车、上下车、加入快照与断线移交接到同一实体模型。
+客户端仍参与受分配的 AI／物理模拟，环境报告只经过归属、版本、范围和下降候选校验。服务器没有地图碰撞、导航或独立 RAGE 仿真，不能把候选确认称为完全可信的服务器重算。
 
 单机仍使用原始 `game.wasm`；公共战局使用独立 `game-multiplayer.wasm` 副本，
 增加已核对的实体命令导出和有效脚本线程回调。原始游戏资源和 WASM 保留不变。
@@ -167,8 +177,12 @@ python3 -B tools/tests/test_combat_world.py
 python3 -B tools/tests/test_connection_timeout.py
 python3 -B tools/tests/test_world_registry.py
 python3 -B tools/tests/test_world_projection.py
+python3 -B tools/tests/test_world_v2.py --jar server/multiplayer-world-experimental.jar
+python3 -B tools/tests/test_vehicle_world.py --jar server/multiplayer-world-experimental.jar
+python3 -B tools/tests/test_entity_batch.py --jar server/multiplayer-world-experimental.jar
 node tools/tests/test_game_adapter.cjs
 node --test tools/tests/test_public_session.cjs tools/tests/test_join_modal.cjs
+node --test tools/tests/test_world_client.cjs tools/tests/test_world_engine.cjs
 ```
 
 服务器只需要 JAR；客户端的构建命令必须在已有完整游戏项目内执行。

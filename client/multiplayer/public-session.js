@@ -1,5 +1,6 @@
 import { normalizeServerAddress } from './server-address.js';
 import { modelForPreset, normalizeAppearance, randomAppearance } from './appearance.js';
+import { createWorldState, cleanWorldTransform } from './world-state.js';
 
 const coordinates = (value) => Array.isArray(value) && value.length === 3
   && value.every((number) => typeof number === 'number' && Number.isFinite(number) && Math.abs(number) <= 16000);
@@ -71,6 +72,10 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   const address = normalizeServerAddress(preferences.server, location.href);
   const peers = new Map();
   const combat = new Map();
+  const world = createWorldState(), entityInputSequences = new Map(), entityReadyEpochs = new Map();
+  const pendingEntityInputs = new Map();
+  let entityTimer = 0, lastEntityBatchSentAt = -Infinity;
+  let lastWorldSyncAt = -Infinity, interactionSequence = 0;
   const weaponRuleByHash = new Map();
   let weaponRules = [];
   // 每个游戏页独占连接与桥接，避免同一来源的多个标签页混用角色和身份。
@@ -89,6 +94,8 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   let supportsAppearance = false, supportsActions = false;
   let supportsCombat = false, supportsResume = false, supportsHeartbeat = false, supportsSnapshot = false;
   let supportsCombatFeedback = false;
+  let supportsWorldV2 = false;
+  let supportsEntityBatch = false;
   let spawn = null;
   let reconnectTimer = 0, connectionTimer = 0, stateTimer = 0, shotTimer = 0, heartbeatTimer = 0, snapshotTimer = 0, attempts = 0;
   let lastServerMessageAt = performance.now(), pingNonce = 0;
@@ -170,8 +177,152 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
       resume_position: resumeState?.position || null,
       spawn: connected ? spawn : null,
       weapon_rules: weaponRules.map((rule) => ({ ...rule })),
+      world_v2: supportsWorldV2,
       avatar: preferences.preset.endsWith('_female') ? 'female' : 'male', preset: preferences.preset, seed: preferences.seed,
       model: modelForPreset(preferences), appearance_spec: randomAppearance(preferences) });
+  }
+  function postWorld() {
+    if (supportsWorldV2) emit({ type: 'world_state_v2', ...world.state() });
+  }
+  function requestWorldSync() {
+    const now = performance.now();
+    if (!supportsWorldV2 || !profiled || now - lastWorldSyncAt < 1000) return;
+    const current = world.state();
+    if (send('world_sync', current.world_epoch ? { world_epoch: current.world_epoch, after_revision: current.world_revision } : {})) lastWorldSyncAt = now;
+  }
+  function clearEntityInputs() {
+    pendingEntityInputs.clear(); clearTimeout(entityTimer); entityTimer = 0;
+  }
+  function scheduleEntityInputs() {
+    if (entityTimer || !pendingEntityInputs.size) return;
+    entityTimer = setTimeout(flushEntityInputs, Math.max(100, 100 - (performance.now() - lastEntityBatchSentAt)));
+  }
+  function flushEntityInputs() {
+    entityTimer = 0;
+    const current = world.state(), now = performance.now();
+    if (!supportsEntityBatch || !supportsWorldV2 || !current.ready || stopped || !profiled) { clearEntityInputs(); return; }
+    const candidates = [];
+    for (const [id, pending] of pendingEntityInputs) {
+      const entity = world.entity(id);
+      if (now - pending.at >= 250 || current.world_epoch !== pending.world_epoch || !entity
+        || entity.owner_id !== clientId || (entity.ownership && entity.ownership !== 'active')
+        || entity.owner_epoch !== pending.owner_epoch || entity.generation !== pending.generation
+        || entity.components.attachment || (entity.components.combat && !entity.components.combat.alive)) { pendingEntityInputs.delete(id); continue; }
+      candidates.push({ entity, pending });
+    }
+    // 当前受控车辆优先，NPC 保留最新一次姿态；每个网络批次最多24条。
+    candidates.sort((a, b) => (a.entity.kind === 'vehicle' ? 0 : 1) - (b.entity.kind === 'vehicle' ? 0 : 1)
+      || b.pending.at - a.pending.at);
+    const selected = candidates.slice(0, 24);
+    if (!selected.length) return;
+    if (!socket || socket.bufferedAmount > 65536) { scheduleEntityInputs(); return; }
+    const updates = selected.map(({ entity, pending }) => {
+      const key = current.world_epoch + ':' + entity.entity_id + ':' + entity.generation + ':' + entity.owner_epoch;
+      const seq = Math.max(entityInputSequences.get(key) || 0,
+        Number.isSafeInteger(entity.last_input_seq) ? entity.last_input_seq : -1) + 1;
+      return { entity_id: entity.entity_id, owner_epoch: entity.owner_epoch, input_seq: seq, based_on_revision: entity.revision,
+        transform: pending.transform, ...(pending.view ? { view: pending.view } : {}) };
+    });
+    if (!send('entity_batch', { world_epoch: current.world_epoch, updates })) { scheduleEntityInputs(); return; }
+    lastEntityBatchSentAt = now;
+    for (let index = 0; index < selected.length; index++) {
+      const { entity } = selected[index];
+      entityInputSequences.set(current.world_epoch + ':' + entity.entity_id + ':' + entity.generation + ':' + entity.owner_epoch, updates[index].input_seq);
+      pendingEntityInputs.delete(entity.entity_id);
+    }
+    scheduleEntityInputs();
+  }
+  function worldWorkerMessage(data) {
+    if (!supportsWorldV2 || !world.state().ready || !socket
+      || (data.type !== 'entity_input' && socket.bufferedAmount > 65536)) return;
+    const current = world.state();
+    const ownPlayer = current.entities.find((entry) => entry.player_id === clientId);
+    const leaveFromPlayer = data.type === 'interaction_request' && data.action === 'leave_vehicle'
+      && (!data.entity_id || data.entity_id === ownPlayer?.entity_id);
+    const targetId = leaveFromPlayer ? ownPlayer?.components.attachment?.entity_id
+      : data.type === 'simulation_result' && !Object.hasOwn(data, 'entity_id') ? ownPlayer?.entity_id : data.entity_id;
+    const entity = world.entity(targetId);
+    if (!entity || (Object.hasOwn(data, 'world_epoch') && data.world_epoch !== current.world_epoch)) return;
+    if (data.type === 'entity_ready') {
+      if (entity.owner_id !== clientId || (entity.ownership && entity.ownership !== 'offered')
+        || (Object.hasOwn(data, 'owner_epoch') && data.owner_epoch !== entity.owner_epoch)) return;
+      const key = current.world_epoch + ':' + entity.entity_id + ':' + entity.generation + ':' + entity.owner_epoch;
+      if (entityReadyEpochs.has(key)) return;
+      if (send('entity_ready', { world_epoch: current.world_epoch, entity_id: entity.entity_id, owner_epoch: entity.owner_epoch })) entityReadyEpochs.set(key, true);
+      return;
+    }
+    if (data.type === 'interaction_request') {
+      if (!['enter_vehicle', 'leave_vehicle', 'melee'].includes(data.action)
+        || Object.keys(data).some((key) => !['type', 'world_epoch', 'entity_id', 'action', 'seat', 'request_id', 'expected_revision', 'target_generation'].includes(key))
+        || (data.action === 'enter_vehicle' && (entity.kind !== 'vehicle' || !/^(driver|passenger:(?:[0-9]|1[0-5]))$/.test(data.seat)))
+        || (Object.hasOwn(data, 'target_generation') && data.target_generation !== entity.generation)
+        || (!leaveFromPlayer && Object.hasOwn(data, 'expected_revision') && (!Number.isSafeInteger(data.expected_revision)
+          || data.expected_revision < 0 || data.expected_revision > entity.revision))) return;
+      const requestId = data.request_id ?? 'request-' + (++interactionSequence);
+      if (typeof requestId !== 'string' || !/^[A-Za-z0-9_.:-]{1,64}$/.test(requestId)) return;
+      send('interaction_request', { world_epoch: current.world_epoch, request_id: requestId, action: data.action,
+        entity_id: entity.entity_id, target_generation: entity.generation,
+        expected_revision: leaveFromPlayer ? entity.revision : (data.expected_revision ?? entity.revision),
+        ...(data.action === 'enter_vehicle' ? { seat: data.seat } : {}) });
+      return;
+    }
+    if (entity.owner_id !== clientId || (entity.ownership && entity.ownership !== 'active')
+      || (Object.hasOwn(data, 'owner_epoch') && data.owner_epoch !== entity.owner_epoch)
+      || (Object.hasOwn(data, 'generation') && data.generation !== entity.generation)) return;
+    const key = current.world_epoch + ':' + entity.entity_id + ':' + entity.generation + ':' + entity.owner_epoch;
+    const inputSequence = Math.max(entityInputSequences.get(key) || 0,
+      Number.isSafeInteger(entity.last_input_seq) ? entity.last_input_seq : -1) + 1;
+    if (data.type === 'entity_input') {
+      // 当前玩家角色仍由 v1 的有验证状态入口投影；v2 动态提议用于已授权车辆。
+      if (!['vehicle', 'ped'].includes(entity.kind) || entity.player_id !== null
+        || entity.components.attachment
+        || Object.keys(data).some((name) => !['type', 'world_epoch', 'entity_id', 'owner_epoch', 'generation', 'based_on_revision', 'transform', 'view'].includes(name))
+        || (Object.hasOwn(data, 'based_on_revision') && (!Number.isSafeInteger(data.based_on_revision)
+          || data.based_on_revision < 0 || data.based_on_revision > entity.revision))) return;
+      const transform = cleanWorldTransform(data.transform);
+      if (!transform) return;
+      let view;
+      if (Object.hasOwn(data, 'view')) {
+        if (!data.view || Array.isArray(data.view)) return;
+        if (entity.kind === 'vehicle') {
+          if (Object.keys(data.view).length !== 2 || typeof data.view.engine_on !== 'boolean' || typeof data.view.lights_on !== 'boolean') return;
+          view = { engine_on: data.view.engine_on, lights_on: data.view.lights_on };
+        } else {
+          if (Object.keys(data.view).some((name) => !['weapon', 'shooting', 'actions', 'aim_target'].includes(name))) return;
+          const clean = cleanPlayerState({ position: transform.position, heading: 0, model: entity.model, health: 200, ...data.view });
+          if (!clean || !clean.actions) return;
+          view = { weapon: clean.weapon, shooting: clean.shooting, actions: clean.actions,
+            ...(clean.aim_target ? { aim_target: clean.aim_target } : {}) };
+        }
+      }
+      if (supportsEntityBatch) {
+        if (!pendingEntityInputs.has(entity.entity_id) && pendingEntityInputs.size >= 256) return;
+        pendingEntityInputs.set(entity.entity_id, { world_epoch: current.world_epoch, owner_epoch: entity.owner_epoch,
+          generation: entity.generation, at: performance.now(), transform, view });
+        scheduleEntityInputs();
+      } else if (socket.bufferedAmount <= 65536 && send('entity_input', { world_epoch: current.world_epoch, entity_id: entity.entity_id,
+        owner_epoch: entity.owner_epoch, input_seq: inputSequence, based_on_revision: entity.revision, transform,
+        ...(view ? { view } : {}) })) entityInputSequences.set(key, inputSequence);
+    } else if (data.type === 'simulation_result') {
+      const envelope = { world_epoch: current.world_epoch, entity_id: entity.entity_id, owner_epoch: entity.owner_epoch, input_seq: inputSequence };
+      if (data.kind === 'life_report') {
+        if (entity.player_id !== clientId || !['environmental', 'dead', 'arrest'].includes(data.reason)
+          || !Number.isInteger(data.health) || data.health < 0 || data.health > 200
+          || Object.keys(data).some((name) => !['type', 'world_epoch', 'entity_id', 'owner_epoch', 'generation', 'kind', 'reason', 'health'].includes(name))) return;
+        if (send('simulation_result', { ...envelope, kind: 'life_report', reason: data.reason, health: data.health })) entityInputSequences.set(key, inputSequence);
+      } else if (data.kind === 'vehicle_damage') {
+        if (entity.kind !== 'vehicle' || !Number.isFinite(data.engine_health) || data.engine_health < -4000
+          || data.engine_health > entity.components.vehicle.engine_health || !Number.isFinite(data.body_health) || data.body_health < 0
+          || data.body_health > entity.components.vehicle.body_health
+          || Object.keys(data).some((name) => !['type', 'world_epoch', 'entity_id', 'owner_epoch', 'generation', 'kind', 'engine_health', 'body_health'].includes(name))) return;
+        if (send('simulation_result', { ...envelope, kind: 'vehicle_damage', engine_health: data.engine_health, body_health: data.body_health })) entityInputSequences.set(key, inputSequence);
+      } else if (data.kind === 'entity_health') {
+        if (entity.kind !== 'ped' || entity.player_id !== null || !Number.isInteger(data.health) || data.health < 0
+          || data.health > Math.min(200, entity.components.combat?.health ?? 0)
+          || Object.keys(data).some((name) => !['type', 'world_epoch', 'entity_id', 'owner_epoch', 'generation', 'kind', 'health'].includes(name))) return;
+        if (send('simulation_result', { ...envelope, kind: 'entity_health', health: data.health })) entityInputSequences.set(key, inputSequence);
+      }
+    }
   }
   function mergeCombat(value) {
     const player = cleanCombatPlayer(value);
@@ -258,10 +409,12 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     shotSequence++; lastShotSentAt = now;
     logCombat({ stage: 'sent', client_id: clientId, seq: shotSequence, weapon: shot.event.weapon });
     clearPendingShot();
+    clearEntityInputs(); lastEntityBatchSentAt = -Infinity;
   }
   function onWorkerMessage(data) {
-    if (data?.type === 'bridge_ready') { postSession(); return; }
+    if (data?.type === 'bridge_ready') { postSession(); postWorld(); return; }
     if (!room || !profiled || stopped) return;
+    if (['entity_ready', 'entity_input', 'interaction_request', 'simulation_result'].includes(data?.type)) { worldWorkerMessage(data); return; }
     if (data?.type === 'local_state') {
       const clean = cleanPlayerState(data.state);
       if (clean) {
@@ -300,6 +453,8 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     supportsAppearance = supportsActions = false;
     supportsCombat = supportsResume = supportsHeartbeat = supportsSnapshot = false;
     supportsCombatFeedback = false;
+    supportsWorldV2 = false; world.reset(); entityInputSequences.clear(); entityReadyEpochs.clear(); lastWorldSyncAt = -Infinity;
+    supportsEntityBatch = false;
     peers.clear(); combat.clear(); pendingState = null;
     latestLocalState = null;
     weaponRules = []; weaponRuleByHash.clear();
@@ -320,6 +475,8 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
       ...(supportsHeartbeat ? ['heartbeat'] : []), ...(supportsSnapshot ? ['snapshot'] : []),
       ...(supportsCombatFeedback ? ['combat_feedback'] : []),
       ...(supportsActions ? ['actions'] : []),
+      ...(supportsWorldV2 ? ['world_v2'] : []),
+      ...(supportsEntityBatch ? ['entity_batch'] : []),
     ];
     const identity = includeResume && supportsResume && validResumeIdentity(savedIdentity) ? savedIdentity : null;
     attemptedResumeId = null;
@@ -330,7 +487,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   }
   function completeInitialJoin() {
     // 刷新后必须先取得服务器原角色快照，不能在 world_state 到达前随机初始化服装和出生点。
-    if (room && profiled && (!resumed || resumeStateReady)) {
+    if (room && profiled && (!resumed || resumeStateReady) && (!supportsWorldV2 || world.state().ready)) {
       clearTimeout(connectionTimer); connectionTimer = 0;
       if (!initialDone) { initialDone = true; clearTimeout(firstTimer); readyResolve(); }
     }
@@ -351,6 +508,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     snapshotTimer = 0;
     if (!socket || !room || !profiled || stopped || !supportsSnapshot) return;
     send('sync', {});
+    if (supportsWorldV2 && !world.state().ready) requestWorldSync();
     snapshotTimer = setTimeout(snapshot, 10000);
   }
   function startRecoveryTimers() {
@@ -379,6 +537,8 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
         supportsHeartbeat = message.capabilities.includes('heartbeat');
         supportsSnapshot = message.capabilities.includes('snapshot');
         supportsCombatFeedback = message.capabilities.includes('combat_feedback');
+        supportsWorldV2 = message.capabilities.includes('world_v2');
+        supportsEntityBatch = supportsWorldV2 && message.capabilities.includes('entity_batch');
         weaponRules = Object.hasOwn(message, 'weapon_rules') ? cleanWeaponRules(message.weapon_rules) : [];
         if (!weaponRules) throw new Error('服务器武器规则格式无效。');
         weaponRuleByHash.clear(); for (const rule of weaponRules) weaponRuleByHash.set(rule.weapon, rule);
@@ -424,6 +584,23 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
         resumeStateReady = true;
         postSession(); status('sync', '正在同步公共战局玩家'); completeInitialJoin(); break;
       }
+      case 'snapshot_begin': case 'snapshot_chunk': case 'snapshot_end': case 'world_delta': {
+        if (!supportsWorldV2 || !profiled) break;
+        const previousEpoch = world.state().world_epoch;
+        const result = world.receive(message);
+        if ((message.type === 'snapshot_begin' && result.changed) || result.needsSnapshot
+          || previousEpoch !== world.state().world_epoch) clearEntityInputs();
+        if (result.changed) postWorld();
+        if (result.needsSnapshot) requestWorldSync();
+        completeInitialJoin();
+        break;
+      }
+      case 'interaction_result':
+        if (supportsWorldV2 && typeof message.request_id === 'string' && message.request_id.length <= 64
+          && typeof message.accepted === 'boolean' && (!Object.hasOwn(message, 'reason') || typeof message.reason === 'string')) emit({
+          type: 'interaction_result', request_id: message.request_id, accepted: message.accepted,
+          ...(typeof message.reason === 'string' ? { reason: message.reason.slice(0, 200) } : {}) });
+        break;
       case 'player_state': {
         if (message.room_id !== room?.id || !room.members.some(({ id }) => id === message.player_id)) return;
         const state = cleanPlayerState(message.state);
@@ -478,7 +655,11 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
           hello(false);
           break;
         }
-        if (profiled && ['rate_limited', 'stale_seq', 'invalid_shot', 'invalid_movement', 'not_ready', 'player_dead', 'unsupported_weapon', 'weapon_mismatch'].includes(message.code)) {
+        if (profiled && ['rate_limited', 'stale_seq', 'invalid_shot', 'invalid_movement', 'not_ready', 'player_dead', 'unsupported_weapon', 'weapon_mismatch',
+          'stale_input', 'wrong_world', 'invalid_owner', 'not_owner', 'invalid_lease', 'invalid_revision', 'attached_entity', 'dead_entity',
+          'seat_unavailable', 'invalid_seat', 'invalid_component', 'unsupported_interaction', 'stale_owner', 'simulation_not_ready',
+          'player_input_required', 'health_increase_denied', 'unsupported_simulation', 'invalid_target', 'invalid_reason', 'not_facing', 'invalid_request',
+          'too_far', 'stale_revision', 'stale_generation', 'unknown_entity', 'snapshot_required', 'invalid_batch', 'invalid_message', 'static_entity'].includes(message.code)) {
           const text = message.code === 'unsupported_weapon' ? '当前武器暂不支持多人伤害同步，请使用普通枪械。'
             : message.code === 'weapon_mismatch' ? '武器切换尚未同步，请稍后重新射击。'
             : typeof message.message === 'string' ? message.message : '服务器未接受这次操作';
@@ -529,6 +710,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     receiver = next;
     if (receiver) {
       postSession();
+      postWorld();
       if (latestStatus) emit(latestStatus);
       const controls = pendingControls.splice(0);
       for (const control of controls) emit(control);

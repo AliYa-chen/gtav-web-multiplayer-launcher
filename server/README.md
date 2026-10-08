@@ -1,8 +1,8 @@
-# GTA V 公共战局服务端 0.2.5-public
+# GTA V 统一世界实验服务端 0.3.0-world-experimental
 
-本版增加统一实体内核和只读 `GET /world` 快照，保存全局实体 ID、组件、版本、所有权租约、重生代次和删除记录。
-当前实际接入的是服务端已确认的玩家结果；快照明确标记 `shared_population=false` 与 `native_clone_transport=false`。
-车辆座位及对象归属事务已在内核中验证，但未暴露未验证的客户端创建／控制接口，NPC 与车辆的引擎复制仍未接通。
+本版将 `WorldRegistry` 作为玩家、车辆与 NPC 的唯一实体事实；`CombatWorld` 保留输入序号、移动预算和枪械冷却，规则结果直接提交到注册表，旧 v1 消息也从同一状态产生。已删除广播后的独立玩家镜像。服务端仍是轻量 Java 协调器，NPC AI、道路选择、车辆物理和环境损伤来自指定 GTA 客户端的受限候选，服务器没有 RAGE 物理运行时或地图碰撞。
+
+实验版本最多八位玩家；请单独构建并在 47486 等测试端口运行，不覆盖仍在 47485 上使用的已验证版本。实际游戏内的车辆、NPC 和生命事件需两台 GTA 客户端继续验证，协议测试不能代替这项验收。`game_sync: false` 和 `native_clone_transport: false` 保留；`shared_population` 表示已有统一人口实体登记，不能据此认定原 GTA Online 网络层或完整 AI 已实现。
 
 所有玩家连接同一台服务器后，输入昵称就会自动进入唯一的 `PUBLIC` 公共战局。战局常驻，即使没有玩家也保留；无需创建房间、输入房间码、准备或等待房主开始。地图固定为 GTA V，游戏使用沙盒模式。
 
@@ -46,7 +46,7 @@ java -jar multiplayer-server.jar --host 127.0.0.1 --port 8787
 | --- | --- | --- |
 | `--host` | `0.0.0.0` | 监听地址 |
 | `--port` | `8787` | 端口，范围 0～65535；0 表示系统分配，实际端口会打印到终端 |
-| `--max-clients` | `128` | 同时连接上限，范围 1～1024，也作为公共战局的最大人数 |
+| `--max-clients` | `8` | 同时连接上限，范围 1～8，也作为公共战局的最大人数 |
 | `--idle-timeout` | `30` | 已加入玩家连续多久没有有效应用消息就关闭连接，单位秒，范围 1～300 |
 | `--hello-timeout` | `15` | WebSocket 建立后发送 `hello` 加入战局的期限，单位秒，范围 1～300 |
 | `--help` | — | 显示帮助并退出 |
@@ -314,3 +314,49 @@ python3 -B tools/tests/test_connection_timeout.py
 数组中的武器哈希、最低射击间隔和单条射线伤害来自同一份服务端只读目录，与实际权威判定一致。客户端可以按 `cooldown_ms` 加少量网络发送余量安排射击，避免每把枪都用统一发送间隔。服务器仍严格检查枪械冷却、消息限流及射线，没有放宽几何或接受客户端自选的伤害和冷却。
 
 命中的 `shot_result` 增加受害者战斗状态的 `revision`，与相应 `damage` 广播一致。因枪械冷却被拒绝时，`error` 和射手专属回执提供 `retry_after_ms`，表示服务端当前还需等待的毫秒数。其他拒绝原因不保证包含该字段。原客户端可以忽略 `welcome` 中新增的规则数组，不会收到额外的武器规则消息类型。
+
+
+## 统一世界 v2 实验协议
+
+客户端在 `hello.capabilities` 声明 `world_v2`，仍可发送已校验的 v1 玩家 `player_state` 和 `shot_event`。玩家实体 ID 由服务器分配，`profile` 含 `entity_id`、`world_epoch` 和所有权 epoch。`GET /world` 返回相同注册表的当前一致快照。
+
+加入或发送 `world_sync` 后，服务器依次发送 `snapshot_begin`、一个或多个 `snapshot_chunk`、`snapshot_end`。同次快照绑定 `snapshot_id`、`world_epoch`、`cut_revision`，结束消息含该连接的 `stream_seq`；客户端完整接收后原子安装基线。此后 `world_delta` 含连续 `stream_seq`、世界提交号、完整确认实体、删除记录及 `scope_leave`。旧世界 epoch、旧实体 generation 或旧版本不能覆盖新状态；离开兴趣范围只卸载副本，不能当成世界对象删除。
+
+动态兴趣按确认位置和固定格网选择，进入距离 300 米、离开距离 400 米。车辆和挂接乘客作为依赖集合一起发送，远处变更不会让客户端错误推断自身 `stream_seq` 丢失。恢复需要完整快照时使用 `world_sync`，当前实现不接受客户端任意指定远处兴趣区域。
+
+所有权经历 `offered → entity_ready → active`，DTO 的 `ownership` 明确区分三种状态（另有 `unowned`）。当前所有者必须在五秒租约内以对应 `owner_epoch` 完成 ready，才可提交动态更新；断线立即撤销租约，新接手者使用新的 epoch 和 ready 门槛。没有模拟者时冻结最后确认状态，服务器不会伪装继续执行物理或 AI。
+
+| 客户端消息 | 字段及作用 |
+| --- | --- |
+| `entity_ready` | `world_epoch, entity_id, owner_epoch`；确认当前邀请的资源和副本就绪 |
+| `entity_input` | `world_epoch, entity_id, owner_epoch, input_seq, based_on_revision, transform, view?`；单实体兼容入口 |
+| `entity_batch` | `world_epoch, updates:[1～24 个上述更新项，不重复实体 ID]`；每 100 毫秒合并更新，整个批次校验失败则全部回滚，成功只有一个世界事务 |
+| `interaction_request` | `world_epoch, request_id, action, entity_id, expected_revision, target_generation?, seat?`；`enter_vehicle`、`leave_vehicle` 和实验性 `melee`；当前玩家由 session 推导，不能自报 actor |
+| `simulation_result` | 当前 `world_epoch/entity_id/owner_epoch/input_seq` 与候选种类；下文限定对应字段 |
+
+`transform` 固定为三维 `position`、单位四元数 `rotation`、三维 `velocity` 和 `angular_velocity`。车辆 `view` 只允许 `engine_on/lights_on`；未挂接 NPC 的 `view` 可含白名单武器、射击与五种动作和瞄准点。客户端不能写模型、座位、所有者、战斗组件、generation、创建或删除。挂接 NPC 的姿态由车辆事务同步，不允许独立移动；玩家继续使用统一服务校验的 v1 玩家输入。
+
+批次更新使用独立每秒十次、短时二十次的限流预算，玩家状态仍为每秒三十次，连接整体仍为每秒八十条消息。三十次玩家更新加十次模拟批次／秒可共存；逐个高频上报所有人口会被限流。生命、交互和 ready 仍为独立消息。回执继续使用已有 `error`，交互另返回与 `request_id` 绑定的 `interaction_result`。每位玩家最多保留64条成功请求回执；同ID与相同内容重放仅返回原结果，不再次扣血、占座或提交世界变更；同ID换内容返回 `invalid_request`。交互基线允许同一生命周期内较旧的位置版本，服务端仍原子判当前座位、距离与方向；未来版本返回 `invalid_revision`，旧生命周期基线或不匹配的 `target_generation` 返回 `stale_generation`，避免公网传输延迟使所有高频移动目标都无法交互。恢复身份窗口内缓存保留，身份最终删除时清理。
+
+服务器提供一辆固定测试 Blista，驾驶位和乘客位是原子事务，双方同时抢驾驶位只能一人成功。驾驶员断线释放驾驶位并保留车辆及乘客，接手需新租约；车辆姿态更新与附座乘客位置同时提交。驾驶位由 NPC 占用时，玩家可通过同一事务驱离 NPC 并占位；原 NPC 保留身份和血量、解除挂接站在车旁，新驾驶员使用新的邀请和 epoch。已有玩家占据驾驶位时仍拒绝争抢，客户端不能强制杀死 NPC 或篡改座位。
+
+人口区域采用 256 米格网，在已确认玩家进入新格时建立固定目录的八位行人、八位驾驶 NPC 和八辆车，最多保留八个区域。出生点目前为测试性的附近偏移，不能替代地图道路和地面导航；指定引擎客户端可执行 wander／driver 任务，服务器验证租约和有限移动结果。无玩家附近的旧区域可按政策退役并生成删除记录。两个客户端不会各自请求创建一套任意模型人口。
+
+候选结果严格限定为：
+
+- `life_report`：只可报告自己的玩家角色，额外字段为 `reason: environmental/dead/arrest` 和 `health`，只能下降。死亡或逮捕进入服务端四秒重生政策；重复死亡报告不能不断延长重生期限。
+- `entity_health`：只可由已激活的模拟者报告其 NPC，额外字段为 `health`，只能下降。
+- `vehicle_damage`：只可由已激活的模拟者报告当前车辆，额外字段为 `engine_health/body_health`，不能回报修复或篡改座位。
+
+上述候选都不是完整物理反作弊；服务器目前没有独立重算环境碰撞和 GTA AI。近战原型使用存活、两米距离、最多一点五米高度差、前方向量余弦至少0.15和七百毫秒冷却验证，单次最多二十点伤害；没有骨骼接触、格挡或武器近战规则。普通枪械射线可作用于同一登记表里的玩家及有模拟者的 NPC，但仍不包含墙体遮挡。
+
+本机实验构建与测试：
+
+```sh
+python3 -B tools/build_multiplayer_server.py --output server/multiplayer-world-experimental.jar
+java -jar server/multiplayer-world-experimental.jar --host 127.0.0.1 --port 47486 --max-clients 8
+python3 -B tools/tests/test_world_registry.py
+python3 -B tools/tests/test_world_v2.py --jar server/multiplayer-world-experimental.jar
+python3 -B tools/tests/test_vehicle_world.py --jar server/multiplayer-world-experimental.jar
+python3 -B tools/tests/test_entity_batch.py --jar server/multiplayer-world-experimental.jar
+```

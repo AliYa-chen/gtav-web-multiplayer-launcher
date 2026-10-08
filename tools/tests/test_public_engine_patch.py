@@ -23,6 +23,37 @@ from inspect_native_bridge import WasmAudit
 
 
 class PublicEnginePatchTests(unittest.TestCase):
+    def test_world_component_native_abis_and_original_function_bodies(self):
+        expected = {
+            'mpCreateVehicle': (61266, ['i32', 'i64', 'f32', 'i32', 'i32', 'i32'], ['i32']),
+            'mpDeleteVehicle': (61267, ['i64'], []),
+            'mpGetQuaternion': (50044, ['i32', 'i64', 'i64', 'i64', 'i64'], []),
+            'mpSetQuaternion': (50147, ['i32', 'f32', 'f32', 'f32', 'f32'], []),
+            'mpGetVelocity': (50052, ['i64', 'i32'], []),
+            'mpSetVelocity': (50154, ['i32', 'i64'], []),
+            'mpGetAngularVelocity': (50047, ['i64', 'i32'], []),
+            'mpSetAngularVelocity': (50155, ['i32', 'i64'], []),
+            'mpSetPedIntoVehicle': (57201, ['i32', 'i32', 'i32'], []),
+            'mpIsArrested': (58711, ['i32', 'i32'], ['i32']),
+            'mpMeleeAction': (57608, ['i32'], ['i32']),
+            'mpTaskWander': (60591, ['i32', 'f32', 'i32'], []),
+            'mpDriveWander': (60576, ['i32', 'i32', 'f32', 'i32'], []),
+            'mpPedDensity': (57186, ['f32'], []),
+            'mpScenarioDensity': (57187, ['f32', 'f32'], []),
+            'mpVehicleDensity': (61298, ['f32'], []),
+            'mpRandomVehicleDensity': (61299, ['f32'], []),
+            'mpParkedVehicleDensity': (61300, ['f32'], []),
+            'mpAllVehicles': (61943, ['i64'], ['i32']),
+            'mpNearbyPeds': (57673, ['i32', 'i64', 'i32'], ['i32']),
+            'mpPopulationType': (50055, ['i32'], ['i32']),
+            'mpEngineHealth': (61599, ['i32'], ['f32']),
+            'mpBodyHealth': (61604, ['i32'], ['f32']),
+        }
+        for name, (index, parameters, results) in expected.items():
+            self.assertIn(name, self.audits['public'].exports[index])
+            self.assertEqual(self.original.descriptor(index)['signature'], {'parameters': parameters, 'results': results})
+            self.assertEqual(self.body(self.original, index), self.body(self.audits['public'], index))
+
     def test_world_readiness_getters_only_read_initialized_pointers(self):
         for name, index, address in (("mpPedSyncTree", 88346, 29559952),
                                      ("mpPlayerSyncTree", 88355, 29561200)):

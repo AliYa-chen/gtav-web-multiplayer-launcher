@@ -8,11 +8,14 @@ const vm = require('node:vm');
 const { test } = require('node:test');
 
 const root = path.resolve(__dirname, '../..');
+const appearanceUrl = 'data:text/javascript;base64,' + Buffer.from(fs.readFileSync(path.join(root, 'client/multiplayer/appearance.js'), 'utf8')).toString('base64');
 const loadModule = (relative) => import('data:text/javascript;base64,' + Buffer.from(
   fs.readFileSync(path.join(root, relative), 'utf8')).toString('base64'));
 const dependencies = Promise.all([
   loadModule('client/multiplayer/server-address.js'),
   loadModule('client/multiplayer/appearance.js'),
+  import('data:text/javascript;base64,' + Buffer.from(fs.readFileSync(path.join(root, 'client/multiplayer/world-state.js'), 'utf8')
+    .replace("'./appearance.js'", JSON.stringify(appearanceUrl))).toString('base64')),
 ]);
 const source = fs.readFileSync(path.join(root, 'client/multiplayer/public-session.js'), 'utf8')
   .replace(/^import .*$/gm, '').replace('export async function startPublicSession', 'async function startPublicSession');
@@ -27,7 +30,7 @@ const actionState = (changes = {}) => ({ aiming: false, reloading: false, jumpin
 const shotEvent = (weapon = playerState().weapon) => ({ origin: [711, -1088, 24], target: [720, -1088, 24], weapon });
 
 async function harness(options = {}) {
-  const [addressModule, appearanceModule] = await dependencies;
+  const [addressModule, appearanceModule, worldModule] = await dependencies;
   const storage = options.storage || new Map(), timers = new Map(), events = new Map(), sockets = [], statuses = [], logs = [];
   let now = 0, timerId = 0;
   const setTimeout = (callback, delay = 0) => { const id = ++timerId; timers.set(id, { callback, at: now + delay }); return id; };
@@ -55,7 +58,7 @@ async function harness(options = {}) {
     receive(value) { this.onmessage?.({ data: JSON.stringify(value) }); }
     messages(type) { return this.sent.filter((value) => value.type === type); }
   }
-  const context = vm.createContext({ ...addressModule, ...appearanceModule, WebSocket: Socket,
+  const context = vm.createContext({ ...addressModule, ...appearanceModule, ...worldModule, WebSocket: Socket,
     BroadcastChannel: class { constructor() { throw new Error('公共连接禁止跨标签页广播'); } },
     location: { href: 'http://localhost:8010/play/' }, performance: { now: () => now }, document,
     navigator: options.navigator || {},
@@ -838,5 +841,269 @@ test('武器规则严格拒绝重复哈希、非法冷却和伤害，反馈 revi
   assert.equal(packets.filter((value) => value.type === 'combat_feedback').length, 0);
   socket.receive({ type: 'shot_result', seq: 1, weapon: 1, accepted: true, hit: true, victim_id: 'REMOTE', damage: 40, health: 0, revision: 3 });
   assert.equal(packets.filter((value) => value.type === 'combat_feedback')[0].revision, 3);
+  page.api.close();
+});
+
+const worldTransform = (position = [711.5, -1088.1, 22.4]) => ({ position, rotation: [0, 0, 0, 1], velocity: [0, 0, 0], angular_velocity: [0, 0, 0] });
+const worldPed = (id = 'LOCAL', changes = {}) => ({ entity_id: 'w:epochA:' + id, kind: 'ped', model: 0x705e61f2, player_id: id,
+  revision: 1, generation: 1, owner_id: id, owner_epoch: 1, ownership: 'active', lease_until_tick: 5000, last_input_seq: -1,
+  components: { transform: worldTransform(), ped: { weapon: playerState().weapon, shooting: false, actions: actionState() },
+    combat: { health: 200, max_health: 200, alive: true, kills: 0, deaths: 0, respawn_at_tick: 0 } }, ...changes });
+const worldVehicle = (changes = {}) => ({ entity_id: 'w:epochA:vehicle', kind: 'vehicle', model: 0xeb70965f, player_id: null,
+  revision: 1, generation: 1, owner_id: null, owner_epoch: 1, ownership: 'unowned', lease_until_tick: 0, last_input_seq: -1,
+  components: { transform: worldTransform([715.5, -1088.1, 22.4]), vehicle: { engine_health: 1000, body_health: 1000,
+    seats: { driver: null, 'passenger:0': null }, engine_on: false, lights_on: false } }, ...changes });
+const worldSnapshot = (socket, entities = [worldPed(), worldVehicle()], fields = {}) => {
+  const shared = { schema_version: 2, world_epoch: 'epochA', snapshot_id: 'snapshotA', cut_revision: 5, ...fields };
+  socket.receive({ type: 'snapshot_begin', ...shared, world_tick: 100, stream_seq: 0 });
+  socket.receive({ type: 'snapshot_chunk', ...shared, index: 0, entities, tombstones: [] });
+  socket.receive({ type: 'snapshot_end', ...shared, world_tick: 100, stream_seq: 0 });
+};
+const worldDelta = (socket, entities, changes = {}) => socket.receive({ type: 'world_delta', schema_version: 2,
+  world_epoch: 'epochA', world_revision: 6, world_tick: 110, stream_seq: 1, entities, tombstones: [], scope_leave: [], ...changes });
+
+test('world_v2 仅协商后启用，首次 ready 等完整快照再启动，分块中不发布半个世界', async () => {
+  const page = await harness(); const socket = page.enter(undefined, 'LOCAL', {}, [...capabilities, 'world_v2']);
+  assert.ok(socket.messages('hello')[0].capabilities.includes('world_v2'));
+  let ready = false; page.api.ready.then(() => { ready = true; }); await Promise.resolve(); assert.equal(ready, false);
+  const packets = []; page.api.setReceiver((value) => packets.push(copy(value)));
+  socket.receive({ type: 'snapshot_begin', schema_version: 2, world_epoch: 'epochA', snapshot_id: 'snapshotA', cut_revision: 5, world_tick: 100, stream_seq: 0 });
+  socket.receive({ type: 'snapshot_chunk', schema_version: 2, world_epoch: 'epochA', snapshot_id: 'snapshotA', cut_revision: 5,
+    index: 0, entities: [worldPed(), worldVehicle()], tombstones: [] });
+  assert.equal(packets.filter((value) => value.type === 'world_state_v2').at(-1).ready, false);
+  assert.equal(packets.filter((value) => value.type === 'world_state_v2').at(-1).entities.length, 0);
+  socket.receive({ type: 'snapshot_end', schema_version: 2, world_epoch: 'epochA', snapshot_id: 'snapshotA', cut_revision: 5, world_tick: 100, stream_seq: 0 });
+  await page.api.ready; assert.equal(ready, true);
+  assert.equal(packets.filter((value) => value.type === 'world_state_v2').at(-1).entities.length, 2);
+  page.api.close();
+  const old = await harness(); const oldSocket = old.enter(); await old.api.ready;
+  const oldPackets = []; old.api.setReceiver((value) => oldPackets.push(copy(value))); worldSnapshot(oldSocket);
+  assert.equal(oldPackets.filter((value) => value.type === 'world_state_v2').length, 0);
+  assert.equal(oldSocket.readyState, 1); old.api.close();
+});
+
+test('统一世界 delta 连续序号缺口请求新快照并禁止所有者输入，过期 owner/generation 不可提交', async () => {
+  const page = await harness(); const socket = page.enter(undefined, 'LOCAL', {}, [...capabilities, 'world_v2']);
+  const active = worldVehicle({ owner_id: 'LOCAL', owner_epoch: 2, ownership: 'active', lease_until_tick: 5000 });
+  worldSnapshot(socket, [worldPed(), active]); await page.api.ready;
+  page.api.onWorkerMessage({ type: 'entity_input', entity_id: active.entity_id, owner_epoch: 1, transform: worldTransform() });
+  page.api.onWorkerMessage({ type: 'entity_input', entity_id: active.entity_id, owner_epoch: 2, generation: 0, transform: worldTransform() });
+  assert.equal(socket.messages('entity_input').length, 0);
+  worldDelta(socket, [active], { stream_seq: 2 });
+  assert.equal(socket.messages('world_sync').length, 1);
+  page.api.onWorkerMessage({ type: 'entity_input', entity_id: active.entity_id, transform: worldTransform() });
+  assert.equal(socket.messages('entity_input').length, 0, '缺少完整基线时不能继续提议动态结果');
+  assert.equal(socket.readyState, 1, '只恢复世界基线，不把普通分发缺口误判成退出战局'); page.api.close();
+});
+
+test('所有者邀请资源就绪仅确认一次，激活后只发送受限车辆姿态且沿用最后输入序号', async () => {
+  const page = await harness(); const socket = page.enter(undefined, 'LOCAL', {}, [...capabilities, 'world_v2']);
+  const offered = worldVehicle({ owner_id: 'LOCAL', owner_epoch: 2, ownership: 'offered', lease_until_tick: 5000 });
+  worldSnapshot(socket, [worldPed(), offered]); await page.api.ready;
+  page.api.onWorkerMessage({ type: 'entity_input', entity_id: offered.entity_id, transform: worldTransform() });
+  assert.equal(socket.messages('entity_input').length, 0);
+  page.api.onWorkerMessage({ type: 'entity_ready', entity_id: offered.entity_id, owner_epoch: 1 });
+  page.api.onWorkerMessage({ type: 'entity_ready', entity_id: offered.entity_id, owner_epoch: 2 });
+  page.api.onWorkerMessage({ type: 'entity_ready', entity_id: offered.entity_id, owner_epoch: 2 });
+  assert.deepEqual(socket.messages('entity_ready'), [{ type: 'entity_ready', world_epoch: 'epochA', entity_id: offered.entity_id, owner_epoch: 2 }]);
+  const active = { ...offered, ownership: 'active', revision: 2, last_input_seq: 12 };
+  worldDelta(socket, [active]);
+  page.api.onWorkerMessage({ type: 'entity_input', entity_id: active.entity_id, owner_epoch: 2, transform: worldTransform(),
+    view: { engine_on: true, lights_on: false } });
+  assert.equal(socket.messages('entity_input')[0].input_seq, 13); assert.equal(socket.messages('entity_input')[0].based_on_revision, 2);
+  assert.equal(socket.messages('entity_input')[0].world_epoch, 'epochA');
+  for (const forbidden of [{ combat: { health: 0 } }, { owner_id: 'REMOTE' }, { lifecycle: 'delete' }, { input_seq: 999 }]) {
+    page.api.onWorkerMessage({ type: 'entity_input', entity_id: active.entity_id, transform: worldTransform(), ...forbidden });
+  }
+  assert.equal(socket.messages('entity_input').length, 1);
+  page.api.onWorkerMessage({ type: 'entity_input', entity_id: worldPed().entity_id, transform: worldTransform() });
+  assert.equal(socket.messages('entity_input').length, 1, '玩家移动保留 v1 校验入口，不产生另一套生命权威');
+  page.api.close();
+});
+
+test('交互身份由网络绑定，离车自动解析当前车辆，生命候选不能声明其他玩家或恢复健康', async () => {
+  const page = await harness(); const socket = page.enter(undefined, 'LOCAL', {}, [...capabilities, 'world_v2']);
+  const local = worldPed('LOCAL', { components: { ...worldPed().components, attachment: { entity_id: worldVehicle().entity_id, seat: 'driver' } } });
+  const active = worldVehicle({ owner_id: 'LOCAL', owner_epoch: 2, ownership: 'active', lease_until_tick: 5000, revision: 4,
+    components: { ...worldVehicle().components, vehicle: { ...worldVehicle().components.vehicle, seats: { driver: local.entity_id, 'passenger:0': null } } } });
+  worldSnapshot(socket, [local, worldPed('REMOTE'), active]); await page.api.ready;
+  page.api.onWorkerMessage({ type: 'interaction_request', action: 'leave_vehicle', entity_id: local.entity_id, expected_revision: local.revision });
+  const leave = socket.messages('interaction_request')[0];
+  assert.equal(leave.entity_id, active.entity_id); assert.equal(leave.expected_revision, 4); assert.ok(leave.request_id);
+  assert.ok(!Object.hasOwn(leave, 'actor_id'));
+  page.api.onWorkerMessage({ type: 'simulation_result', kind: 'life_report', reason: 'environmental', health: 180 });
+  assert.equal(socket.messages('simulation_result')[0].entity_id, local.entity_id);
+  page.api.onWorkerMessage({ type: 'simulation_result', entity_id: worldPed('REMOTE').entity_id, kind: 'life_report', reason: 'dead', health: 0 });
+  page.api.onWorkerMessage({ type: 'simulation_result', kind: 'life_report', reason: 'dead', health: 0, owner_id: 'REMOTE' });
+  assert.equal(socket.messages('simulation_result').length, 1);
+  page.api.onWorkerMessage({ type: 'simulation_result', entity_id: active.entity_id, kind: 'vehicle_damage', engine_health: 800, body_health: 900 });
+  assert.equal(socket.messages('simulation_result').length, 2);
+  page.api.onWorkerMessage({ type: 'simulation_result', entity_id: active.entity_id, kind: 'vehicle_damage', engine_health: 1001, body_health: 1000 });
+  assert.equal(socket.messages('simulation_result').length, 2);
+  page.api.close();
+});
+
+test('世界 NPC 仅授权后允许固定行为和生命候选，输入不能写外观或任务生命周期', async () => {
+  const page = await harness(); const socket = page.enter(undefined, 'LOCAL', {}, [...capabilities, 'world_v2']);
+  const npc = worldPed('NPC', { player_id: null, owner_id: 'LOCAL', entity_id: 'w:epochA:npc', ownership: 'active', simulation_task: 'wander' });
+  worldSnapshot(socket, [worldPed(), npc]); await page.api.ready;
+  page.api.onWorkerMessage({ type: 'entity_input', entity_id: npc.entity_id, owner_epoch: 1, transform: worldTransform(),
+    view: { weapon: playerState().weapon, shooting: false, actions: actionState({ sprinting: true }) } });
+  assert.equal(socket.messages('entity_input').length, 1); assert.equal(socket.messages('entity_input')[0].view.actions.sprinting, true);
+  page.api.onWorkerMessage({ type: 'entity_input', entity_id: npc.entity_id, transform: worldTransform(),
+    view: { weapon: 0, shooting: false, actions: actionState(), appearance: {} } });
+  page.api.onWorkerMessage({ type: 'entity_input', entity_id: npc.entity_id, transform: worldTransform(), lifecycle: 'death' });
+  assert.equal(socket.messages('entity_input').length, 1);
+  page.api.onWorkerMessage({ type: 'simulation_result', entity_id: npc.entity_id, kind: 'entity_health', health: 175 });
+  assert.equal(socket.messages('simulation_result').length, 1); page.api.close();
+});
+
+test('多实体输入每100毫秒合成一条消息，只保留最新姿态并在发送时采用最新基线版本', async () => {
+  const page = await harness(); const socket = page.enter(undefined, 'LOCAL', {}, [...capabilities, 'world_v2', 'entity_batch']);
+  assert.ok(socket.messages('hello')[0].capabilities.includes('entity_batch'));
+  const active = worldVehicle({ owner_id: 'LOCAL', owner_epoch: 2, ownership: 'active', lease_until_tick: 5000 });
+  const npcs = Array.from({ length: 3 }, (_, index) => worldPed('NPC' + index, { player_id: null, owner_id: 'LOCAL',
+    entity_id: 'w:epochA:npc' + index, ownership: 'active' }));
+  worldSnapshot(socket, [worldPed(), active, ...npcs]); await page.api.ready;
+  for (let step = 0; step < 10; step++) {
+    for (const entity of [active, ...npcs]) page.api.onWorkerMessage({ type: 'entity_input', entity_id: entity.entity_id,
+      owner_epoch: entity.owner_epoch, transform: worldTransform([711.5 + step * .1, -1088.1, 22.4]) });
+    page.advance(10);
+  }
+  assert.equal(socket.messages('entity_input').length, 0); assert.equal(socket.messages('entity_batch').length, 1);
+  let batch = socket.messages('entity_batch')[0]; assert.equal(batch.updates.length, 4);
+  assert.equal(batch.updates[0].entity_id, active.entity_id, '车辆在共享预算中优先');
+  assert.ok(batch.updates.every((value) => Math.abs(value.transform.position[0] - 712.4) < .001));
+  assert.ok(batch.updates.every((value) => value.input_seq === 1));
+  for (const entity of [active, ...npcs]) page.api.onWorkerMessage({ type: 'entity_input', entity_id: entity.entity_id,
+    transform: worldTransform([713, -1088, 22.4]) });
+  worldDelta(socket, [active, ...npcs].map((entity) => ({ ...entity, revision: 3, last_input_seq: 1 })));
+  page.api.onWorkerMessage({ type: 'entity_input', entity_id: active.entity_id, based_on_revision: 1,
+    transform: worldTransform([714, -1088, 22.4]) });
+  page.advance(100); assert.equal(socket.messages('entity_batch').length, 2);
+  batch = socket.messages('entity_batch')[1];
+  assert.ok(batch.updates.every((value) => value.input_seq === 2 && value.based_on_revision === 3));
+  assert.equal(batch.updates.find((value) => value.entity_id === active.entity_id).transform.position[0], 714,
+    '工作线程旧基线的有效模拟结果可排队，发送时采用服务端已确认的新基线');
+  const times = socket.sentTimes.filter((entry) => entry.type === 'entity_batch');
+  assert.ok(times[1].at - times[0].at >= 100);
+  page.api.close();
+});
+
+test('实体批次背压保留最新姿态，超过250毫秒过期、所有权或代际改变后不再上传', async () => {
+  const page = await harness(); const socket = page.enter(undefined, 'LOCAL', {}, [...capabilities, 'world_v2', 'entity_batch']);
+  const active = worldVehicle({ owner_id: 'LOCAL', owner_epoch: 2, ownership: 'active', lease_until_tick: 5000 });
+  worldSnapshot(socket, [worldPed(), active]); await page.api.ready;
+  socket.bufferedAmount = 70000;
+  page.api.onWorkerMessage({ type: 'entity_input', entity_id: active.entity_id, transform: worldTransform() });
+  page.advance(100); assert.equal(socket.messages('entity_batch').length, 0);
+  page.api.onWorkerMessage({ type: 'entity_input', entity_id: active.entity_id, transform: worldTransform([713, -1088, 22.4]) });
+  socket.bufferedAmount = 0; page.advance(100);
+  assert.equal(socket.messages('entity_batch').length, 1);
+  assert.equal(socket.messages('entity_batch')[0].updates[0].transform.position[0], 713);
+  socket.bufferedAmount = 70000;
+  page.api.onWorkerMessage({ type: 'entity_input', entity_id: active.entity_id, transform: worldTransform([714, -1088, 22.4]) });
+  page.advance(300); socket.bufferedAmount = 0; page.advance(100);
+  assert.equal(socket.messages('entity_batch').length, 1);
+  page.api.onWorkerMessage({ type: 'entity_input', entity_id: active.entity_id, transform: worldTransform([715, -1088, 22.4]) });
+  worldDelta(socket, [{ ...active, revision: 2, owner_id: 'REMOTE', owner_epoch: 3 }]);
+  page.advance(100); assert.equal(socket.messages('entity_batch').length, 1);
+  worldDelta(socket, [{ ...active, revision: 3, generation: 2 }], { stream_seq: 2, world_revision: 7 });
+  page.api.onWorkerMessage({ type: 'entity_input', entity_id: active.entity_id, generation: 2, transform: worldTransform() });
+  worldDelta(socket, [{ ...active, revision: 4, generation: 3 }], { stream_seq: 3, world_revision: 8 });
+  page.advance(100); assert.equal(socket.messages('entity_batch').length, 1, '排队的旧代际姿态不得变成新实体输入');
+  page.api.close(); assert.equal(page.timers.size, 0);
+});
+
+test('批次发送失败不消耗输入序号，生命候选与姿态批次共享单调序号且关闭清空全部队列', async () => {
+  const page = await harness(); const socket = page.enter(undefined, 'LOCAL', {}, [...capabilities, 'world_v2', 'entity_batch']);
+  const active = worldVehicle({ owner_id: 'LOCAL', owner_epoch: 2, ownership: 'active', lease_until_tick: 5000, last_input_seq: 8 });
+  worldSnapshot(socket, [worldPed(), active]); await page.api.ready;
+  socket.failSendType = 'entity_batch';
+  page.api.onWorkerMessage({ type: 'entity_input', entity_id: active.entity_id, transform: worldTransform() });
+  page.advance(100); assert.equal(socket.messages('entity_batch').length, 0);
+  page.api.onWorkerMessage({ type: 'simulation_result', entity_id: active.entity_id, kind: 'vehicle_damage', engine_health: 900, body_health: 900 });
+  assert.equal(socket.messages('simulation_result')[0].input_seq, 9);
+  socket.failSendType = null; page.advance(100);
+  assert.equal(socket.messages('entity_batch')[0].updates[0].input_seq, 10);
+  page.api.onWorkerMessage({ type: 'entity_input', entity_id: active.entity_id, transform: worldTransform([713, -1088, 22.4]) });
+  page.api.close(); page.advance(1000); assert.equal(socket.messages('entity_batch').length, 1);
+  assert.equal(page.timers.size, 0);
+});
+
+test('世界序号缺口与快照重建都会清空批输入，旧世界姿态不会在恢复后继续发送', async () => {
+  const page = await harness(); const socket = page.enter(undefined, 'LOCAL', {}, [...capabilities, 'world_v2', 'entity_batch']);
+  const active = worldVehicle({ owner_id: 'LOCAL', owner_epoch: 2, ownership: 'active', lease_until_tick: 5000 });
+  worldSnapshot(socket, [worldPed(), active]); await page.api.ready;
+  page.api.onWorkerMessage({ type: 'entity_input', entity_id: active.entity_id, transform: worldTransform() });
+  worldDelta(socket, [], { stream_seq: 2 });
+  page.advance(100); assert.equal(socket.messages('entity_batch').length, 0);
+  worldSnapshot(socket, [worldPed(), active], { snapshot_id: 'snapshotB', cut_revision: 8 });
+  page.advance(100); assert.equal(socket.messages('entity_batch').length, 0);
+  page.api.onWorkerMessage({ type: 'entity_input', entity_id: active.entity_id, transform: worldTransform() });
+  const other = { ...active, entity_id: 'w:epochB:vehicle' };
+  worldSnapshot(socket, [other], { world_epoch: 'epochB', snapshot_id: 'snapshotC', cut_revision: 1 });
+  page.advance(100); assert.equal(socket.messages('entity_batch').length, 0); page.api.close();
+});
+
+test('大量实体每批最多24条，最新姿态合并后每秒批消息不超过10且不超过玩家总消息预算', async () => {
+  const page = await harness(); const socket = page.enter(undefined, 'LOCAL', {}, [...capabilities, 'world_v2', 'entity_batch']);
+  const entities = Array.from({ length: 30 }, (_, index) => worldPed('N' + index, { entity_id: 'w:epochA:n' + index,
+    player_id: null, owner_id: 'LOCAL', ownership: 'active' }));
+  worldSnapshot(socket, [worldPed(), ...entities]); await page.api.ready;
+  for (let step = 0; step < 20; step++) {
+    page.api.onWorkerMessage({ type: 'local_state', state: playerState() });
+    for (const entity of entities) page.api.onWorkerMessage({ type: 'entity_input', entity_id: entity.entity_id, transform: worldTransform() });
+    page.advance(50);
+  }
+  assert.equal(socket.messages('entity_batch').length, 10);
+  assert.ok(socket.messages('entity_batch').every((batch) => batch.updates.length <= 24));
+  assert.equal(socket.messages('player_state').length, 20);
+  assert.equal(socket.messages('entity_batch').length + socket.messages('player_state').length, 30);
+  page.api.close();
+});
+
+test('交互允许同代际的旧基线并携带目标 generation，旧角色生命不能被重写成新目标攻击', async () => {
+  const page = await harness(); const socket = page.enter(undefined, 'LOCAL', {}, [...capabilities, 'world_v2']);
+  const remote = worldPed('REMOTE', { revision: 6, generation: 2 });
+  const car = worldVehicle({ revision: 4, generation: 3 });
+  worldSnapshot(socket, [worldPed(), remote, car], { cut_revision: 10 }); await page.api.ready;
+  page.api.onWorkerMessage({ type: 'interaction_request', action: 'melee', entity_id: remote.entity_id,
+    expected_revision: 3, target_generation: 2 });
+  assert.equal(socket.messages('interaction_request').length, 1);
+  assert.equal(socket.messages('interaction_request')[0].expected_revision, 3);
+  assert.equal(socket.messages('interaction_request')[0].target_generation, 2);
+  page.api.onWorkerMessage({ type: 'interaction_request', action: 'melee', entity_id: remote.entity_id,
+    expected_revision: 3, target_generation: 1 });
+  page.api.onWorkerMessage({ type: 'interaction_request', action: 'melee', entity_id: remote.entity_id,
+    expected_revision: 7, target_generation: 2 });
+  page.api.onWorkerMessage({ type: 'interaction_request', action: 'melee', entity_id: remote.entity_id,
+    expected_revision: -1, target_generation: 2 });
+  assert.equal(socket.messages('interaction_request').length, 1, '显式旧代际或未来/非法版本必须拒绝，不能帮它升级目标');
+  page.api.onWorkerMessage({ type: 'interaction_request', action: 'enter_vehicle', entity_id: car.entity_id,
+    expected_revision: 2, seat: 'driver', target_generation: 3 });
+  const enter = socket.messages('interaction_request').at(-1);
+  assert.equal(enter.target_generation, 3); assert.equal(enter.expected_revision, 2);
+  page.api.onWorkerMessage({ type: 'interaction_request', action: 'enter_vehicle', entity_id: car.entity_id,
+    expected_revision: 2, seat: 'driver' });
+  assert.equal(socket.messages('interaction_request').at(-1).target_generation, 3, '旧worker未带generation时由当前逻辑目标补齐');
+  page.api.close();
+});
+
+test('从本地玩家解析离车目标使用车辆代际，不能误用玩家重生代际或替旧请求升级', async () => {
+  const page = await harness(); const socket = page.enter(undefined, 'LOCAL', {}, [...capabilities, 'world_v2']);
+  const car = worldVehicle({ revision: 8, generation: 3 });
+  const self = worldPed('LOCAL', { generation: 5, components: { ...worldPed().components,
+    attachment: { entity_id: car.entity_id, seat: 'driver' } } });
+  worldSnapshot(socket, [self, car], { cut_revision: 10 }); await page.api.ready;
+  page.api.onWorkerMessage({ type: 'interaction_request', action: 'leave_vehicle', entity_id: self.entity_id,
+    expected_revision: self.revision, target_generation: 5 });
+  assert.equal(socket.messages('interaction_request').length, 0, '玩家generation不得作为车辆generation通过校验');
+  page.api.onWorkerMessage({ type: 'interaction_request', action: 'leave_vehicle', entity_id: self.entity_id,
+    expected_revision: self.revision, target_generation: 3 });
+  const leave = socket.messages('interaction_request')[0];
+  assert.equal(leave.entity_id, car.entity_id); assert.equal(leave.target_generation, 3); assert.equal(leave.expected_revision, 8);
+  page.api.onWorkerMessage({ type: 'interaction_request', action: 'leave_vehicle' });
+  assert.equal(socket.messages('interaction_request').at(-1).target_generation, 3);
   page.api.close();
 });

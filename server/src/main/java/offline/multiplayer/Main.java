@@ -35,8 +35,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** 独立公共战局服务：鉴权恢复、权威移动校验、伤害、死亡、重生及状态分发。 */
 public final class Main {
-    private static final String VERSION = "0.2.5-public";
-    private static final List<String> CAPABILITIES = List.of("public_session", "chat", "player_state", "shoot_events", "appearance", "combat", "resume", "heartbeat", "snapshot", "actions", "combat_feedback", "weapon_rules", "world_registry");
+    private static final String VERSION = "0.3.0-world-experimental";
+    private static final List<String> CAPABILITIES = List.of("public_session", "chat", "player_state", "shoot_events", "appearance", "combat", "resume", "heartbeat", "snapshot", "actions", "combat_feedback", "weapon_rules", "world_registry", "world_v2", "entity_batch");
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final int MAX_MESSAGE_BYTES = 64 * 1024;
 
@@ -60,7 +60,7 @@ public final class Main {
         static Config parse(String[] args) {
             String host = "0.0.0.0";
             int port = 8787;
-            int maxClients = 128;
+            int maxClients = 8;
             int idleTimeoutSeconds = 30;
             int helloTimeoutSeconds = 15;
             for (int index = 0; index < args.length; index++) {
@@ -70,7 +70,7 @@ public final class Main {
                         + "用法：java -jar multiplayer-server.jar [选项]\n"
                         + "  --host 地址          监听地址，默认 0.0.0.0\n"
                         + "  --port 端口          监听端口，默认 8787；0 为系统分配\n"
-                        + "  --max-clients 人数   连接上限，默认 128（1–1024）\n"
+                        + "  --max-clients 人数   连接上限，默认 8（1–8）\n"
                         + "  --idle-timeout 秒    无有效消息的连接超时，默认 30（1–300）\n"
                         + "  --hello-timeout 秒   WebSocket 建立后加入期限，默认 15（1–300）\n"
                         + "所有玩家自动进入同一个公共战局；无需房间码、准备或房主。\n"
@@ -86,7 +86,7 @@ public final class Main {
                         host = value;
                     }
                     case "--port" -> port = boundedInteger(value, 0, 65535, "端口");
-                    case "--max-clients" -> maxClients = boundedInteger(value, 1, 1024, "连接上限");
+                    case "--max-clients" -> maxClients = boundedInteger(value, 1, 8, "连接上限");
                     case "--idle-timeout" -> idleTimeoutSeconds = boundedInteger(value, 1, 300, "空闲超时");
                     case "--hello-timeout" -> helloTimeoutSeconds = boundedInteger(value, 1, 300, "加入期限");
                     default -> throw new IllegalArgumentException("未知选项：" + argument);
@@ -353,8 +353,8 @@ public final class Main {
         private final long idleTimeoutNanos;
         private final int helloTimeoutSeconds;
         private final long helloTimeoutNanos;
-        private final CombatWorld combat = new CombatWorld();
-        private final WorldProjection world = new WorldProjection();
+        private final WorldService combat = new WorldService();
+        private final WorldService world = combat;
         private long shotEventsReceived;
         private boolean closed;
         private static final long SESSION_TTL_MILLIS = 60_000;
@@ -395,7 +395,7 @@ public final class Main {
                     "combat_authoritative", true, "transport", "websocket", "resume_ttl_seconds", 60,
                     "idle_timeout_seconds", idleTimeoutSeconds, "hello_timeout_seconds", helloTimeoutSeconds,
                     "world_epoch", view.get("world_epoch"), "world_revision", view.get("cut_revision"),
-                    "world_entities", ((List<?>) view.get("entities")).size(), "shared_population", false);
+                    "world_entities", ((List<?>) view.get("entities")).size(), "shared_population", view.get("shared_population"));
             }
         }
 
@@ -437,6 +437,7 @@ public final class Main {
                                 if (client.combatCapable) declared.add("combat");
                                 if (client.resumeCapable) declared.add("resume");
                                 if (client.combatFeedbackCapable) declared.add("combat_feedback");
+                                if (client.worldCapable) declared.add("world_v2");
                                 hello(client, object("type", "hello", "name", client.name, "capabilities", declared));
                             } else {
                                 requireSession(client);
@@ -460,12 +461,36 @@ public final class Main {
                         }
                         case "player_state" -> playerState(client, message);
                         case "shot_event" -> shotEvent(client, message);
+                        case "world_sync" -> {
+                            requireWorld(client);WorldService.fields(message,"type","world_epoch","after_revision");
+                            sendWorldSnapshot(client);
+                        }
+                        case "entity_ready" -> {requireWorld(client);world.ready(client.id,message);}
+                        case "entity_input" -> {requireWorld(client);if(!client.stateRate.take())throw problem("rate_limited","实体更新过快");world.entityInput(client.id,message);}
+                        case "entity_batch" -> {requireWorld(client);if(!client.batchRate.take())throw problem("rate_limited","实体批次更新过快");world.entityBatch(client.id,message);}
+                        case "interaction_request" -> {
+                            requireWorld(client);
+                            try {for(Map<String,Object> event:world.interaction(client.id,message)) {
+                                if("interaction_result".equals(event.get("type")))client.send(event);else broadcast(event);
+                            }}catch(WorldService.Problem|WorldRegistry.Rejection rejection){
+                                String code=rejection instanceof WorldService.Problem p?p.code:((WorldRegistry.Rejection)rejection).code;
+                                client.send(object("type","interaction_result","request_id",message.get("request_id"),"accepted",false,"reason",code));throw rejection;
+                            }
+                        }
+                        case "simulation_result" -> {requireWorld(client);world.simulation(client.id,message).forEach(this::broadcast);}
                         default -> throw problem("unknown_type", "不支持的消息类型：" + type);
                     }
                     // 收到字节、错误 JSON 或被拒绝的动作都不能延长连接寿命。
                     client.recordActivity();
+                    publishWorld();
                 } catch (LobbyProblem problem) {
                     reportError(client, message, problem.code, problem.getMessage(), 0);
+                } catch (WorldService.Problem rejection) {
+                    reportError(client,message,rejection.code,rejection.getMessage(),0);
+                } catch (WorldRegistry.Rejection rejection) {
+                    reportError(client,message,rejection.code,rejection.getMessage(),0);
+                } catch (IllegalArgumentException rejection) {
+                    reportError(client,message,"invalid_message",rejection.getMessage(),0);
                 } catch (CombatWorld.Rejection rejection) {
                     reportError(client, message, rejection.code, rejection.getMessage(), rejection.retryAfterMillis);
                 }
@@ -478,6 +503,7 @@ public final class Main {
             boolean combatCapable = false;
             boolean resumeCapable = false;
             boolean combatFeedbackCapable = false;
+            boolean worldCapable = false;
             if (message.containsKey("capabilities")) {
                 if (!(message.get("capabilities") instanceof List<?> values) || values.size() > 16
                         || values.stream().anyMatch(value -> !(value instanceof String text) || text.length() > 40))
@@ -485,6 +511,7 @@ public final class Main {
                 combatCapable = values.contains("combat");
                 resumeCapable = values.contains("resume");
                 combatFeedbackCapable = values.contains("combat_feedback");
+                worldCapable = values.contains("world_v2");
             }
             boolean hasId = message.containsKey("client_id");
             boolean hasToken = message.containsKey("resume_token");
@@ -517,13 +544,34 @@ public final class Main {
             client.combatCapable = combatCapable;
             client.resumeCapable = resumeCapable;
             client.combatFeedbackCapable = combatFeedbackCapable;
+            client.worldCapable = worldCapable;
             Map<String, Object> profile = object("type", "profile", "client_id", session.id, "name", name);
             profile.putAll(combat.join(session.id));
+            world.worldParticipant(session.id,worldCapable);
             if (resumeCapable) profile.put("resume_token", session.token);
             client.send(profile);
             broadcast(roomState());
             client.send(combat.worldState());
             broadcast(combat.combatState());
+            if(client.worldCapable)sendWorldSnapshot(client);
+        }
+
+        private void requireWorld(Client client) throws LobbyProblem {
+            requireSession(client);if(!client.worldCapable)throw problem("capability_required","需要声明world_v2能力");
+        }
+        private void sendWorldSnapshot(Client client) {
+            for(Map<String,Object> message:world.snapshotMessages(client.id,client.scope,client.streamSequence))client.send(message);
+            client.worldRevision=((Number)world.snapshot().get("cut_revision")).longValue();client.worldInitialized=true;
+        }
+        private void publishWorld() {
+            for(Session session:sessions.values()) {
+                Client client=session.client;if(!session.connected() || !client.worldCapable || !client.worldInitialized)continue;
+                try {
+                    Map<String,Object> delta=world.delta(session.id,client.scope,client.worldRevision,client.streamSequence+1);
+                    client.worldRevision=((Number)world.snapshot().get("cut_revision")).longValue();
+                    if(delta!=null){client.streamSequence++;client.send(delta);}
+                }catch(WorldService.Problem problem){sendWorldSnapshot(client);}
+            }
         }
 
         private Session requireSession(Client client) throws LobbyProblem {
@@ -661,6 +709,7 @@ public final class Main {
             }
             broadcast(roomState());
             broadcast(combat.combatState());
+            publishWorld();
         }
 
         void remove(Client client) {
@@ -686,7 +735,6 @@ public final class Main {
 
         private void broadcast(Map<String, Object> message) {
             // 只投影已由规则生成的结果，原始客户端 JSON 不能调用 Trusted 入口。
-            world.acceptTrusted(message);
             boolean combatOnly = COMBAT_EVENTS.contains(message.get("type"));
             byte[] bytes = textFrame(message);
             for (Session session : sessions.values()) {
@@ -712,7 +760,7 @@ public final class Main {
                 }
                 if (changed) { broadcast(roomState()); broadcast(combat.combatState()); }
                 combat.maintain(now).forEach(this::broadcast);
-                world.expireLeases();
+                publishWorld();
                 current = new ArrayList<>(clients.values());
             }
             long now = System.nanoTime();
@@ -795,12 +843,16 @@ public final class Main {
         boolean combatCapable;
         boolean resumeCapable;
         boolean combatFeedbackCapable;
+        boolean worldCapable,worldInitialized;
+        final java.util.Set<String> scope=new java.util.LinkedHashSet<>();
+        long worldRevision,streamSequence;
         final AtomicBoolean closed = new AtomicBoolean();
         final ArrayBlockingQueue<Outbound> outgoing = new ArrayBlockingQueue<>(128);
         final CountDownLatch disconnected = new CountDownLatch(1);
         final Object heartbeatLock = new Object();
         final TokenBucket messageRate = new TokenBucket(80, 160);
         final TokenBucket stateRate = new TokenBucket(30, 60);
+        final TokenBucket batchRate = new TokenBucket(10, 20);
         final TokenBucket shotRate = new TokenBucket(30, 30);
         volatile long writingSince;
         volatile long lastActivityAt = System.nanoTime();

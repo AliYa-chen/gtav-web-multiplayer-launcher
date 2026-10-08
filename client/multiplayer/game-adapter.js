@@ -9,6 +9,7 @@ export function installGameAdapter(worker, network = null) {
   let shots = [];
   let nextShotId = 0;
   let combat = [];
+  let world = null;
   const combatById = new Map();
   let controls = [], nextControlId = 0;
   let notices = [], nextNoticeId = 0;
@@ -96,7 +97,7 @@ export function installGameAdapter(worker, network = null) {
   function publish() {
     timer = 0;
     if (!shared || closed) return;
-    const packet = { ...session, peers: [...peers.values()], shots, combat, controls, notices };
+    const packet = { ...session, peers: [...peers.values()], shots, combat, controls, notices, world };
     const bytes = new TextEncoder().encode(JSON.stringify(packet));
     if (bytes.length > shared.capacity) return;
     const header = new Int32Array(shared.memory.buffer, shared.block, 4);
@@ -127,6 +128,13 @@ export function installGameAdapter(worker, network = null) {
     } else if (data.type === 'combat_feedback') {
       combatFeedback(data);
       return;
+    } else if (data.type === 'world_state_v2') {
+      world = { schema_version: 2, world_epoch: data.world_epoch, world_revision: data.world_revision,
+        world_tick: data.world_tick, stream_seq: data.stream_seq, ready: data.ready === true,
+        entities: Array.isArray(data.entities) ? data.entities : [], tombstones: Array.isArray(data.tombstones) ? data.tombstones : [] };
+    } else if (data.type === 'interaction_result') {
+      if (data.accepted === false) notify('互動尚未完成，請稍後重試');
+      return;
     } else if (data.type === 'session') {
       const previousId = session.client_id;
       session = { connected: data.connected === true, client_id: data.client_id || null,
@@ -137,6 +145,7 @@ export function installGameAdapter(worker, network = null) {
         model: Number.isInteger(data.model) ? data.model >>> 0 : undefined,
         appearance_spec: data.appearance_spec || {},
         weapon_rules: Array.isArray(data.weapon_rules) ? data.weapon_rules : [],
+        world_v2: data.world_v2 === true,
         resumed: data.resumed === true,
         resume_state_ready: data.resume_state_ready === true,
         resume_state: data.resume_state || null,
@@ -146,7 +155,7 @@ export function installGameAdapter(worker, network = null) {
       for (const id of peers.keys()) if (!members.has(id)) peers.delete(id);
       for (const id of combatById.keys()) if (!members.has(id)) combatById.delete(id);
       for (const peer of data.peers || []) mergePeer(peer);
-      if (!session.connected) { shots = []; controls = []; }
+      if (!session.connected) { shots = []; controls = []; world = null; }
       for (const value of data.combat || []) mergeCombat(value);
       combat = [...combatById.values()];
     } else if (data.type === 'combat_state' && Array.isArray(data.players)) {
@@ -193,7 +202,7 @@ export function installGameAdapter(worker, network = null) {
     } else if (message.type === 'native_hud') {
       nativeHud = message.available === true;
       renderHud();
-    } else if (message.type === 'local_state' || message.type === 'local_shot') {
+    } else if (['local_state', 'local_shot', 'entity_ready', 'entity_input', 'interaction_request', 'simulation_result'].includes(message.type)) {
       sendLocal(message);
     } else if (message.type === 'game_status') {
       gameMessage = message.role_recovering ? '正在自动恢复在线角色…'
@@ -226,6 +235,9 @@ export function installGameAdapter(worker, network = null) {
       reportStatus({ phase: 'life_reconcile', ...message });
     } else if (message.type === 'world_readiness') {
       reportStatus({ phase: 'world_readiness', ...message });
+    } else if (message.type === 'world_entity_status') {
+      reportStatus({ phase: 'world_entity', entity_id: message.entity_id,
+        kind: message.kind, state: message.phase });
     } else if (message.type === 'bridge_error') {
       nativeHud = false;
       const hud = document.getElementById('hud');

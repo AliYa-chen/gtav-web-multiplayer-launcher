@@ -24,6 +24,9 @@ public final class CombatWorld {
     private static final Map<Long, Weapon> WEAPONS = weaponCatalog();
     private final LinkedHashMap<String, Player> players = new LinkedHashMap<>();
     private long joins;
+    private final WorldRegistry world;
+
+    public CombatWorld(WorldRegistry world) { this.world = world; }
 
     public record Outcome(boolean accepted, List<Map<String, Object>> events) {}
 
@@ -40,28 +43,27 @@ public final class CombatWorld {
         final String id;
         final List<Double> spawn;
         boolean connected = true;
-        int health = INITIAL_HEALTH;
-        int kills;
-        int deaths;
-        long revision = 1;
-        long respawnAt;
         long stateSequence = -1;
         long shotSequence = -1;
         long stateAt;
         double movementCredit = 2;
         long shotAt = Long.MIN_VALUE;
-        Map<String, Object> state;
+        boolean hasState, hasActions, hasAppearance;
         Player(String id, List<Double> spawn) { this.id = id; this.spawn = spawn; }
     }
 
     /** 同一玩家恢复连接时保留原来的出生点、序号和战斗状态。 */
-    public synchronized Map<String, Object> join(String id) {
+    public synchronized Map<String, Object> join(String id, long now) {
         Player player = players.get(id);
         if (player == null) {
             long index = joins++;
             player = new Player(id, List.of(711.5 + (index % 8) * 2,
                 -1088.1 + ((index / 8) % 16) * 2, 22.4));
             players.put(id, player);
+            try { world.projectPlayerTrusted(id,0x705e61f2L,WorldRegistry.Transform.at(vector(player.spawn),90),
+                new WorldRegistry.PedView(null,WorldRegistry.Actions.idle(),0,false,null),
+                new WorldRegistry.Combat(INITIAL_HEALTH,INITIAL_HEALTH,0,0,0),now); }
+            catch (WorldRegistry.Rejection rejection) { throw new IllegalStateException(rejection); }
         }
         player.connected = true;
         return profile(player);
@@ -72,7 +74,9 @@ public final class CombatWorld {
         if (player != null) player.connected = connected;
     }
 
-    public synchronized void remove(String id) { players.remove(id); }
+    public synchronized void remove(String id) {
+        players.remove(id);
+    }
 
     public synchronized Map<String, Object> profile(String id) {
         Player player = players.get(id);
@@ -81,31 +85,31 @@ public final class CombatWorld {
     }
 
     private Map<String, Object> profile(Player player) {
+        WorldRegistry.Entity entity=world.playerEntity(player.id);WorldRegistry.Combat life=entity.components().combat();
         return object("last_state_seq", player.stateSequence, "last_shot_seq", player.shotSequence,
-            "spawn", player.spawn, "health", player.health, "alive", player.health > 0,
-            "kills", player.kills, "deaths", player.deaths, "revision", player.revision);
+            "spawn", player.spawn, "health", life.health(), "alive", life.alive(),
+            "kills",life.kills(),"deaths",life.deaths(),"revision",entity.revision());
     }
 
     public synchronized int statePlayers() {
-        return (int) players.values().stream().filter(player -> player.state != null && player.connected).count();
+        return (int) players.values().stream().filter(player -> player.hasState && player.connected).count();
     }
 
     public synchronized Map<String, Object> combatState() {
-        List<Object> values = new ArrayList<>();
-        for (Player player : players.values()) values.add(object("id", player.id,
-            "connected", player.connected, "health", player.health, "alive", player.health > 0,
-            "kills", player.kills, "deaths", player.deaths, "respawn_at", player.respawnAt,
-            "spawn", player.spawn, "revision", player.revision));
-        return object("type", "combat_state", "room_id", "PUBLIC", "players", values);
+        List<Object> values=new ArrayList<>();
+        for (Player player:players.values()) {
+            WorldRegistry.Entity entity=world.playerEntity(player.id);WorldRegistry.Combat life=entity.components().combat();
+            values.add(object("id",player.id,"connected",player.connected,"health",life.health(),"alive",life.alive(),
+                "kills",life.kills(),"deaths",life.deaths(),"respawn_at",life.respawnAtTick(),"spawn",player.spawn,"revision",entity.revision()));
+        }
+        return object("type","combat_state","room_id","PUBLIC","players",values);
     }
 
-    public synchronized Map<String, Object> worldState() {
-        List<Object> values = new ArrayList<>();
-        for (Player player : players.values()) {
-            if (player.connected && player.state != null)
-                values.add(object("player_id", player.id, "state", new LinkedHashMap<>(player.state)));
-        }
-        return object("type", "world_state", "room_id", "PUBLIC", "states", values);
+    public synchronized Map<String,Object> worldState() {
+        List<Object> values=new ArrayList<>();
+        for(Player player:players.values())if(player.connected && player.hasState)
+            values.add(object("player_id",player.id,"state",state(player)));
+        return object("type","world_state","room_id","PUBLIC","states",values);
     }
 
     /** 接收已限制外观长度的状态；生命值始终由服务端覆盖。 */
@@ -121,43 +125,47 @@ public final class CombatWorld {
         if (!(input.get("shooting") instanceof Boolean)) throw reject("invalid_message", "射击状态必须为布尔值");
         Map<String, Object> actions = input.containsKey("actions") ? actions(input.get("actions")) : null;
         List<Double> aimTarget = input.containsKey("aim_target") ? coordinates(input.get("aim_target"), "瞄准坐标") : null;
-        List<Double> previous = player.state == null ? player.spawn : position(player);
+        List<Double> previous = player.hasState ? position(player) : player.spawn;
+        WorldRegistry.Entity entity=world.playerEntity(id);WorldRegistry.Combat life=entity.components().combat();
+        // 已附座玩家的位置来自车辆确认事务；不应用步行速度预算去否定车辆运动。
+        if(entity.components().attachment()!=null)position=previous;
         double elapsed = Math.max(0, Math.min(2, (now - player.stateAt) / 1_000.0));
         double travelled = distance(previous, position);
         // 宽容量是累计预算，不能让每个网络包反复获得额外两米而绕过速度上限。
         double credit = Math.min(30, player.movementCredit + MAX_SPEED * elapsed);
-        double allowance = player.state == null ? 40 : credit;
-        if (player.health > 0 && travelled > allowance) {
+        double allowance = !player.hasState ? 40 : credit;
+        if (life.alive() && travelled > allowance) {
             // 消费无效坐标的序号，防止旧数据在纠正之后再次改变状态。
             player.stateSequence = sequence;
             return new Outcome(false, List.of(object("type", "correction", "player_id", player.id,
-                "position", previous, "heading", player.state == null ? 90 : player.state.get("heading"),
-                "revision", player.revision, "state_seq", sequence, "reason", "invalid_movement")));
+                "position", previous, "heading",!player.hasState ? 90 : entity.components().transform().rotation().heading(),
+                "revision", entity.revision(), "state_seq", sequence, "reason", "invalid_movement")));
         }
-        if (player.health == 0) position = previous;
-        player.movementCredit = player.state == null ? 2 : Math.max(0, credit - (player.health > 0 ? travelled : 0));
-        Map<String, Object> state = object("seq", sequence, "position", position, "heading", heading,
-            "model", model, "health", player.health, "alive", player.health > 0,
-            "weapon", weapon, "shooting", player.health > 0 && (Boolean) input.get("shooting"));
-        if (input.containsKey("appearance")) state.put("appearance", copy(input.get("appearance")));
-        if (actions != null) state.put("actions", actions);
-        if (aimTarget != null) state.put("aim_target", aimTarget);
-        player.stateSequence = sequence;
-        player.stateAt = now;
-        player.state = state;
-        return new Outcome(true, List.of(stateEvent(player, now)));
+        if (!life.alive()) position = previous;
+        player.movementCredit = !player.hasState ? 2 : Math.max(0, credit - (life.alive() ? travelled : 0));
+        WorldRegistry.Actions behavior=actions==null?WorldRegistry.Actions.idle():new WorldRegistry.Actions(
+            (Boolean)actions.get("aiming"),(Boolean)actions.get("reloading"),(Boolean)actions.get("jumping"),
+            (Boolean)actions.get("ducking"),(Boolean)actions.get("sprinting"));
+        WorldRegistry.PedView view=new WorldRegistry.PedView(appearance(input.get("appearance")),behavior,weapon,
+            life.alive() && (Boolean)input.get("shooting"),aimTarget==null?null:vector(aimTarget));
+        try { world.projectPlayerTrusted(id,model,WorldRegistry.Transform.at(vector(position),heading),view,life,now); }
+        catch(WorldRegistry.Rejection rejection){throw reject(rejection.code,rejection.getMessage());}
+        player.stateSequence=sequence;player.stateAt=now;player.hasState=true;
+        player.hasActions=actions!=null;player.hasAppearance=input.containsKey("appearance");
+        return new Outcome(true,List.of(stateEvent(player,now)));
     }
 
     public synchronized List<Map<String, Object>> shoot(String id, Map<String, Object> input, long now) throws Rejection {
         Player shooter = require(id);
+        WorldRegistry.Entity shootingEntity=world.playerEntity(id);WorldRegistry.Combat shootingLife=shootingEntity.components().combat();
         long sequence = integer(input.get("seq"), 0, MAX_SAFE_INTEGER, "射击序号");
         if (sequence <= shooter.shotSequence) throw reject("stale_seq", "射击事件序号必须严格递增");
         List<Double> origin = coordinates(input.get("origin"), "射击起点");
         List<Double> target = coordinates(input.get("target"), "射击目标点");
         long weapon = integer(input.get("weapon"), 0, MAX_UNSIGNED_INT, "射击武器");
-        if (!shooter.connected || shooter.health <= 0 || shooter.state == null || now - shooter.stateAt > 2_000)
+        if (!shooter.connected || !shootingLife.alive() || !shooter.hasState || now - shooter.stateAt > 2_000)
             throw reject("invalid_shot", "射击需要存活角色及最近两秒内的有效位置");
-        if (weapon != ((Number) shooter.state.get("weapon")).longValue())
+        if (weapon != shootingEntity.components().ped().weapon())
             throw reject("invalid_shot", "射击武器与角色当前武器不一致");
         if (distance(position(shooter), origin) > 6)
             throw reject("invalid_shot", "射击起点距离角色过远");
@@ -177,87 +185,76 @@ public final class CombatWorld {
             "time", Instant.ofEpochMilli(now).toString()));
         double[] direction = new double[3];
         for (int index = 0; index < 3; index++) direction[index] = (target.get(index) - origin.get(index)) / range;
-        Player victim = null;
-        double nearest = range + 1;
-        for (Player candidate : players.values()) {
-            if (candidate == shooter || !candidate.connected || candidate.health <= 0 || candidate.state == null) continue;
-            double hit = capsule(origin, direction, range, position(candidate));
-            if (hit >= 0 && hit < nearest) { victim = candidate; nearest = hit; }
+        WorldRegistry.Entity victimEntity=null;double nearest=range+1;
+        for(WorldRegistry.Entity candidate:world.snapshot().entities()){
+            if(candidate.kind()!=WorldRegistry.Kind.PED || candidate.entityId().equals(shootingEntity.entityId())
+                || candidate.components().combat()==null || !candidate.components().combat().alive())continue;
+            if(candidate.playerId()!=null){Player participant=players.get(candidate.playerId());
+                if(participant==null || !participant.connected || !participant.hasState)continue;
+            }else if(candidate.ownerId()==null)continue;
+            double hit=capsule(origin,direction,range,candidate.components().transform().position().values());
+            if(hit>=0 && hit<nearest){victimEntity=candidate;nearest=hit;}
         }
-        if (victim == null) return events;
-        int damage = Math.min(victim.health, rule.damage);
-        victim.health -= damage;
-        victim.revision++;
-        setHealth(victim);
-        events.add(object("type", "damage", "victim_id", victim.id, "attacker_id", shooter.id,
-            "health", victim.health, "damage", damage, "shot_seq", sequence, "revision", victim.revision));
-        events.add(stateEvent(victim, now));
-        if (victim.health == 0) {
-            victim.deaths++;
-            victim.respawnAt = now + RESPAWN_DELAY_MILLIS;
-            shooter.kills++;
-            shooter.revision++;
-            events.add(object("type", "death", "player_id", victim.id, "killer_id", shooter.id,
-                "kills", shooter.kills, "deaths", victim.deaths, "respawn_at", victim.respawnAt,
-                "revision", victim.revision));
-        }
-        events.add(combatState());
-        return events;
+        if(victimEntity==null)return events;
+        WorldRegistry.Combat victimLife=victimEntity.components().combat();
+        int damage=Math.min(victimLife.health(),rule.damage),health=victimLife.health()-damage;
+        boolean killed=health==0;boolean playerVictim=victimEntity.playerId()!=null;
+        Map<String,WorldRegistry.Combat> changes=new LinkedHashMap<>();
+        changes.put(victimEntity.entityId(),new WorldRegistry.Combat(health,INITIAL_HEALTH,victimLife.kills(),
+            victimLife.deaths()+(killed?1:0),killed&&playerVictim?now+RESPAWN_DELAY_MILLIS:0));
+        if(killed)changes.put(shootingEntity.entityId(),new WorldRegistry.Combat(shootingLife.health(),INITIAL_HEALTH,
+            shootingLife.kills()+1,shootingLife.deaths(),shootingLife.respawnAtTick()));
+        try{world.setCombatBatchTrusted(changes,now);}catch(WorldRegistry.Rejection rejection){throw reject(rejection.code,rejection.getMessage());}
+        victimEntity=world.entity(victimEntity.entityId());WorldRegistry.Combat updated=victimEntity.components().combat();
+        String victimId=playerVictim?victimEntity.playerId():victimEntity.entityId();
+        events.add(object("type","damage","victim_id",victimId,"attacker_id",id,"health",health,
+            "damage",damage,"shot_seq",sequence,"revision",victimEntity.revision()));
+        if(playerVictim)events.add(stateEvent(players.get(victimId),now));
+        if(killed)events.add(object("type","death","player_id",victimId,"killer_id",id,
+            "kills",shootingLife.kills()+1,"deaths",updated.deaths(),"respawn_at",updated.respawnAtTick(),"revision",victimEntity.revision()));
+        events.add(combatState());return events;
     }
 
     /** 到期重生；断线会保留分数，重生不会产生新的角色身份。 */
-    public synchronized List<Map<String, Object>> maintain(long now) {
-        List<Map<String, Object>> events = new ArrayList<>();
-        for (Player player : players.values()) {
-            if (player.health > 0 || player.respawnAt == 0 || now < player.respawnAt) continue;
-            player.health = INITIAL_HEALTH;
-            player.respawnAt = 0;
-            player.revision++;
-            player.movementCredit = 2;
-            if (player.state != null) {
-                player.state = new LinkedHashMap<>(player.state);
-                player.state.put("position", player.spawn);
-                player.state.put("heading", 90.0);
-                player.state.put("shooting", false);
-                if (player.state.containsKey("actions")) {
-                    Map<String, Object> idle = new LinkedHashMap<>();
-                    for (String action : ACTION_FIELDS) idle.put(action, false);
-                    player.state.put("actions", idle);
-                }
-                player.state.remove("aim_target");
-                setHealth(player);
-                // 这是服务端重生，客户端下一帧可在出生点重新提供位置。
-                player.stateAt = now;
-            }
-            events.add(object("type", "respawn", "player_id", player.id, "position", player.spawn,
-                "heading", 90, "health", player.health, "revision", player.revision));
-            if (player.state != null && player.connected) events.add(stateEvent(player, now));
+    public synchronized List<Map<String,Object>> maintain(long now) {
+        List<Map<String,Object>> events=new ArrayList<>();
+        for(Player player:players.values()){
+            WorldRegistry.Entity entity=world.playerEntity(player.id);WorldRegistry.Combat life=entity.components().combat();
+            if(life.alive() || life.respawnAtTick()==0 || now<life.respawnAtTick())continue;
+            try{world.respawnTrusted(entity.entityId(),WorldRegistry.Transform.at(vector(player.spawn),90),
+                new WorldRegistry.Combat(INITIAL_HEALTH,INITIAL_HEALTH,life.kills(),life.deaths(),0),entity.revision(),now);}
+            catch(WorldRegistry.Rejection rejection){throw new IllegalStateException(rejection);}
+            entity=world.playerEntity(player.id);player.movementCredit=2;player.stateAt=now;
+            events.add(object("type","respawn","player_id",player.id,"position",player.spawn,"heading",90,
+                "health",INITIAL_HEALTH,"revision",entity.revision()));
+            if(player.hasState && player.connected)events.add(stateEvent(player,now));
         }
-        if (!events.isEmpty()) events.add(combatState());
-        return events;
+        if(!events.isEmpty())events.add(combatState());return events;
     }
 
-    private Player require(String id) throws Rejection {
-        Player player = players.get(id);
-        if (player == null) throw reject("not_in_room", "请先加入公共战局");
-        return player;
+    private Player require(String id)throws Rejection{
+        Player player=players.get(id);if(player==null)throw reject("not_in_room","请先加入公共战局");return player;
     }
-
-    private static void setHealth(Player player) {
-        if (player.state == null) return;
-        player.state = new LinkedHashMap<>(player.state);
-        player.state.put("health", player.health);
-        player.state.put("alive", player.health > 0);
-        if (player.health == 0) player.state.put("shooting", false);
+    private Map<String,Object> state(Player player){
+        Map<String,Object> state=new LinkedHashMap<>(world.playerStateProjection(player.id));state.put("seq",player.stateSequence);
+        if(!player.hasActions)state.remove("actions");if(!player.hasAppearance)state.remove("appearance");return state;
     }
-
-    private static Map<String, Object> stateEvent(Player player, long now) {
-        return object("type", "player_state", "room_id", "PUBLIC", "player_id", player.id,
-            "state", new LinkedHashMap<>(player.state), "time", Instant.ofEpochMilli(now).toString());
+    private Map<String,Object> stateEvent(Player player,long now){
+        return object("type","player_state","room_id","PUBLIC","player_id",player.id,"state",state(player),"time",Instant.ofEpochMilli(now).toString());
     }
-
-    @SuppressWarnings("unchecked")
-    private static List<Double> position(Player player) { return (List<Double>) player.state.get("position"); }
+    private List<Double> position(Player player){return world.playerEntity(player.id).components().transform().position().values();}
+    private static WorldRegistry.Vector vector(List<Double> values){return new WorldRegistry.Vector(values.get(0),values.get(1),values.get(2));}
+    private static WorldRegistry.Appearance appearance(Object input){
+        if(!(input instanceof Map<?,?> value))return null;
+        List<List<Integer>> components=intRows(value.get("components")),props=intRows(value.get("props"));
+        List<List<Double>> overlays=null;List<Integer> hair=null;
+        if(value.get("overlays")instanceof List<?> rows){overlays=new ArrayList<>();for(Object row:rows)
+            overlays.add(((List<?>)row).stream().map(item->((Number)item).doubleValue()).toList());}
+        if(value.get("hair")instanceof List<?> values)hair=values.stream().map(item->((Number)item).intValue()).toList();
+        return new WorldRegistry.Appearance(components,props,overlays,hair);
+    }
+    private static List<List<Integer>> intRows(Object input){List<List<Integer>> rows=new ArrayList<>();
+        for(Object row:(List<?>)input)rows.add(((List<?>)row).stream().map(value->((Number)value).intValue()).toList());return rows;}
 
     private record Weapon(int damage, long cooldown) {}
     private static Weapon weapon(long hash) { return WEAPONS.get(hash); }

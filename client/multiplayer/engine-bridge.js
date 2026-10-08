@@ -12,7 +12,7 @@ self.prepareMultiplayerBridge = function (imports) {
   return function bind(instance) {
     const ex = instance.exports;
     const memory = imports.env.memory;
-    const CAPACITY = 128 * 1024;
+    const CAPACITY = 512 * 1024;
     // 公共战局测试区：所有玩家使用同一中心点，按顺序错开两米防止重叠。
     const TEST_SPAWN = [711.5, -1088.1, 22.4];
     function joaat(name) {
@@ -55,6 +55,8 @@ self.prepareMultiplayerBridge = function (imports) {
     let noticeBuffer = 0, lastNoticeAttempt = -Infinity, nativeHudAvailable = null;
     let shotBuffer = 0, shotSampleAt = -Infinity, weaponSample = null, pendingShots = [];
     let worldReadinessAt = -Infinity, worldReadinessSignature = '';
+    const worldEntities = self.createWorldEntityBridge?.({ ex, memory, post: (value) => post(value),
+      playerReplica: (id) => replicas.get(id)?.ped || 0 });
 
     const post = (value) => self.postMessage({ multiplayer: value });
     const validPosition = (position) => Array.isArray(position) && position.length === 3 &&
@@ -520,7 +522,7 @@ self.prepareMultiplayerBridge = function (imports) {
         ex.mpTaskStandStill(replica.ped, 500);
       }
       replica.actions = { ...actions };
-      if (!state.shooting && !actions.aiming && !actions.reloading && !actions.jumping
+      if (!state.attachment && !state.shooting && !actions.aiming && !actions.reloading && !actions.jumping
           && ex.mpTaskGoStraight && now - replica.behaviorAt >= 250) {
         if (newMovement > .015 || distance > .15) {
           const speed = actions.sprinting ? 3 : Math.min(3, Math.max(1, newMovement / .05));
@@ -533,11 +535,11 @@ self.prepareMultiplayerBridge = function (imports) {
       }
       const amount = distance > 20 ? 1 : Math.min(1, delta / 100);
       replica.position = state.position.map((value, i) => replica.position[i] + (value - replica.position[i]) * amount);
-      if (distance > .002) {
+      if (!state.attachment && distance > .002) {
         // 常规移动保留任务和物理状态；只有大范围纠正才执行完整瞬移。
         ex.mpSetCoordsNoOffset(replica.ped, vector(72, replica.position), 1, 1, distance > 20 ? 1 : 0);
       }
-      if (Math.abs(((state.heading - replica.heading + 540) % 360) - 180) > .1) {
+      if (!state.attachment && Math.abs(((state.heading - replica.heading + 540) % 360) - 180) > .1) {
         ex.mpSetHeading(replica.ped, state.heading); replica.heading = state.heading;
       }
       const nativeHealth = state.server_authority ? nativeCombatHealth(state.health) : state.health;
@@ -549,7 +551,18 @@ self.prepareMultiplayerBridge = function (imports) {
     // 远端实体和射击队列独立处理，本地角色切换期间仍继续显示其他玩家。
     function updateWorld(now) {
       const members = new Set((packet.members || []).filter((member) => member.connected !== false).map((member) => member.id));
-      const peers = (packet.peers || []).filter((peer) => peer.player_id !== packet.client_id && members.has(peer.player_id) && validPosition(peer.state?.position));
+      let peers = (packet.peers || []).filter((peer) => peer.player_id !== packet.client_id && members.has(peer.player_id) && validPosition(peer.state?.position));
+      if (packet.world?.ready) {
+        peers = packet.world.entities.filter((entity) => entity.kind === 'ped' && entity.player_id
+          && entity.player_id !== packet.client_id && members.has(entity.player_id)).map((entity) => {
+          const c = entity.components, q = c.transform.rotation;
+          const heading = (Math.atan2(2 * (q[3] * q[2] + q[0] * q[1]), 1 - 2 * (q[1] ** 2 + q[2] ** 2)) * 180 / Math.PI + 360) % 360;
+          return { player_id: entity.player_id, state: { position: c.transform.position, heading, model: entity.model,
+            ...c.ped, ...(c.appearance ? { appearance: c.appearance } : {}), health: c.combat?.health ?? 200,
+            alive: c.combat?.alive !== false, revision: entity.combat_revision ?? entity.revision, server_authority: true,
+            attachment: c.attachment } };
+        });
+      }
       for (const [id, replica] of replicas) {
         if (!members.has(id)) { erase(replica); replicas.delete(id); }
       }
@@ -557,7 +570,7 @@ self.prepareMultiplayerBridge = function (imports) {
       smoothingTime = now;
       for (const peer of peers.slice(0, 32)) {
         const combat = authorityStates.get(peer.player_id);
-        updateReplica(peer.player_id, combat ? { ...peer.state, health: combat.health, alive: combat.alive,
+        updateReplica(peer.player_id, !packet.world?.ready && combat ? { ...peer.state, health: combat.health, alive: combat.alive,
           revision: combat.revision, server_authority: true } : peer.state, now, delta);
       }
       for (const shot of packet.shots || []) {
@@ -600,6 +613,7 @@ self.prepareMultiplayerBridge = function (imports) {
           post({ type: 'memory', memory, block, capacity: CAPACITY });
         }
         readPacket();
+        worldEntities?.suppressPopulation(packet);
         if (!useOwner(thread, handler, now)) return;
         sampleShots(now);
         if (now - lastTick < 40) return;
@@ -609,6 +623,7 @@ self.prepareMultiplayerBridge = function (imports) {
         if (!packet?.connected) {
           for (const replica of replicas.values()) erase(replica);
           replicas.clear();
+          worldEntities?.clear();
           // 断线恢复同一身份时保留本地角色和位置，不重复随机换模/出生。
           return;
         }
@@ -626,10 +641,21 @@ self.prepareMultiplayerBridge = function (imports) {
           authorityStates.clear();
         }
         for (const player of packet.combat || []) mergeAuthority(player);
+        if (packet.world?.ready) {
+          for (const entity of packet.world.entities) if (entity.player_id && entity.components.combat) {
+            mergeAuthority({ ...entity.components.combat, id: entity.player_id,
+              revision: entity.combat_revision ?? entity.revision });
+          }
+        }
         for (const control of packet.controls || []) authorityControl(control.event);
         const members = new Set((packet.members || []).map((member) => member.id));
         for (const id of authorityStates.keys()) if (id !== packet.client_id && !members.has(id)) authorityStates.delete(id);
         updateWorld(now);
+        const currentPed = ex.mpGetPlayerPed(-1);
+        const worldStatus = worldEntities?.update(packet, now, currentPed, {
+          localReady: initialPlacement && avatarInitialized && !avatarChangeRequested && !modelRestore
+            && (!currentPed || (ex.mpGetModel(currentPed) >>> 0) === avatarTarget),
+        }) || { active: false };
         // 等待服务器恢复快照，避免刷新时先随机换装或上报单机出生坐标。
         if (packet.resumed && !packet.resume_state_ready) return;
         const resumeState = packet.resumed ? packet.resume_state : null;
@@ -676,7 +702,7 @@ self.prepareMultiplayerBridge = function (imports) {
         if (authority) {
           if (authority.alive) {
             const revision = Number.isSafeInteger(authority.revision) ? authority.revision : 0;
-            if (lastAuthorityAlive === false || ex.mpIsDead(localPed, 0)) {
+            if (lastAuthorityAlive === false || (ex.mpIsDead(localPed, 0) && !worldStatus.awaitingLife)) {
               const restoring = !initialPlacement && validPosition(resumeState?.position);
               const localAccident = lastAuthorityAlive !== false && validPosition(lastGoodLocal?.position);
               const destination = restoring ? resumeState.position
@@ -689,7 +715,7 @@ self.prepareMultiplayerBridge = function (imports) {
               localPed = restored;
               authority = lifeOverride;
             }
-            ex.mpSetInvincible(localPed, 1);
+            ex.mpSetInvincible(localPed, worldStatus.active ? 0 : 1);
             if (now - lastRecoveryAt < 5000 && now - lastRecoveryFadeAt >= 500 && ex.mpIsScreenFadedOut?.()) {
               if (ex.mpForcePlaying) ex.mpForcePlaying();
               if (ex.mpSetPlayerControl) ex.mpSetPlayerControl(ex.mpPlayerId(), 1, 0);
@@ -698,8 +724,13 @@ self.prepareMultiplayerBridge = function (imports) {
             }
           } else ex.mpSetInvincible(localPed, 0);
           const nativeHealth = nativeCombatHealth(authority.health);
-          if (ex.mpGetHealth(localPed) !== nativeHealth) ex.mpSetHealth(localPed, nativeHealth, 0);
+          if (!worldStatus.awaitingLife && ex.mpGetHealth(localPed) !== nativeHealth) ex.mpSetHealth(localPed, nativeHealth, 0);
           lastAuthorityAlive = authority.alive;
+        }
+        if (worldStatus.awaitingLife && ex.mpIsDead(localPed, 0)) {
+          pendingShots = [];
+          roleWaiting(now, true);
+          return; // 等服务器确认环境死亡／逮捕，不能单机自行复活。
         }
         ex.mpGetEntityCoords(BigInt(scratch), localPed, 1);
         let position = readVector(0);
@@ -793,8 +824,8 @@ self.prepareMultiplayerBridge = function (imports) {
         }
         // 换模会创建新的 ped，不能沿用旧句柄上写过的权威血量。
         if (authority) {
-          ex.mpSetInvincible(localPed, authority.alive ? 1 : 0);
-          if (ex.mpGetHealth(localPed) !== nativeCombatHealth(authority.health)) ex.mpSetHealth(localPed, nativeCombatHealth(authority.health), 0);
+          ex.mpSetInvincible(localPed, authority.alive && !worldStatus.active ? 1 : 0);
+          if (!worldStatus.awaitingLife && ex.mpGetHealth(localPed) !== nativeCombatHealth(authority.health)) ex.mpSetHealth(localPed, nativeCombatHealth(authority.health), 0);
         }
         // 测试阶段固定出生区，既不使用随机点，也不依赖对方状态是否已经到达。
         if (!initialPlacement) {

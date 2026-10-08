@@ -39,7 +39,7 @@ const packet = (changes = {}) => ({ connected: true, client_id: 'LOCAL', members
   peers: [{ player_id: 'REMOTE', state: peerState() }], shots: [], ...changes });
 
 function engine(options = {}) {
-  const memory = { buffer: new SharedArrayBuffer(512 * 1024) };
+  const memory = { buffer: new SharedArrayBuffer(2 * 1024 * 1024) };
   const calls = [];
   const messages = [];
   const alive = new Set([7]), blips = new Map();

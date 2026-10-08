@@ -6,7 +6,7 @@ self.onmessage = (ev) => {
 	if (started) return;
 	started = true;
 	const m = ev.data;
-	if (m.multiplayer) importScripts('/multiplayer/engine-bridge.js');
+	if (m.multiplayer) importScripts('/multiplayer/world-engine-bridge.js', '/multiplayer/engine-bridge.js');
 	// ?cores=N (debug): pretend to be a machine with N logical cores; the engine sizes its worker pools from it
 	if (m.cores) Object.defineProperty(navigator, 'hardwareConcurrency', { value: m.cores });
 	// The GPU worker must be up before the engine blocks this thread: Chrome fetches the script of a worker nested in a worker through
@@ -32,7 +32,7 @@ self.onmessage = (ev) => {
 	const fetchWasm = async () => {
 		for (let attempt = 0; ; attempt++) {
 			let res = null, err = null;
-			try { res = await fetch(B + (m.multiplayer ? '/game-multiplayer.wasm?v=public-world-registry-6' : '/game.wasm')); } catch (e) { err = e; }
+			try { res = await fetch(B + (m.multiplayer ? '/game-multiplayer.wasm?v=world-v2-components-7' : '/game.wasm')); } catch (e) { err = e; }
 			if (res && res.ok) return res;
 			if (attempt >= 7) { if (res) throw new Error('HTTP ' + res.status + ' for game.wasm'); throw err; }
 			bc0.postMessage({ label: 'The server is busy, retrying (' + (attempt + 1) + ')' });

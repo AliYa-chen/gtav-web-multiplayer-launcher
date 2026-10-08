@@ -201,6 +201,7 @@ public final class WorldRegistry {
     private final Set<Long> weaponCatalog;
     private final Map<String, Entity> entities = new LinkedHashMap<>();
     private final Map<String, String> playerEntities = new LinkedHashMap<>();
+    private final Map<String,Long> generationStarts=new LinkedHashMap<>();
     private final Map<String, Tombstone> tombstones = new LinkedHashMap<>();
     private final Map<String, MotionBudget> motion = new LinkedHashMap<>();
     private final ArrayDeque<Commit> history = new ArrayDeque<>();
@@ -226,6 +227,9 @@ public final class WorldRegistry {
     public String worldEpoch() { return worldEpoch; }
     public synchronized Entity entity(String id) { return entities.get(id); }
     public synchronized Entity playerEntity(String playerId) { return entities.get(playerEntities.get(playerId)); }
+    public synchronized long generationStartRevision(String id)throws Rejection{
+        require(id);return generationStarts.getOrDefault(id,1L);
+    }
     public synchronized Snapshot snapshot() {
         return new Snapshot(worldEpoch, worldRevision, worldTick, new ArrayList<>(entities.values()),
             new ArrayList<>(tombstones.values()));
@@ -256,6 +260,7 @@ public final class WorldRegistry {
         String id="w:"+worldEpoch+":"+(++nextEntityId);
         Entity entity = new Entity(id, kind, model, playerId, 1, 1, ownerId, 1, leaseUntilTick, -1, components);
         entities.put(id, entity); motion.put(id, new MotionBudget(nowTick, 2));
+        generationStarts.put(id,1L);
         if (playerId != null) playerEntities.put(playerId, id);
         return commit(Change.CREATE, List.of(entity), List.of());
     }
@@ -271,6 +276,8 @@ public final class WorldRegistry {
         identifier(playerId,"玩家身份"); Components initial=Components.ped(transform,view,combat);
         validateShape(Kind.PED,model,initial);
         if (old == null) return create(Kind.PED, model, playerId, initial,playerId,nowTick+limits.defaultLeaseTicks,nowTick);
+        if(old.components.attachment!=null && combat.alive())
+            transform=require(old.components.attachment.entityId).components.transform;
         Components value=new Components(transform, view, null, null, combat, old.components.attachment);
         boolean resumedLease=!playerId.equals(old.ownerId) || old.leaseUntilTick<=nowTick;
         boolean respawned=old.components.combat!=null && !old.components.combat.alive() && combat!=null && combat.alive();
@@ -285,6 +292,7 @@ public final class WorldRegistry {
             old.generation+(respawned?1:0),playerId,old.ownerEpoch+(resumedLease||respawned?1:0),
             nowTick+limits.defaultLeaseTicks,resumedLease||respawned?-1:old.lastInputSequence,value);
         updates.put(old.entityId,updated); updates.forEach(entities::put);
+        if(respawned)generationStarts.put(old.entityId,updated.revision);
         motion.put(old.entityId, new MotionBudget(nowTick, 2));
         return commit(respawned?Change.RESPAWN:Change.UPDATE,new ArrayList<>(updates.values()),List.of());
     }
@@ -322,7 +330,48 @@ public final class WorldRegistry {
         Entity updated=new Entity(old.entityId, old.kind, old.model, old.playerId, old.revision+1, old.generation,
             old.ownerId, old.ownerEpoch, old.leaseUntilTick, proposal.inputSequence, value);
         entities.put(old.entityId, updated); motion.put(old.entityId, new MotionBudget(nowTick, credit-travel));
-        return commit(Change.UPDATE, List.of(updated), List.of());
+        List<Entity> updates=new ArrayList<>();updates.add(updated);
+        if(old.kind==Kind.VEHICLE)for(String occupant:value.vehicle.seats.values())if(occupant!=null){
+            Entity passenger=require(occupant);Components c=passenger.components;
+            Entity moved=updated(passenger,new Components(transform,c.ped,c.vehicle,c.object,c.combat,c.attachment));
+            entities.put(occupant,moved);updates.add(moved);
+        }
+        return commit(Change.UPDATE, updates, List.of());
+    }
+
+    /** 有界批次全部验证成功才可提交；不可变实体允许在锁内暂存并回滚，最终只有一个世界事务。 */
+    public synchronized Commit proposeBatch(String actorId,List<Proposal> proposals,long nowTick)throws Rejection{
+        return proposeBatch(actorId,proposals,nowTick,Set.of());
+    }
+    /** 调用方仅传入已完成引擎ready的NPC依赖，客户端消息不能选择续期名单。 */
+    public synchronized Commit proposeBatch(String actorId,List<Proposal> proposals,long nowTick,Set<String> activeDependents)throws Rejection{
+        if(proposals==null || proposals.isEmpty() || proposals.size()>24)throw reject("invalid_batch","更新批次必须包含1–24个实体");
+        Set<String> ids=new LinkedHashSet<>();for(Proposal proposal:proposals)
+            if(proposal==null || !ids.add(proposal.entityId))throw reject("invalid_batch","更新批次不能包含重复实体");
+        if(activeDependents==null || activeDependents.size()>24)throw reject("invalid_batch","活动依赖数量无效");
+        for(String id:activeDependents){Entity dependent=require(id);
+            if(dependent.kind!=Kind.PED || dependent.playerId!=null || dependent.components.attachment==null
+                || !ids.contains(dependent.components.attachment.entityId) || !actorId.equals(dependent.ownerId)
+                || dependent.leaseUntilTick<=nowTick)throw reject("stale_owner","依赖实体不属于本次有效载具租约");}
+        Map<String,Entity> before=new LinkedHashMap<>(entities);Map<String,MotionBudget> previousMotion=new LinkedHashMap<>(motion);
+        ArrayDeque<Commit> previousHistory=new ArrayDeque<>(history);long previousRevision=worldRevision,previousTick=worldTick;
+        try{
+            for(Proposal proposal:proposals)propose(actorId,proposal,nowTick);
+            for(Proposal proposal:proposals){Entity value=entities.get(proposal.entityId);
+                entities.put(value.entityId,new Entity(value.entityId,value.kind,value.model,value.playerId,value.revision,value.generation,
+                    value.ownerId,value.ownerEpoch,nowTick+limits.defaultLeaseTicks,value.lastInputSequence,value.components));}
+            for(String id:activeDependents){Entity value=entities.get(id);
+                entities.put(id,new Entity(value.entityId,value.kind,value.model,value.playerId,value.revision,value.generation,
+                    value.ownerId,value.ownerEpoch,nowTick+limits.defaultLeaseTicks,value.lastInputSequence,value.components));}
+            List<Entity> changed=new ArrayList<>();for(Entity value:entities.values())
+                if(!value.equals(before.get(value.entityId)))changed.add(value);
+            history.clear();history.addAll(previousHistory);worldRevision=previousRevision;
+            return commit(Change.UPDATE,changed,List.of());
+        }catch(Rejection|RuntimeException error){
+            entities.clear();entities.putAll(before);motion.clear();motion.putAll(previousMotion);
+            history.clear();history.addAll(previousHistory);worldRevision=previousRevision;worldTick=previousTick;
+            throw error;
+        }
     }
 
     public synchronized Commit setCombatTrusted(String id, Combat combat, long expectedRevision, long nowTick) throws Rejection {
@@ -331,6 +380,25 @@ public final class WorldRegistry {
         Components c=old.components;
         Entity updated=updated(old, new Components(c.transform, c.ped, c.vehicle, c.object, Objects.requireNonNull(combat), c.attachment));
         entities.put(id, updated); return commit(Change.UPDATE, List.of(updated), List.of());
+    }
+
+    /** 多实体战斗结果一次提交；规则模块先计算伤害和计分，不能分批产生半次击杀。 */
+    public synchronized Commit setCombatBatchTrusted(Map<String,Combat> values,long nowTick) throws Rejection {
+        tick(nowTick); Map<String,Entity> updates=new LinkedHashMap<>();
+        for (Map.Entry<String,Combat> item:values.entrySet()) {
+            Entity entity=require(item.getKey());
+            if (entity.components.combat==null || item.getValue()==null)
+                throw reject("invalid_component","实体没有有效战斗组件");
+        }
+        for (Map.Entry<String,Combat> item:values.entrySet()) {
+            Entity entity=updates.getOrDefault(item.getKey(),entities.get(item.getKey()));
+            if (!item.getValue().alive() && entity.components.attachment!=null) {
+                detach(entity,updates,nowTick);entity=updates.get(entity.entityId);
+            }
+            Components c=entity.components;
+            updates.put(entity.entityId,updated(entity,new Components(c.transform,c.ped,c.vehicle,c.object,item.getValue(),c.attachment)));
+        }
+        updates.forEach(entities::put);return commit(Change.UPDATE,new ArrayList<>(updates.values()),List.of());
     }
 
     public synchronized Commit setVehicleHealthTrusted(String id,double engineHealth,double bodyHealth,
@@ -352,10 +420,11 @@ public final class WorldRegistry {
         PedView ped=old.components.ped;
         if (ped!=null) ped=new PedView(ped.appearance, Actions.idle(), ped.weapon, false, null);
         Components c=new Components(transform, ped, old.components.vehicle, old.components.object, combat, null);
-        validate(old.kind, old.model, c);
+        if(old.playerId!=null)validateShape(old.kind,old.model,c);else validate(old.kind,old.model,c);
         Entity updated=new Entity(id, old.kind, old.model, old.playerId, old.revision+1, old.generation+1,
             old.ownerId, old.ownerEpoch+1, old.leaseUntilTick, -1, c);
         updates.put(id,updated); updates.forEach(entities::put); motion.put(id,new MotionBudget(nowTick,2));
+        generationStarts.put(id,updated.revision);
         return commit(Change.RESPAWN,new ArrayList<>(updates.values()),List.of());
     }
 
@@ -383,13 +452,22 @@ public final class WorldRegistry {
     public synchronized Commit enterSeat(String actorId, String pedId, long pedOwnerEpoch, String vehicleId,
                                           String seat, long vehicleRevision, long nowTick) throws Rejection {
         tick(nowTick); Entity ped=require(pedId); Entity vehicle=require(vehicleId);
-        owner(ped, actorId, pedOwnerEpoch, nowTick); revision(vehicle, vehicleRevision);
+        owner(ped, actorId, pedOwnerEpoch, nowTick);baseline(vehicle,vehicleRevision);
         if (ped.kind!=Kind.PED || vehicle.kind!=Kind.VEHICLE || !actorId.equals(ped.playerId))
             throw reject("invalid_seat", "只能请求自己的玩家角色进入车辆");
         if (ped.components.combat!=null && !ped.components.combat.alive()) throw reject("dead_entity", "死亡角色不能入座");
-        if (ped.components.attachment!=null || !vehicle.components.vehicle.seats.containsKey(seat)
-                || vehicle.components.vehicle.seats.get(seat)!=null)
+        if (ped.components.attachment!=null || !vehicle.components.vehicle.seats.containsKey(seat))
             throw reject("seat_unavailable", "座位不存在、被占用或角色已入座");
+        Entity evicted=null;String occupant=vehicle.components.vehicle.seats.get(seat);
+        if(occupant!=null){
+            Entity current=require(occupant);
+            if(!"driver".equals(seat) || current.kind!=Kind.PED || current.playerId!=null)
+                throw reject("seat_unavailable","已有玩家或其它乘客占用座位");
+            Components c=current.components;Vector position=vehicle.components.transform.position;
+            Transform exit=new Transform(new Vector(Math.min(16000,position.x+1),Math.min(16000,position.y+1),position.z),
+                vehicle.components.transform.rotation,Vector.zero(),Vector.zero());
+            evicted=updated(current,new Components(exit,c.ped,null,null,c.combat,null));
+        }
         if (ped.components.transform.position.distance(vehicle.components.transform.position)>6)
             throw reject("too_far", "角色距离车辆过远");
         Map<String,String> seats=new LinkedHashMap<>(vehicle.components.vehicle.seats); seats.put(seat,pedId);
@@ -401,8 +479,9 @@ public final class WorldRegistry {
         Components pc=ped.components;
         Entity updatedPed=updated(ped,new Components(pc.transform,pc.ped,null,null,pc.combat,new Attachment(vehicleId,seat)));
         entities.put(vehicleId,updatedVehicle); entities.put(pedId,updatedPed);
+        if(evicted!=null)entities.put(evicted.entityId,evicted);
         motion.put(vehicleId,new MotionBudget(nowTick,2));
-        return commit(Change.SEAT,List.of(updatedVehicle,updatedPed),List.of());
+        return commit(Change.SEAT,evicted==null?List.of(updatedVehicle,updatedPed):List.of(updatedVehicle,updatedPed,evicted),List.of());
     }
 
     public synchronized Commit leaveSeat(String actorId, String pedId, long pedOwnerEpoch, long nowTick) throws Rejection {
@@ -411,6 +490,20 @@ public final class WorldRegistry {
             throw reject("invalid_seat", "玩家角色未入座");
         Map<String,Entity> updates=new LinkedHashMap<>(); detach(ped,updates,nowTick);
         updates.forEach(entities::put); return commit(Change.SEAT,new ArrayList<>(updates.values()),List.of());
+    }
+
+    /** 人口规则给NPC分配座位，不向客户端暴露直接占座写接口。 */
+    public synchronized Commit assignNpcSeatTrusted(String pedId,String vehicleId,String seat,long nowTick)throws Rejection{
+        tick(nowTick);Entity ped=require(pedId),vehicle=require(vehicleId);
+        if(ped.kind!=Kind.PED || ped.playerId!=null || vehicle.kind!=Kind.VEHICLE || ped.components.attachment!=null
+            || !vehicle.components.vehicle.seats.containsKey(seat) || vehicle.components.vehicle.seats.get(seat)!=null)
+            throw reject("invalid_seat","NPC座位分配无效");
+        Map<String,String> seats=new LinkedHashMap<>(vehicle.components.vehicle.seats);seats.put(seat,pedId);
+        Vehicle v=vehicle.components.vehicle;
+        Entity car=updated(vehicle,new Components(vehicle.components.transform,null,new Vehicle(v.engineHealth,v.bodyHealth,seats,v.view),null,vehicle.components.combat,null));
+        Components c=ped.components;
+        Entity passenger=updated(ped,new Components(vehicle.components.transform,c.ped,null,null,c.combat,new Attachment(vehicleId,seat)));
+        entities.put(vehicleId,car);entities.put(pedId,passenger);return commit(Change.SEAT,List.of(car,passenger),List.of());
     }
 
     /** 断线立即撤销仿真所有权并释放该玩家座位；实体保留，不冒充服务器继续仿真。 */
@@ -447,6 +540,7 @@ public final class WorldRegistry {
         }
         updates.remove(id); updates.forEach(entities::put);
         entities.remove(id); motion.remove(id);
+        generationStarts.remove(id);
         if (old.playerId!=null) playerEntities.remove(old.playerId);
         Tombstone deleted=new Tombstone(id,old.kind,old.revision+1,old.generation,worldRevision+1);
         tombstones.put(id,deleted);
@@ -509,6 +603,10 @@ public final class WorldRegistry {
     }
     private void revision(Entity entity,long expected) throws Rejection {
         if (entity.revision!=expected) throw reject("stale_revision","实体版本已变化");
+    }
+    private void baseline(Entity entity,long expected)throws Rejection{
+        if(expected<(entity.generation==1?0:generationStarts.getOrDefault(entity.entityId,1L)))throw reject("stale_generation","输入基线属于旧生命周期");
+        if(expected>entity.revision)throw reject("invalid_revision","输入基线超出当前版本");
     }
     private void tick(long value) throws Rejection {
         if (value<worldTick || value<0 || value>9_007_199_254_740_991L) throw reject("invalid_tick","服务端时间必须单调递增");
