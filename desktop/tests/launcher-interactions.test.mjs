@@ -9,14 +9,18 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
 const caFingerprint = 'AB:'.repeat(31) + 'CD';
 async function launcher(desktop = true, options = {}) {
   const calls = [], values = new Map(), events = new Map(), intervals = [], held = new Map(), failures = new Set(), copied = [], requests = [], timers = new Map();
-  let timerId = 0;
-  let urls = options.urls || [], invitationUrls = options.invitationUrls || [];
+  let timerId = 0, frameId = 0;
+  const frames = new Map(), observers = [];
+  let clients = options.clients || (options.urls || []).map((url, index) => ({ id: index + 1, number: index + 1, primary: index === 0, running_url: url, invitation_url: options.invitationUrls?.[index] || '' }));
+  let lastClientId = Math.max(0, ...clients.map((client) => client.id));
+  let layout = { detailsHeight: 170, addressTop: 24, cardHeight: 60, rowGap: 7, ...options.layout };
   let lan = { settings: { port: 8443, http_port: 8442 }, addresses: ['192.168.31.225'], running_url: null, guide_url: null, host_address: null, ca_fingerprint: null, ...options.lan };
   let caSystemStatus = options.caSystemStatus || { installed: false, trusted: false, fingerprint: null, message: '' };
   let remoteFailure = false;
   let resources = options.resources === undefined ? { manifest_file_count: 5814 } : options.resources;
   let remote = { config: { oltitle: 'https://gtav.2t.hk', latest_version: '0.2.5', downloads: { windows_x64: { url: 'https://oss.2t.hk/launcher.exe', sha256: 'a'.repeat(64) } }, announcements: [{ title: '<img>', body: '<script>unsafe</script>' }] }, source: 'remote' };
-  const status = () => ({ selected_directory: options.selected === undefined ? '/游戏资源' : options.selected, resources, running_urls: urls, invitation_urls: invitationUrls, lan, version: '0.2.5', platform: 'windows_x64', remote_configuration: remote });
+  const status = () => ({ selected_directory: options.selected === undefined ? '/游戏资源' : options.selected, resources, clients,
+    running_urls: clients.map((client) => client.running_url), invitation_urls: clients.map((client) => client.invitation_url), lan, version: '0.2.5', platform: 'windows_x64', remote_configuration: remote });
   let renderCount = 0, rendered = '';
   const app = { get innerHTML() { return rendered; }, set innerHTML(value) { rendered = value; renderCount++; }, addEventListener(name, callback) { events.set(`app:${name}`, callback); } };
   const nodes = new Map();
@@ -30,8 +34,13 @@ async function launcher(desktop = true, options = {}) {
   const lanControls = () => [...app.innerHTML.slice(app.innerHTML.indexOf('class="lan-overlay"')).matchAll(/<(?:button|input|select) id="(lan-[^"]+)"[^>]*>/g)]
     .filter((match) => !/\bdisabled\b/.test(match[0])).map((match) => button(match[1]));
   const lanDialog = { focus() { document.activeElement = this; }, querySelectorAll: lanControls, contains: (node) => node === lanDialog || lanControls().includes(node) };
+  const details = { get clientHeight() { return layout.detailsHeight; }, scrollTop: 0, getBoundingClientRect: () => ({ top: 100 }) };
+  const addresses = { getBoundingClientRect: () => ({ top: 100 + layout.addressTop }),
+    querySelectorAll: () => [...app.innerHTML.matchAll(/data-client-id="[^"]+"/g)].map(() => ({ getBoundingClientRect: () => ({ height: layout.cardHeight }) })) };
   const document = { activeElement: null, documentElement: { style: { setProperty() {} } }, querySelector(selector) {
     if (selector === '#app') return app;
+    if (selector === '.launch-details') return details;
+    if (selector === '.addresses') return app.innerHTML.includes('class="addresses"') ? addresses : null;
     if (selector === '.lan-overlay') return app.innerHTML.includes('class="lan-overlay"') ? lanDialog : null;
     const field = /^#(lan-[^:]+)$/.exec(selector)?.[1];
     if (field) return app.innerHTML.includes(`id="${field}"`) ? button(field) : null;
@@ -55,12 +64,20 @@ async function launcher(desktop = true, options = {}) {
       if (command === 'choose_game_directory') return '/新资源';
       if (command === 'prepare_game') resources = { manifest_file_count: 5814 };
       if (command === 'start_game') {
-        const address = lan.settings.address || '192.168.31.225', offset = urls.length * 2;
-        urls = [...urls, `https://${address}:${lan.settings.port + offset}/`];
-        invitationUrls = [...invitationUrls, `http://${address}:${lan.settings.http_port + offset}/`];
-        lan = { ...lan, host_address: address, running_url: urls[0], guide_url: invitationUrls[0], ca_fingerprint: 'AB:'.repeat(31) + 'CD' };
+        if (!args.additional && clients.some((client) => client.primary)) return status();
+        if (clients.length >= 8) throw new Error('最多同时开启 8 个客户端。');
+        const address = lan.settings.address || '192.168.31.225', offset = lastClientId * 2, id = ++lastClientId;
+        clients = [...clients, { id, number: id, primary: !args.additional,
+          running_url: `https://${address}:${lan.settings.port + offset}/`, invitation_url: `http://${address}:${lan.settings.http_port + offset}/` }];
+        const primary = clients.find((client) => client.primary);
+        lan = { ...lan, host_address: address, running_url: primary?.running_url || null, guide_url: primary?.invitation_url || null, ca_fingerprint: 'AB:'.repeat(31) + 'CD' };
       }
-      if (command === 'stop_game') { urls = []; invitationUrls = []; lan = { ...lan, running_url: null, guide_url: null, host_address: null }; }
+      if (command === 'stop_game_client') {
+        clients = clients.filter((client) => client.id !== args.id);
+        const primary = clients.find((client) => client.primary);
+        lan = { ...lan, running_url: primary?.running_url || null, guide_url: primary?.invitation_url || null, host_address: clients.length ? lan.host_address : null };
+      }
+      if (command === 'stop_game') { clients = []; lan = { ...lan, running_url: null, guide_url: null, host_address: null }; }
       if (command === 'save_lan_settings') lan = { ...lan, settings: { port: args.port, http_port: args.httpPort, address: args.address } };
       if (command === 'remote_configuration') { if (remoteFailure) throw new Error('failed request'); return remote; }
       return status();
@@ -68,18 +85,30 @@ async function launcher(desktop = true, options = {}) {
     fetch: (...args) => { requests.push(args); throw new Error('The launcher must use native CA status'); },
     setTimeout: (callback, delay) => { const id = ++timerId; timers.set(id, { callback, delay }); return id; }, clearTimeout: (id) => timers.delete(id),
     setInterval: (callback, delay) => { intervals.push({ callback, delay }); return intervals.length; },
+    requestAnimationFrame: (callback) => { const id = ++frameId; frames.set(id, callback); return id; },
+    ResizeObserver: class { constructor(callback) { this.callback = callback; observers.push(this); } disconnect() {} observe() {} },
+    getComputedStyle: () => ({ rowGap: String(layout.rowGap) }),
   });
+  const flushFrames = () => {
+    for (let count = 0; frames.size && count < 10; count++) {
+      const scheduled = [...frames]; frames.clear();
+      for (const [, callback] of scheduled) callback();
+    }
+    assert.equal(frames.size, 0, 'layout measurement should settle without a render loop');
+  };
   vm.runInContext(source, context);
   await tick();
+  flushFrames();
   return { calls, app, values, events, intervals, document, status, copied, requests, timers,
     renderCount: () => renderCount,
+    resize(value) { layout = { ...layout, ...value }; observers.forEach((observer) => observer.callback()); flushFrames(); },
     setCaSystemStatus(value) { caSystemStatus = value; },
     async runTimer(delay) { const entries = [...timers].filter(([, timer]) => timer.delay === delay); const entry = entries.at(-1); assert.ok(entry, `missing ${delay}ms timer`); timers.delete(entry[0]); entry[1].callback(); await tick(); },
     setRemote(value) { remote = value; remoteFailure = false; }, failRemote() { remoteFailure = true; },
     failCommand(command, failed = true) { failed ? failures.add(command) : failures.delete(command); },
     hold(command) { let resolve; const promise = new Promise((accept) => { resolve = accept; }); held.set(command, { promise }); return (value = status()) => { held.delete(command); resolve(value); }; },
     input(field, value) { events.get('app:input')({ target: { dataset: { lanField: field }, value } }); },
-    async click(id, dataset = {}) { const button = { id, dataset, disabled: false }; await events.get('app:click')({ target: { closest: () => button } }); } };
+    async click(id, dataset = {}) { const button = { id, dataset, disabled: false }; await events.get('app:click')({ target: { closest: () => button } }); flushFrames(); } };
 }
 
 function newerSnapshot(overrides = {}) {
@@ -89,6 +118,9 @@ function newerSnapshot(overrides = {}) {
 function publish(ui, snapshot) {
   ui.setRemote(snapshot);
   ui.events.get('tauri:launcher-remote-config')({ payload: snapshot });
+}
+function clientIds(ui) {
+  return [...ui.app.innerHTML.matchAll(/data-client-id="(\d+)"/g)].map((match) => Number(match[1]));
 }
 
 test('新版本强制全屏更新，阻止所有后台操作且 Esc 和点击遮罩无法关闭', async () => {
@@ -201,11 +233,11 @@ test('实际启动界面仅通过后端读取远程配置，并从目录选择�
   await ui.click('choose');
   await ui.click('launch');
   assert.deepEqual(ui.calls.filter((call) => ['prepare_game', 'start_game', 'open_game'].includes(call.command)).map((call) => [call.command, JSON.stringify(call.args)]), [
-    ['prepare_game', '{"selected":"/新资源"}'], ['start_game', '{"additional":false}'], ['open_game', '{"index":0,"trusted":false}'],
+    ['prepare_game', '{"selected":"/新资源"}'], ['start_game', '{"additional":false}'], ['open_game', '{"id":1,"trusted":false}'],
   ]);
   const beforeAdditional = ui.calls.length; await ui.click('additional');
   assert.deepEqual(ui.calls.slice(beforeAdditional).map(call => call.command), ['start_game']);
-  await ui.click('', { copyClient: '1' });
+  await ui.click('', { copyClient: '2' });
   assert.equal(ui.copied.at(-1), 'http://192.168.31.225:8444/');
   assert.match(ui.app.innerHTML, /2 个客户端已启动/);
   await ui.click('stop');
@@ -376,17 +408,106 @@ test('新增客户端自动展示邀请地址，分页保留全局编号并打�
   const ui = await launcher();
   await ui.click('launch');
   for (let count = 1; count < 5; count++) await ui.click('additional');
-  const clientIndices = () => [...ui.app.innerHTML.matchAll(/data-copy-client="(\d+)"/g)].map((match) => Number(match[1]));
-  assert.deepEqual(clientIndices(), [4]);
+  const clientIndices = () => clientIds(ui);
+  assert.deepEqual(clientIndices(), [5]);
   assert.match(ui.app.innerHTML, /客户端 5 · 朋友/);
   assert.match(ui.app.innerHTML, /http:\/\/192\.168\.31\.225:8450\//);
   const before = ui.calls.length;
-  await ui.click('', { open: '4' });
-  assert.deepEqual(ui.calls.slice(before).map((call) => [call.command, JSON.stringify(call.args)]), [['open_game', '{"index":4,"trusted":false}']]);
-  await ui.click('', { copyClient: '4' }); assert.equal(ui.copied.at(-1), 'http://192.168.31.225:8450/');
+  await ui.click('', { open: '5' });
+  assert.deepEqual(ui.calls.slice(before).map((call) => [call.command, JSON.stringify(call.args)]), [['open_game', '{"id":5,"trusted":false}']]);
+  await ui.click('', { copyClient: '5' }); assert.equal(ui.copied.at(-1), 'http://192.168.31.225:8450/');
   await ui.click('clients-next');
-  assert.deepEqual(clientIndices(), [0, 1, 2, 3]);
-  assert.doesNotMatch(ui.app.innerHTML, /data-open="0"/);
+  assert.deepEqual(clientIndices(), [1, 2, 3, 4]);
+  assert.doesNotMatch(ui.app.innerHTML, /data-open="1"/);
+});
+
+test('真实剩余空间容纳八项就完整显示，缩小后分页，尺寸变化保持正在阅读的客户端', async () => {
+  const ui = await launcher(true, { layout: { detailsHeight: 285 } });
+  await ui.click('launch');
+  for (let count = 1; count < 8; count++) await ui.click('additional');
+  assert.deepEqual(clientIds(ui), [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.doesNotMatch(ui.app.innerHTML, /id="clients-next"/);
+  assert.match(ui.app.innerHTML, /id="additional"[^>]*disabled/);
+  const before = ui.calls.length;
+  await ui.click('additional'); assert.equal(ui.calls.length, before);
+  // The same cards fit only one row when the remaining height is reduced.
+  ui.resize({ detailsHeight: 90 });
+  assert.deepEqual(clientIds(ui), [1, 2]);
+  await ui.click('clients-next'); assert.deepEqual(clientIds(ui), [3, 4]);
+  await ui.click('clients-next'); assert.deepEqual(clientIds(ui), [5, 6]);
+  ui.resize({ detailsHeight: 170 });
+  assert.deepEqual(clientIds(ui), [5, 6, 7, 8]);
+  assert.match(ui.app.innerHTML, /id="clients-next"[^>]*>2 \/ 2/);
+  ui.resize({ detailsHeight: 285 });
+  assert.deepEqual(clientIds(ui), [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.doesNotMatch(ui.app.innerHTML, /id="clients-next"/);
+});
+
+test('新增在当前页时保持页码，单项停止调用稳定 ID，删除最后一页回退且不重编号', async () => {
+  const ui = await launcher(true, { layout: { detailsHeight: 90 } });
+  await ui.click('launch'); await ui.click('additional');
+  assert.deepEqual(clientIds(ui), [1, 2]);
+  await ui.click('additional'); assert.deepEqual(clientIds(ui), [3]);
+  await ui.click('additional'); assert.deepEqual(clientIds(ui), [3, 4]);
+  await ui.click('additional'); assert.deepEqual(clientIds(ui), [5]);
+  const before = ui.calls.length;
+  await ui.click('', { stopClient: '5' });
+  assert.deepEqual(ui.calls.slice(before).map((call) => [call.command, JSON.stringify(call.args)]), [['stop_game_client', '{"id":5}']]);
+  assert.deepEqual(clientIds(ui), [3, 4]);
+  assert.match(ui.app.innerHTML, /客户端 5 的游戏与共享服务已停止/);
+  await ui.click('', { stopClient: '3' });
+  assert.deepEqual(clientIds(ui), [4]);
+  assert.match(ui.app.innerHTML, /客户端 4 · 朋友/);
+  await ui.click('', { copyClient: '4' }); assert.equal(ui.copied.at(-1), 'http://192.168.31.225:8448/');
+  await ui.click('', { open: '4' }); assert.equal(ui.calls.at(-1).args.id, 4);
+  await ui.click('', { stopClient: '4' });
+  assert.deepEqual(clientIds(ui), [1, 2]);
+});
+
+test('停止本机客户端保留朋友角色，再次启动只重建本机；停止失败不移除卡片且阻止重入', async () => {
+  const ui = await launcher();
+  await ui.click('launch'); await ui.click('additional'); await ui.click('additional');
+  assert.match(ui.app.innerHTML, /aria-label="停止客户端 1 的游戏与共享服务"/);
+  await ui.click('', { stopClient: '1' });
+  assert.deepEqual(clientIds(ui), [2, 3]);
+  assert.match(ui.app.innerHTML, /客户端 2 · 朋友/);
+  assert.doesNotMatch(ui.app.innerHTML, /客户端 \d+ · 本机/);
+  assert.match(ui.app.innerHTML, /id="launch"[^>]*>启动游戏/);
+  const before = ui.calls.length;
+  await ui.click('launch');
+  assert.deepEqual(ui.calls.slice(before).filter((call) => ['start_game', 'open_game'].includes(call.command)).map((call) => [call.command, JSON.stringify(call.args)]), [
+    ['start_game', '{"additional":false}'], ['open_game', '{"id":4,"trusted":false}'],
+  ]);
+  assert.deepEqual(clientIds(ui), [2, 3, 4]);
+  assert.match(ui.app.innerHTML, /客户端 4 · 本机/);
+  ui.failCommand('stop_game_client'); await ui.click('', { stopClient: '2' });
+  assert.deepEqual(clientIds(ui), [2, 3, 4]);
+  assert.match(ui.app.innerHTML, /stop_game_client failed/);
+  ui.failCommand('stop_game_client', false);
+  const finish = ui.hold('stop_game_client'), stopping = ui.click('', { stopClient: '2' });
+  await tick();
+  assert.match(ui.app.innerHTML, /data-stop-client="3"[^>]*disabled/);
+  const heldCalls = ui.calls.length;
+  await ui.click('', { stopClient: '3' }); assert.equal(ui.calls.length, heldCalls);
+  finish(); await stopping;
+  const unchanged = ui.calls.length;
+  await ui.click('', { stopClient: '999' }); await ui.click('', { open: '999' });
+  assert.equal(ui.calls.length, unchanged);
+});
+
+test('启动器右键菜单被阻止，完成按钮关闭设置且不保存未提交输入', async () => {
+  const ui = await launcher();
+  let prevented = false;
+  ui.events.get('document:contextmenu')({ preventDefault() { prevented = true; } });
+  assert.equal(prevented, true);
+  await ui.click('lan-setup'); ui.input('address', '10.0.0.9');
+  assert.match(ui.app.innerHTML, /id="lan-done" class="secondary"/);
+  const before = ui.calls.length;
+  await ui.click('lan-done');
+  assert.doesNotMatch(ui.app.innerHTML, /class="lan-overlay"/);
+  assert.equal(ui.calls.length, before);
+  await ui.click('lan-setup');
+  assert.match(ui.app.innerHTML, /id="lan-address"[^>]*value=""/);
 });
 
 test('共享设置默认自动检测 IP，仅保存设置，没有独立开启或停止共享入口', async () => {
@@ -416,12 +537,12 @@ test('设置只提交 IP 和双端口，启动默认共享，朋友客户端不�
   assert.doesNotMatch(ui.app.innerHTML, /class="lan-overlay"/);
   await ui.click('launch');
   assert.match(ui.app.innerHTML, /http:\/\/192\.168\.1\.8:8445\//);
-  await ui.click('', { copyClient: '0' }); assert.equal(ui.copied.at(-1), 'http://192.168.1.8:8445/');
+  await ui.click('', { copyClient: '1' }); assert.equal(ui.copied.at(-1), 'http://192.168.1.8:8445/');
   const opening = ui.calls.filter(call => call.command === 'open_game').length;
   await ui.click('additional');
   assert.equal(ui.calls.filter(call => call.command === 'open_game').length, opening);
   assert.match(ui.app.innerHTML, /http:\/\/192\.168\.1\.8:8447\//);
-  await ui.click('', { copyClient: '1' }); assert.equal(ui.copied.at(-1), 'http://192.168.1.8:8447/');
+  await ui.click('', { copyClient: '2' }); assert.equal(ui.copied.at(-1), 'http://192.168.1.8:8447/');
   assert.equal([...ui.app.innerHTML.matchAll(/id="stop"/g)].length, 1);
   assert.doesNotMatch(ui.app.innerHTML, /id="lan-(?:start|stop|modal-stop)"/);
   await ui.click('stop');
@@ -438,7 +559,7 @@ test('保存失败保持输入以便修复重试，剪贴板失败不误报成�
   assert.match(ui.app.innerHTML, /save_lan_settings failed/);
   assert.match(ui.app.innerHTML, /id="lan-address"[^>]*value="192\.168\.1\.8"/);
   ui.failCommand('save_lan_settings', false); await ui.click('lan-save');
-  await ui.click('launch'); await ui.click('', { copyClient: '0' });
+  await ui.click('launch'); await ui.click('', { copyClient: '1' });
   assert.match(ui.app.innerHTML, /无法访问剪贴板，请手动复制/);
   assert.doesNotMatch(ui.app.innerHTML, /邀请地址已复制/);
 });
@@ -551,7 +672,7 @@ test('系统确认安装并信任后隐藏整个 CA 区，本机所有客户端�
   await ui.click('launch');
   assert.equal(ui.calls.at(-1).command, 'open_game');
   assert.equal(ui.calls.at(-1).args.trusted, true);
-  await ui.click('additional'); await ui.click('', { open: '1' });
+  await ui.click('additional'); await ui.click('', { open: '2' });
   assert.equal(ui.calls.at(-1).args.trusted, true);
   assert.equal(ui.requests.length, 0);
 });
@@ -585,7 +706,7 @@ test('系统信任生效清理安装错误，同时保留后来的其他错误',
   assert.doesNotMatch(ui.app.innerHTML, /install_lan_ca failed|自动安装未完成/);
   const other = await launcher(true, { clipboard: false });
   other.failCommand('install_lan_ca'); await other.click('ca-install');
-  await other.click('launch'); await other.click('', { copyClient: '0' });
+  await other.click('launch'); await other.click('', { copyClient: '1' });
   other.setCaSystemStatus({ installed: true, trusted: true, fingerprint: caFingerprint });
   await other.runTimer(4000);
   assert.match(other.app.innerHTML, /无法访问剪贴板，请手动复制/);

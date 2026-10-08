@@ -1,7 +1,7 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import metadata from '../package.json';
-import { escapeHtml as html, displayDirectory, progressValue, readBackground, saveBackground, remotePresentation, launcherActions, paginateText, lanSettings, lanActions, lanRequest } from './view-state.js';
+import { escapeHtml as html, displayDirectory, progressValue, readBackground, saveBackground, remotePresentation, launcherActions, paginateText, lanSettings, lanActions, lanRequest, clientCapacity, clientPage } from './view-state.js';
 import { backgrounds } from './backgrounds.js';
 import './style.css';
 
@@ -9,14 +9,41 @@ const app = document.querySelector('#app');
 const backgroundIds = backgrounds.map((item) => item.id);
 const storage = { getItem: (key) => localStorage.getItem(key), setItem: (key, value) => localStorage.setItem(key, value) };
 const state = {
-  desktop: isTauri(), selected: '', resources: null, urls: [], invitationUrls: [], version: metadata.version, busy: false, phase: '',
+  desktop: isTauri(), selected: '', resources: null, clients: [], urls: [], invitationUrls: [], version: metadata.version, busy: false, phase: '',
   message: '选择你的游戏资源，下一站就是洛圣都。', error: '', background: readBackground(storage, backgroundIds), settingsOpen: false,
   remote: null, remoteBusy: false, remoteError: '', platform: '',
-  announcementIndex: 0, clientPage: 0, reading: null, readingPage: 0,
+  announcementIndex: 0, clientPage: 0, clientCapacity: 2, clientFocusId: null, reading: null, readingPage: 0,
   updateRequired: false, caInstallFailed: false, caInstallError: '', caSystemStatus: null,
   lan: null, lanOpen: false, lanSettings: lanSettings(null),
 };
 let caSystemRequest = null, caSystemRetryTimer = null;
+let clientMeasureFrame = null;
+const clientResizeObserver = typeof ResizeObserver === 'function' ? new ResizeObserver(scheduleClientMeasurement) : null;
+function findClient(id) { return state.clients.find((client) => String(client.id) === String(id)); }
+function primaryClient() { return state.clients.find((client) => client.primary); }
+function openClient(client) {
+  const identity = client.legacyIndex === undefined ? { id: client.id } : { index: client.legacyIndex };
+  return invoke('open_game', { ...identity, trusted: systemCaTrusted() });
+}
+function scheduleClientMeasurement() {
+  if (clientMeasureFrame !== null || typeof requestAnimationFrame !== 'function') return;
+  clientMeasureFrame = requestAnimationFrame(() => {
+    clientMeasureFrame = null;
+    if (!state.clients.length || state.lanOpen || state.updateRequired) return;
+    const details = document.querySelector('.launch-details'), addresses = document.querySelector('.addresses');
+    const cards = [...(addresses?.querySelectorAll('.client-address') || [])];
+    if (!details || !addresses || !cards.length) return;
+    const top = addresses.getBoundingClientRect().top - details.getBoundingClientRect().top + details.scrollTop;
+    const style = typeof getComputedStyle === 'function' ? getComputedStyle(addresses) : null;
+    const capacity = clientCapacity({ availableHeight: details.clientHeight - top,
+      cardHeight: Math.max(...cards.map((card) => card.getBoundingClientRect().height)), rowGap: parseFloat(style?.rowGap) });
+    if (capacity === null || capacity === state.clientCapacity) { state.clientFocusId = null; return; }
+    const anchorId = state.clientFocusId ?? state.clients[state.clientPage * state.clientCapacity]?.id ?? null;
+    state.clientCapacity = capacity;
+    state.clientPage = clientPage(state.clients, capacity, state.clientPage, anchorId);
+    render();
+  });
+}
 function systemCaTrusted(status = state.caSystemStatus) {
   return status?.installed === true && status?.trusted === true;
 }
@@ -65,10 +92,16 @@ const icons = {
   close: '<svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg>',
 };
 function updateStatus(value) {
+  const visibleIds = state.clients.slice(state.clientPage * state.clientCapacity, (state.clientPage + 1) * state.clientCapacity).map((client) => client.id);
   state.selected = value.selected_directory || state.selected;
   state.resources = value.resources || null;
-  state.urls = value.running_urls || [];
-  state.invitationUrls = value.invitation_urls || [];
+  state.clients = Array.isArray(value.clients) ? value.clients : (value.running_urls || []).map((url, index) => ({
+    id: index, number: index + 1, primary: url === value.lan?.running_url,
+    running_url: url, invitation_url: value.invitation_urls?.[index] || '', legacyIndex: index,
+  }));
+  state.urls = state.clients.map((client) => client.running_url);
+  state.invitationUrls = state.clients.map((client) => client.invitation_url);
+  state.clientPage = clientPage(state.clients, state.clientCapacity, state.clientPage, visibleIds.find((id) => findClient(id)) ?? null);
   state.version = value.version || state.version;
   state.platform = value.platform || state.platform;
   if (value.lan) {
@@ -103,9 +136,10 @@ function render() {
   const actions = launcherActions(state, state.remoteBusy), remote = remotePresentation(state.remote, state.version, state.platform);
   const background = backgrounds.find((item) => item.id === state.background) || backgrounds[0];
   state.announcementIndex = Math.min(state.announcementIndex, Math.max(0, remote.announcements.length - 1));
-  state.clientPage = Math.min(state.clientPage, Math.max(0, Math.ceil(state.urls.length / 4) - 1));
+  state.clientPage = clientPage(state.clients, state.clientCapacity, state.clientPage);
+  const clientPages = Math.ceil(state.clients.length / state.clientCapacity);
   const announcement = remote.announcements[state.announcementIndex];
-  const visibleClients = state.urls.slice(state.clientPage * 4, state.clientPage * 4 + 4);
+  const visibleClients = state.clients.slice(state.clientPage * state.clientCapacity, (state.clientPage + 1) * state.clientCapacity);
   const pages = state.reading ? paginateText(state.reading.text) : [];
   state.readingPage = Math.min(state.readingPage, Math.max(0, pages.length - 1));
   document.documentElement.style.setProperty('--scene', `url("${background.image}")`);
@@ -123,13 +157,13 @@ function render() {
       <section class="glass launch-card"><div class="launch-main"><div class="launch-heading"><div class="section-heading"><span class="step-number">02</span><div><h2>${running ? '游戏已准备就绪' : '启动你的游戏'}</h2></div></div>${running ? `<button id="stop" class="text-button launch-stop" title="停止所有客户端与局域网共享" ${actions.stop ? '' : 'disabled'}>停止全部</button>` : ''}</div>
         <div class="progress-status ${state.error ? 'has-error' : ''}" role="status" aria-live="polite"><span class="${state.busy ? 'spinner' : 'status-dot'}"></span><span class="status-copy" title="${html(state.error || state.message)}">${html(state.error || state.message)}</span>${state.error ? '<button class="text-button" data-read="error">详情</button>' : ''}</div>
         ${state.busy ? `<div class="progress-track"><span style="width:${progressValue(state.phase)}%"></span></div>` : ''}</div>
-        <div class="launch-actions"><button id="launch" class="primary" ${actions.launch ? '' : 'disabled'}>${running ? '打开游戏' : state.busy ? '正在准备…' : '启动游戏'}${icons.arrow}</button>
+        <div class="launch-actions"><button id="launch" class="primary" ${actions.launch ? '' : 'disabled'}>${primaryClient() ? '打开游戏' : state.busy ? '正在准备…' : '启动游戏'}${icons.arrow}</button>
           ${running ? `<button id="additional" class="secondary" ${actions.additional ? '' : 'disabled'}>另开一个客户端</button>` : `<button id="verify" class="text-button" ${actions.launch ? '' : 'disabled'}>检查资源</button>`}
           ${state.desktop ? `<button id="lan-setup" class="secondary" ${sharing.configure ? '' : 'disabled'}>共享设置</button>` : ''}</div>
         <div class="launch-details">${caSystemTrusted ? '' : `<div class="ca-trust-actions"><div><span>本机浏览器证书信任</span><small title="${html(state.caSystemStatus?.message || state.caSystemStatus?.error || '')}">${html(state.caSystemStatus?.installed === true ? '系统已安装但未信任，请完成系统信任' : state.caSystemStatus?.message || 'BinGo Root CA · 只需安装一次')}</small></div><div class="ca-trust-actions__buttons"><button id="ca-install" class="secondary" ${caEnabled ? '' : 'disabled'}>安装并信任 CA</button><button id="ca-save" class="text-button" ${caEnabled ? '' : 'disabled'}>下载 CA 证书</button></div>${state.caInstallFailed ? '<p class="ca-trust-fallback" role="status">自动安装未完成，可下载证书手动信任。系统确认信任后会自动隐藏此提示。</p>' : ''}</div>`}
-        ${running ? `<div class="client-list"><div class="client-list__heading"><span>客户端邀请地址</span>${state.urls.length > 4 ? `<button id="clients-next" class="text-button client-page" aria-label="显示下一组客户端">${state.clientPage + 1} / ${Math.ceil(state.urls.length / 4)} ${icons.arrow}</button>` : '<small>复制后发给朋友</small>'}</div><div class="addresses">${visibleClients.map((url, offset) => {
-          const index = state.clientPage * 4 + offset, invitation = state.invitationUrls[index] || (index === 0 ? state.lan?.guide_url : '');
-          return `<div class="client-address"><div class="client-address__heading"><span><span class="status-dot live"></span>客户端 ${index + 1}${index === 0 ? ' · 本机' : ' · 朋友'}</span>${index > 0 ? `<button data-open="${index}" class="text-button" ${state.busy || state.updateRequired ? 'disabled' : ''}>本机打开 ↗</button>` : ''}</div><button data-copy-client="${index}" class="secondary client-copy" ${state.busy || !invitation ? 'disabled' : ''}>复制邀请地址</button><code title="${html(invitation || url)}">${html(invitation || url)}</code></div>`;
+        ${running ? `<div class="client-list"><div class="client-list__heading"><span>客户端邀请地址</span>${clientPages > 1 ? `<button id="clients-next" class="text-button client-page" aria-label="显示下一组客户端">${state.clientPage + 1} / ${clientPages} ${icons.arrow}</button>` : '<small>复制后发给朋友</small>'}</div><div class="addresses">${visibleClients.map((client) => {
+          const invitation = client.invitation_url || (client.primary ? state.lan?.guide_url : ''), number = html(client.number), id = html(client.id);
+          return `<div class="client-address" data-client-id="${id}"><div class="client-address__heading"><span><span class="status-dot live"></span>客户端 ${number}${client.primary ? ' · 本机' : ' · 朋友'}</span></div><button data-stop-client="${id}" class="text-button client-close" aria-label="停止客户端 ${number} 的游戏与共享服务" title="只停止此客户端的游戏与共享服务" ${state.busy ? 'disabled' : ''}>停止服务</button><div class="client-address__actions">${!client.primary ? `<button data-open="${id}" class="text-button" ${state.busy || state.updateRequired ? 'disabled' : ''}>本机打开 ↗</button>` : ''}<button data-copy-client="${id}" class="secondary client-copy" ${state.busy || !invitation ? 'disabled' : ''}>复制邀请地址</button></div><code title="${html(invitation || client.running_url)}">${html(invitation || client.running_url)}</code></div>`;
         }).join('')}</div></div>` : ''}</div></section></div>
       <aside class="community-column"><section class="glass announcement-card"><div class="card-heading"><h2>${icons.bell} 战局公告</h2><span class="config-source">${html(remote.sourceText)}</span></div>
         ${announcement ? `<div class="announcements"><article><div class="announcement-heading"><h3 title="${html(announcement.title)}">${html(announcement.title)}</h3>${announcement.date ? `<time>${html(announcement.date)}</time>` : ''}</div><p>${html(announcement.body)}</p></article><div class="announcement-actions"><button class="text-button" data-read="announcement">查看详情 ↗</button>${remote.announcements.length > 1 ? `<div class="pager"><button id="announcement-prev" aria-label="上一条公告" ${state.announcementIndex ? '' : 'disabled'}>‹</button><span>${state.announcementIndex + 1} / ${remote.announcements.length}</span><button id="announcement-next" aria-label="下一条公告" ${state.announcementIndex < remote.announcements.length - 1 ? '' : 'disabled'}>›</button></div>` : ''}</div></div>` : '<p class="empty-note">-</p>'}
@@ -141,7 +175,7 @@ function render() {
       </section></aside></div>
       <footer><span>GTA V / 公共战局 <i></i> 启动器 ${html(state.version)}</span><span>保持启动器开启，畅游洛圣都</span></footer>
     </main></div>${state.reading ? `<div class="reader-overlay"><button id="reader-dismiss" class="reader-backdrop" aria-label="关闭详情"></button><section class="glass reader" role="dialog" aria-modal="true" aria-labelledby="reader-title"><div class="reader-heading"><h2 id="reader-title">${html(state.reading.title)}</h2><button id="reader-close" class="icon-button" aria-label="关闭详情">${icons.close}</button></div><div class="reader-text">${html(pages[state.readingPage] || '')}</div><div class="reader-footer"><span>第 ${state.readingPage + 1} / ${Math.max(1, pages.length)} 页</span><div class="pager"><button id="reader-prev" ${state.readingPage ? '' : 'disabled'} aria-label="上一页">‹</button><button id="reader-next" ${state.readingPage < pages.length - 1 ? '' : 'disabled'} aria-label="下一页">›</button></div></div></section></div>` : ''}
-    ${state.lanOpen && !state.updateRequired ? `<section class="lan-overlay" role="dialog" aria-modal="true" aria-labelledby="lan-title" tabindex="-1"><div class="glass lan-panel"><div class="reader-heading"><div><p class="eyebrow">共享洛圣都</p><h2 id="lan-title">局域网共享设置</h2></div><button id="lan-close" class="icon-button" aria-label="关闭局域网共享设置" ${state.busy ? 'disabled' : ''}>${icons.close}</button></div><p class="lan-description">启动游戏时自动使用本机局域网 IP 共享资源。“另开一个客户端”会生成独立邀请地址，发给朋友即可使用。</p><div class="lan-fields"><label class="lan-fields__address">本机局域网 IP<input id="lan-address" data-lan-field="address" type="text" list="lan-ip-options" value="${html(state.lanSettings.address)}" placeholder="${html(lanAddress ? `自动检测：${lanAddress}（留空自动选择）` : '留空自动检测本机 IP')}" autocomplete="off" spellcheck="false" ${running || state.busy ? 'disabled' : ''}><datalist id="lan-ip-options">${lanAddresses.map((address) => `<option value="${html(address)}"></option>`).join('')}</datalist></label><label>安装引导 HTTP 端口<input id="lan-http-port" data-lan-field="httpPort" type="number" min="1" max="65535" value="${html(state.lanSettings.httpPort)}" ${running || state.busy ? 'disabled' : ''}></label><label>游戏 HTTPS 端口<input id="lan-port" data-lan-field="port" type="number" min="1" max="65535" value="${html(state.lanSettings.port)}" ${running || state.busy ? 'disabled' : ''}></label></div><div class="lan-guidance"><span class="status-dot ${running ? 'live' : ''}"></span><div><p>所有客户端共用 BinGo Root CA，朋友信任一次即可。邀请地址会引导安装证书，HTTPS 验证通过后自动进入游戏。</p><p>允许 HTTP 与 HTTPS 端口通过本机防火墙，并保持本机和启动器开启。</p></div></div><div class="lan-operation" role="status" aria-live="polite">${state.busy ? '<span class="spinner"></span>' : ''}<p class="${state.error ? 'has-error' : ''}">${html(state.error || (state.busy ? state.message : running ? '游戏与共享正在运行；请先停止游戏，再修改 IP 或端口。' : '设置保存后将在下次启动游戏时生效。'))}</p></div><div class="lan-panel__actions"><button id="lan-save" class="primary" ${sharing.save ? '' : 'disabled'}>${state.busy ? '正在保存…' : '保存设置'}${icons.check}</button><button id="lan-done" class="text-button" ${state.busy ? 'disabled' : ''}>完成</button></div></div></section>` : ''}
+    ${state.lanOpen && !state.updateRequired ? `<section class="lan-overlay" role="dialog" aria-modal="true" aria-labelledby="lan-title" tabindex="-1"><div class="glass lan-panel"><div class="reader-heading"><div><p class="eyebrow">共享洛圣都</p><h2 id="lan-title">局域网共享设置</h2></div><button id="lan-close" class="icon-button" aria-label="关闭局域网共享设置" ${state.busy ? 'disabled' : ''}>${icons.close}</button></div><p class="lan-description">启动游戏时自动使用本机局域网 IP 共享资源。“另开一个客户端”会生成独立邀请地址，发给朋友即可使用。</p><div class="lan-fields"><label class="lan-fields__address">本机局域网 IP<input id="lan-address" data-lan-field="address" type="text" list="lan-ip-options" value="${html(state.lanSettings.address)}" placeholder="${html(lanAddress ? `自动检测：${lanAddress}（留空自动选择）` : '留空自动检测本机 IP')}" autocomplete="off" spellcheck="false" ${running || state.busy ? 'disabled' : ''}><datalist id="lan-ip-options">${lanAddresses.map((address) => `<option value="${html(address)}"></option>`).join('')}</datalist></label><label>安装引导 HTTP 端口<input id="lan-http-port" data-lan-field="httpPort" type="number" min="1" max="65535" value="${html(state.lanSettings.httpPort)}" ${running || state.busy ? 'disabled' : ''}></label><label>游戏 HTTPS 端口<input id="lan-port" data-lan-field="port" type="number" min="1" max="65535" value="${html(state.lanSettings.port)}" ${running || state.busy ? 'disabled' : ''}></label></div><div class="lan-guidance"><span class="status-dot ${running ? 'live' : ''}"></span><div><p>所有客户端共用 BinGo Root CA，朋友信任一次即可。邀请地址会引导安装证书，HTTPS 验证通过后自动进入游戏。</p><p>允许 HTTP 与 HTTPS 端口通过本机防火墙，并保持本机和启动器开启。</p></div></div><div class="lan-operation" role="status" aria-live="polite">${state.busy ? '<span class="spinner"></span>' : ''}<p class="${state.error ? 'has-error' : ''}">${html(state.error || (state.busy ? state.message : running ? '游戏与共享正在运行；请先停止游戏，再修改 IP 或端口。' : '设置保存后将在下次启动游戏时生效。'))}</p></div><div class="lan-panel__actions"><button id="lan-save" class="primary" ${sharing.save ? '' : 'disabled'}>${state.busy ? '正在保存…' : '保存设置'}${icons.check}</button><button id="lan-done" class="secondary" ${state.busy ? 'disabled' : ''}>完成</button></div></div></section>` : ''}
     ${state.updateRequired ? `<section class="mandatory-update" role="alertdialog" aria-modal="true" aria-labelledby="mandatory-update-title" aria-describedby="mandatory-update-description" tabindex="-1"><div class="glass mandatory-update__panel"><div class="mandatory-update__icon" aria-hidden="true">${icons.download}</div><p class="eyebrow">启动器更新</p><h2 id="mandatory-update-title">请更新后继续</h2><p id="mandatory-update-description">新版启动器已发布，请下载并打开新版后继续使用。</p><div class="mandatory-update__versions"><span>当前版本 <strong>${html(state.version)}</strong></span><span>最新版本 <strong>${html(remote.latest || '-')}</strong></span></div><div class="mandatory-update__notes">${remote.releaseNotes ? `<p>${html(remote.releaseNotes)}</p>` : '<p>-</p>'}</div><div class="mandatory-update__actions">${remote.downloadAvailable ? `<button id="mandatory-update-download" class="primary" ${state.remoteBusy || !state.desktop ? 'disabled' : ''}>${icons.download} 下载新版本</button>` : '<p class="mandatory-update__missing">当前系统的下载地址暂不可用，请重新检查。</p>'}<button id="mandatory-update-check" class="secondary" ${actions.refresh ? '' : 'disabled'}>${state.remoteBusy ? '<span class="spinner"></span>' : icons.refresh}${state.remoteBusy ? '正在检查…' : '重新检查'}</button></div>${state.remoteError ? `<p class="remote-note" role="status">${html(state.remoteError)}</p>` : ''}<p class="mandatory-update__footnote">下载后退出当前启动器，替换并打开新版。</p></div></section>` : ''}`;
   if (state.updateRequired) {
     const action = ['mandatory-update-download', 'mandatory-update-check'].includes(focusedUpdateAction)
@@ -154,6 +188,11 @@ function render() {
     replacement?.focus({ preventScroll: true });
     if (typeof focusedLanField.selectionStart === 'number') replacement?.setSelectionRange?.(focusedLanField.selectionStart, focusedLanField.selectionEnd);
   }
+  clientResizeObserver?.disconnect();
+  const details = document.querySelector('.launch-details'), addresses = document.querySelector('.addresses');
+  if (details) clientResizeObserver?.observe(details);
+  if (addresses) clientResizeObserver?.observe(addresses);
+  scheduleClientMeasurement();
 }
 async function operation(work) {
   if (state.busy || !state.desktop || state.updateRequired) return;
@@ -222,6 +261,7 @@ app.addEventListener('click', async (event) => {
     state.lanOpen = true; state.settingsOpen = false; state.reading = null; state.error = ''; resetLanSettings(); render();
     document.querySelector('#lan-address')?.focus();
   } else if (target.id === 'lan-close' || target.id === 'lan-done') {
+    if (state.busy) return;
     state.lanOpen = false; state.error = ''; render(); document.querySelector('#lan-setup')?.focus();
   } else if (target.id === 'lan-save') {
     if (!lanActions(state).save) return;
@@ -235,7 +275,8 @@ app.addEventListener('click', async (event) => {
     });
   } else if (target.dataset.copyClient !== undefined) {
     if (state.busy) return;
-    const value = state.invitationUrls[Number(target.dataset.copyClient)];
+    const client = findClient(target.dataset.copyClient);
+    const value = client?.invitation_url || (client?.primary ? state.lan?.guide_url : '');
     if (value) {
       try { if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable'); await navigator.clipboard.writeText(value); state.error = ''; state.message = '邀请地址已复制，可以发给朋友。'; render(); }
       catch { state.error = '无法访问剪贴板，请手动复制。'; render(); }
@@ -255,7 +296,9 @@ app.addEventListener('click', async (event) => {
     const count = remotePresentation(state.remote, state.version, state.platform).announcements.length;
     state.announcementIndex = Math.max(0, Math.min(count - 1, state.announcementIndex + (target.id === 'announcement-next' ? 1 : -1))); render();
   } else if (target.id === 'clients-next') {
-    state.clientPage = (state.clientPage + 1) % Math.ceil(state.urls.length / 4); render();
+    if (!state.clients.length) return;
+    state.clientFocusId = null;
+    state.clientPage = (state.clientPage + 1) % Math.ceil(state.clients.length / state.clientCapacity); render();
   } else if (target.dataset.background) {
     if (!backgroundIds.includes(target.dataset.background)) return;
     state.background = target.dataset.background; saveBackground(storage, state.background, backgroundIds); render();
@@ -274,7 +317,7 @@ app.addEventListener('click', async (event) => {
   });
   else if (target.id === 'verify') await operation(prepare);
   else if (target.id === 'launch') await operation(async () => {
-    if (!state.urls.length) {
+    if (!primaryClient()) {
       if (!state.resources) await prepare();
       requireCurrentVersion();
       const caStatus = refreshCaSystemStatus(true);
@@ -282,15 +325,33 @@ app.addEventListener('click', async (event) => {
       await caStatus;
     }
     requireCurrentVersion();
-    await invoke('open_game', { index: 0, trusted: systemCaTrusted() }); state.message = systemCaTrusted() ? '游戏已在浏览器打开，局域网共享已开启。' : '局域网共享已开启，浏览器验证证书后会自动进入游戏。';
+    const client = primaryClient();
+    if (!client) throw new Error('本机客户端尚未启动，请重试。');
+    await openClient(client); state.message = systemCaTrusted() ? '游戏已在浏览器打开，局域网共享已开启。' : '局域网共享已开启，浏览器验证证书后会自动进入游戏。';
   });
-  else if (target.id === 'additional') await operation(async () => {
-    requireCurrentVersion(); updateStatus(await invoke('start_game', { additional: true }));
-    state.clientPage = Math.floor((state.urls.length - 1) / 4);
+  else if (target.id === 'additional' && launcherActions(state).additional) await operation(async () => {
+    requireCurrentVersion();
+    const previousIds = new Set(state.clients.map((client) => client.id));
+    updateStatus(await invoke('start_game', { additional: true }));
+    const added = state.clients.find((client) => !previousIds.has(client.id));
+    if (added) {
+      const page = clientPage(state.clients, state.clientCapacity, state.clientPage, added.id);
+      if (page !== state.clientPage) { state.clientPage = page; state.clientFocusId = added.id; }
+    }
     state.message = '朋友客户端已准备就绪，复制它的邀请地址发给朋友。';
   });
   else if (target.id === 'stop') await operation(async () => { updateStatus(await invoke('stop_game')); state.message = '游戏与局域网共享已停止。'; });
-  else if (target.dataset.open !== undefined) await operation(() => invoke('open_game', { index: Number(target.dataset.open), trusted: systemCaTrusted() }));
+  else if (target.dataset.stopClient !== undefined) {
+    const client = findClient(target.dataset.stopClient);
+    if (!client) return;
+    await operation(async () => {
+      updateStatus(await invoke('stop_game_client', { id: client.id }));
+      state.message = `客户端 ${client.number} 的游戏与共享服务已停止。`;
+    });
+  } else if (target.dataset.open !== undefined) {
+    const client = findClient(target.dataset.open);
+    if (client) await operation(() => openClient(client));
+  }
 });
 app.addEventListener('input', (event) => {
   const field = event.target?.dataset?.lanField;
@@ -304,6 +365,7 @@ app.addEventListener('change', (event) => {
 document.addEventListener('click', (event) => {
   if (state.settingsOpen && !event.target.closest('.settings')) { state.settingsOpen = false; render(); }
 });
+document.addEventListener('contextmenu', (event) => event.preventDefault());
 document.addEventListener('keydown', (event) => {
   if (state.updateRequired) {
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation?.(); return; }

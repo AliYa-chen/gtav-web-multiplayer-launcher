@@ -244,39 +244,121 @@ mod tests {
         response
     }
 
+    fn add_test_client(state: &crate::LauncherState, game: &crate::Prepared, cert: &[u8], key: &[u8],
+        additional: bool, log_dir: &std::path::Path) -> (u64, [u16; 2], Vec<u8>) {
+        let mut inner = state.inner.lock().unwrap();
+        let identity = crate::next_client_identity(&inner, additional).unwrap().unwrap();
+        let id = identity.id;
+        let lan = prepared(crate::client_settings(&inner, additional).unwrap(), "192.168.1.20", cert, key);
+        let root = lan.ca_certificate.clone();
+        let fingerprint = lan.fingerprint.clone();
+        let client = crate::start_client_with_identity(game, lan, identity, log_dir, state.remote.clone(), "server.test:47485".into()).unwrap();
+        let ports = [client.server.port(), url::Url::parse(&client.guide.url()).unwrap().port().unwrap()];
+        inner.last_client_id = id;
+        inner.clients.push(client);
+        inner.lan_address = Some("192.168.1.20".into());
+        inner.lan_fingerprint = Some(fingerprint);
+        (id, ports, root)
+    }
+
+    fn assert_ports_stopped(ports: &[u16]) {
+        for &port in ports {
+            assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err(), "port {port} still accepts connections");
+            // A refused connect plus a successful rebind verifies the listener,
+            // rather than only a UI entry, was removed and its port was released.
+            assert!(TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).is_ok(), "port {port} was not released");
+        }
+    }
+
+    fn assert_clients_serve(state: &crate::LauncherState, root: &[u8], ids: &[u64]) {
+        let inner = state.inner.lock().unwrap();
+        assert_eq!(inner.clients.iter().map(|client| client.id).collect::<Vec<_>>(), ids);
+        for client in &inner.clients {
+            assert!(shared_resource(client, root).ends_with(b"shared resources"));
+            assert!(guide_page(&client.guide.url()).contains(&client.server.url()));
+        }
+    }
+
     #[test]
-    fn clients_have_independent_https_origins_and_guides_and_stop_together() {
+    fn individual_stop_releases_both_listeners_preserves_friends_and_shutdown_stops_everything() {
         let (temp, game) = game_fixture();
         let (cert, key) = ca_fixture();
         let state = crate::LauncherState::default();
-        let mut inner = crate::Inner::default();
-        let mut ports = vec![];
-        for index in 1..=2 {
-            let lan = prepared(additional_settings().unwrap(), "192.168.1.20", &cert, &key);
-            let root = lan.ca_certificate.clone();
-            inner.lan_fingerprint = Some(lan.fingerprint.clone());
-            let client = crate::start_client(&game, lan, index, temp.path(),
-                Arc::new(RwLock::new(serde_json::Value::Null)), "server.test:47485".into()).unwrap();
-            assert!(shared_resource(&client, &root).ends_with(b"shared resources"));
-            assert!(guide_page(&client.guide.url()).contains(&client.server.url()));
-            ports.push(client.server.port());
-            ports.push(url::Url::parse(&client.guide.url()).unwrap().port().unwrap());
-            inner.clients.push(client);
+        state.inner.lock().unwrap().lan_settings = additional_settings().unwrap();
+        let (primary, primary_ports, root) = add_test_client(&state, &game, &cert, &key, false, temp.path());
+        let (friend_one, friend_one_ports, _) = add_test_client(&state, &game, &cert, &key, true, temp.path());
+        let (friend_two, friend_two_ports, _) = add_test_client(&state, &game, &cert, &key, true, temp.path());
+        assert_eq!([primary, friend_one, friend_two], [1, 2, 3]);
+        assert_clients_serve(&state, &root, &[1, 2, 3]);
+        {
+            let guard = crate::acquire(&state).unwrap();
+            assert!(crate::stop_client(&state, friend_one).is_err(), "busy operations must not close a client");
+            drop(guard);
         }
-        inner.lan_address = Some("192.168.1.20".into());
-        let snapshot = crate::snapshot(&inner, &state);
-        assert_eq!(snapshot.running_urls.len(), 2);
-        assert_eq!(snapshot.invitation_urls.len(), 2);
-        assert_ne!(snapshot.running_urls[0], snapshot.running_urls[1]);
-        assert_ne!(snapshot.invitation_urls[0], snapshot.invitation_urls[1]);
-        assert!(snapshot.running_urls.iter().all(|url| url.starts_with("https://192.168.1.20:")));
-        assert_eq!(snapshot.lan.running_url.as_ref(), snapshot.running_urls.first());
-        assert_eq!(snapshot.lan.guide_url.as_ref(), snapshot.invitation_urls.first());
-        crate::stop_clients(&mut inner);
-        assert!(crate::snapshot(&inner, &state).running_urls.is_empty());
-        assert!(crate::snapshot(&inner, &state).invitation_urls.is_empty());
+        assert_clients_serve(&state, &root, &[1, 2, 3]);
+        // Forced updates must still allow stopping resources, just like stop_game.
+        state.update_required.store(true, std::sync::atomic::Ordering::Release);
+        let status = crate::stop_client(&state, friend_one).unwrap();
+        assert!(status.update_required);
+        assert_eq!(status.clients.iter().map(|client| (client.id, client.number, client.primary)).collect::<Vec<_>>(),
+            [(1, 1, true), (3, 3, false)]);
+        assert_ports_stopped(&friend_one_ports);
+        assert_clients_serve(&state, &root, &[1, 3]);
+        {
+            let inner = state.inner.lock().unwrap();
+            assert!(crate::find_client(&inner, Some(friend_one), Some(0)).is_err(), "a removed id must not fall back to another client");
+            assert_eq!(crate::find_client(&inner, Some(friend_two), Some(0)).unwrap().id, friend_two);
+            assert_eq!(crate::find_client(&inner, None, Some(1)).unwrap().id, friend_two);
+            assert_eq!(crate::find_client(&inner, None, None).unwrap().id, primary);
+        }
+        let status = crate::stop_client(&state, primary).unwrap();
+        assert_ports_stopped(&primary_ports);
+        assert_clients_serve(&state, &root, &[3]);
+        assert!(status.lan.running_url.is_none());
+        assert!(status.lan.guide_url.is_none());
+        assert_eq!(status.lan.host_address.as_deref(), Some("192.168.1.20"));
+        assert_eq!((status.clients[0].id, status.clients[0].number, status.clients[0].primary), (3, 3, false));
+        assert!(crate::find_client(&state.inner.lock().unwrap(), None, None).is_err());
+        let (reopened, reopened_ports, _) = add_test_client(&state, &game, &cert, &key, false, temp.path());
+        assert_eq!(reopened, 4);
+        assert_eq!(reopened_ports, primary_ports, "the primary reuses its saved origin ports");
+        assert_clients_serve(&state, &root, &[3, 4]);
+        {
+            let inner = state.inner.lock().unwrap();
+            assert!(crate::next_client_identity(&inner, false).unwrap().is_none());
+            let status = crate::snapshot(&inner, &state);
+            assert_eq!(status.clients.iter().map(|client| (client.id, client.number, client.primary)).collect::<Vec<_>>(),
+                [(3, 3, false), (4, 4, true)]);
+            assert_eq!(status.lan.running_url.as_ref(), Some(&status.clients[1].running_url));
+            assert_eq!(status.lan.guide_url.as_ref(), Some(&status.clients[1].invitation_url));
+            assert_eq!(status.running_urls, status.clients.iter().map(|client| client.running_url.clone()).collect::<Vec<_>>());
+            assert_eq!(status.invitation_urls, status.clients.iter().map(|client| client.invitation_url.clone()).collect::<Vec<_>>());
+        }
+        crate::stop_client(&state, friend_two).unwrap();
+        assert_ports_stopped(&friend_two_ports);
+        assert_clients_serve(&state, &root, &[4]);
+        let status = crate::stop_client(&state, reopened).unwrap();
+        assert_ports_stopped(&reopened_ports);
+        assert!(status.clients.is_empty());
+        assert!(status.lan.host_address.is_none());
+        assert!(crate::stop_client(&state, reopened).is_err());
+        assert_eq!(state.inner.lock().unwrap().last_client_id, 4);
+        let (next_primary, next_primary_ports, _) = add_test_client(&state, &game, &cert, &key, false, temp.path());
+        let (next_friend, next_friend_ports, _) = add_test_client(&state, &game, &cert, &key, true, temp.path());
+        assert_eq!([next_primary, next_friend], [5, 6], "full stop must not reuse client ids");
+        assert_clients_serve(&state, &root, &[5, 6]);
+        // This is the same cleanup entry used for CloseRequested, Destroyed and Exit.
+        let busy_guard = crate::acquire(&state).unwrap();
+        crate::shutdown_clients(&state);
+        drop(busy_guard);
+        assert!(state.shutting_down.load(std::sync::atomic::Ordering::Acquire));
+        assert_ports_stopped(&next_primary_ports);
+        assert_ports_stopped(&next_friend_ports);
+        let inner = state.inner.lock().unwrap();
+        assert!(crate::snapshot(&inner, &state).clients.is_empty());
         assert!(inner.lan_address.is_none());
-        for port in ports { assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err(), "port {port}"); }
+        assert!(inner.lan_fingerprint.is_none());
+        assert!(crate::ensure_current_launcher(&state).unwrap_err().contains("正在关闭"));
         assert_eq!(fs::read(game.resources.data_root.join("sample.bin")).unwrap(), b"shared resources");
     }
 

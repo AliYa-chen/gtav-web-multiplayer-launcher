@@ -4,6 +4,19 @@ export function displayDirectory(value) { return value || '尚未选择游戏资
 export function canLaunch({ selected, busy, desktop }) { return Boolean(selected && !busy && desktop); }
 export function progressValue(phase) { return phases[phase]?.[1] || 0; }
 
+export function clientCapacity({ availableHeight, cardHeight, rowGap = 0, columns = 2 }) {
+  if (!Number.isFinite(availableHeight) || !Number.isFinite(cardHeight) || cardHeight <= 0) return null;
+  const count = Number.isInteger(columns) && columns > 0 ? columns : 2;
+  const gap = Number.isFinite(rowGap) && rowGap >= 0 ? rowGap : 0;
+  return Math.max(1, Math.floor((Math.max(0, availableHeight) + gap) / (cardHeight + gap))) * count;
+}
+export function clientPage(clients, capacity, page = 0, anchorId = null) {
+  const size = Number.isInteger(capacity) && capacity > 0 ? capacity : 2;
+  const anchor = anchorId === null ? -1 : clients.findIndex((client) => String(client.id) === String(anchorId));
+  const current = Number.isInteger(page) && page >= 0 ? page : 0;
+  return anchor >= 0 ? Math.floor(anchor / size) : Math.min(current, Math.max(0, Math.ceil(clients.length / size) - 1));
+}
+
 export function paginateText(value, { lines = 12, columns = 34 } = {}) {
   const text = String(value ?? '');
   if (!text) return [];
@@ -93,7 +106,7 @@ export function launcherActions({ selected, busy, desktop, urls, lan, updateRequ
   return {
     choose: Boolean(desktop && !busy && !urls.length && !lan?.running_url && !updateRequired),
     launch: !updateRequired && canLaunch({ selected, busy, desktop }),
-    additional: Boolean(desktop && !busy && urls.length && !updateRequired),
+    additional: Boolean(desktop && !busy && urls.length && urls.length < 8 && !updateRequired),
     stop: Boolean(desktop && !busy && urls.length),
     refresh: Boolean(desktop && !remoteBusy),
   };

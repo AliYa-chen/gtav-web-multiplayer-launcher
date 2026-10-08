@@ -1,6 +1,6 @@
 [package]
 name = "gta5data-launcher"
-version = "0.2.8"
+version = "0.2.9"
 description = "只读挂载玩家资源的 GTA V 浏览器启动器"
 edition = "2021"
 rust-version = "1.85"
