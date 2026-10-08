@@ -15,7 +15,7 @@ jobs:
             artifact: GTA5Data-Launcher-Windows-x64
             binary: desktop/src-tauri/target/release/gta5data-launcher.exe
           - os: macos-14
-            artifact: GTA5Data-Launcher-macOS-arm64
+            artifact: GTA5Data-Launcher-macOS-arm64-Development
             binary: desktop/src-tauri/target/release/bundle/macos/GTA5Data Launcher.app
     runs-on: ${{ matrix.os }}
     steps:
@@ -44,7 +44,10 @@ jobs:
         run: npm run tauri -- build --bundles app
         working-directory: desktop
       - if: runner.os == 'macOS'
-        run: ditto -c -k --sequesterRsrc --keepParent '${{ matrix.binary }}' desktop/GTA5Data-Launcher-macOS-arm64.zip
+        name: 验证开发构建签名（未公证，不作为正式发行）
+        run: codesign --verify --deep --strict --verbose=2 '${{ matrix.binary }}'
+      - if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent '${{ matrix.binary }}' desktop/GTA5Data-Launcher-macOS-arm64-Development.zip
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows'
         with:
@@ -55,5 +58,5 @@ jobs:
         if: runner.os == 'macOS'
         with:
           name: ${{ matrix.artifact }}
-          path: desktop/GTA5Data-Launcher-macOS-arm64.zip
+          path: desktop/GTA5Data-Launcher-macOS-arm64-Development.zip
           if-no-files-found: error

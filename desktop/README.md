@@ -97,4 +97,37 @@ cargo test --manifest-path src-tauri/Cargo.toml
 gta5data-launcher --verify-resources "玩家资源包目录" "游戏目录之外的测试缓存"
 ```
 
-实际界面选择、浏览器启动、游戏加载及多人体验仍需要用户验证。当前构建未签名；正式公开分发应补 Windows 代码签名及 macOS 签名和公证。
+实际界面选择、浏览器启动、游戏加载及多人体验仍需要用户验证。
+
+## macOS 签名与公开分发
+
+网站 HTTPS 的 `fullchain.pem`、`privkey.key` 不能用于 macOS 代码签名。公开分发 App 需要 Apple Developer Program 签发的 **Developer ID Application** 证书及对应私钥，还需要向 Apple 提交公证；普通 Apple Development 开发证书只能用于开发测试。当前尚无付费开发者账户和 Developer ID 证书，因此当前 macOS 产物只能标记为 **Development 测试版**，不能保证其他电脑的 Gatekeeper 接受，也不能宣称已完成正式签名和公证。
+
+准备好正式证书后，在维护者自己的 macOS 钥匙串中安装证书和私钥，并通过 `xcrun notarytool store-credentials` 的交互提示保存公证凭据为钥匙串配置。不要把证书私钥、账户密码或 App 专用密码写入仓库、脚本、命令行参数或构建日志。发布脚本只接收证书身份名称和已保存的配置名称：
+
+```sh
+cd desktop
+bash sign-macos.sh \
+  --app 'src-tauri/target/release/bundle/macos/GTA5Data Launcher.app' \
+  --identity 'Developer ID Application: 您的名称 (TEAMID)' \
+  --keychain-profile 'gta5data-notary'
+```
+
+脚本先复制 App 到临时目录，逐层签名内嵌代码与 App，开启 Hardened Runtime 并使用可信时间戳；随后执行严格签名验证、公证提交并等待 `Accepted`、附加及验证公证票据、Gatekeeper 验收。全部通过后才生成 `releases/GTA5Data-Launcher-macos-notarized.zip`。输入 App 不会被改写，任何验收失败都不会生成正式 ZIP；已有输出不会被覆盖。
+
+可加 `--dry-run` 只检查参数并查看流程；它不签名、不连接公证服务，也不证明具备发布资格。没有正式证书时，开发测试必须显式使用另一条流程：
+
+```sh
+bash sign-macos.sh --development \
+  --app 'src-tauri/target/release/bundle/macos/GTA5Data Launcher.app' \
+  --identity 'Apple Development: 您的名称 (TEAMID)'
+
+# 自动构建环境没有任何证书时，仍可做临时的完整性签封。
+bash sign-macos.sh --development \
+  --app 'src-tauri/target/release/bundle/macos/GTA5Data Launcher.app' \
+  --identity -
+```
+
+开发流程只输出以 `-development.zip` 结尾的测试包，验证包内签名完整性，不执行公证和公开分发验收。Ad hoc 签封没有开发者身份背书；Apple Development 签名也不能替代 Developer ID 和公证。不要要求玩家全局关闭 Gatekeeper 或移除下载隔离标记来补足发布流程。Windows Authenticode 是独立的代码签名体系，不复用 Apple 或 HTTPS 证书。
+
+参考核对：Clash Verge Rev 的 [v2.5.7 发布流程](https://github.com/clash-verge-rev/clash-verge-rev/blob/ea509b82363a40c3c32e951d7ce9d66d66da411f/.github/workflows/release.yml#L254-L264) 通过 Secrets 提供 Apple 证书、签名身份与公证凭据。用户提供的 2.5.7 ARM64 DMG 内 App 实测为 `Developer ID Application: won fen (JPH3Z7PPBB)`，有 stapled 公证票据，Gatekeeper 返回 `accepted / Notarized Developer ID`。外层 DMG 未附票据不代表内层 App 未公证。它的开源源码不包含这些私有证书凭据；Tauri 更新包签名密钥也不等于 Apple 代码签名证书。本核对没有运行 Clash Verge，也没有复制其私钥或证书到本项目。

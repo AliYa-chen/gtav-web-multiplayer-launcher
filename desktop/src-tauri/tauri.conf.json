@@ -16,7 +16,7 @@
   },
   "bundle": { "active": true, "targets": "all", "category": "Game", "icon": ["icons/icon.png", "icons/icon.icns", "icons/icon.ico"],
     "shortDescription": "选择自己的游戏资源，一键进入 GTA V 公共战局",
-    "macOS": { "minimumSystemVersion": "12.0" },
+    "macOS": { "minimumSystemVersion": "12.0", "signingIdentity": "-" },
     "windows": { "webviewInstallMode": { "type": "downloadBootstrapper", "silent": true } }
   }
 }
