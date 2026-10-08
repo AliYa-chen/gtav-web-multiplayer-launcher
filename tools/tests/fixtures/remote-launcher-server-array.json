@@ -1,0 +1,38 @@
+{
+    "schema_version": 1,
+    "oltitle": "https://gtav.2t.hk",
+    "website": "https://gtav.2t.hk",
+    "server": [
+        {
+            "id": "main",
+            "name": "公共战局",
+            "role": "主线路",
+            "address": "183.66.27.21:47485"
+        },
+        {
+            "id": "experimental",
+            "name": "实验战局",
+            "role": "实验线路",
+            "address": "183.66.27.21:47486"
+        }
+    ],
+    "announcements": [
+        {
+            "title": "欢迎来到 GTA V 公共战局",
+            "body": "使用启动器选择自己的游戏资源目录，进入游戏后按 O 加入公共战局。\n所有玩家需连接同一条线路；不同端口是独立战局。",
+            "date": "2026-10-08",
+            "url": "https://gtav.2t.hk"
+        },
+        {
+            "title": "实验功能说明",
+            "body": "共同世界同步仍在测试中，警力派遣目前限定公共出生区附近。\n若遇到同步异常，可记录双方操作与发生时间后反馈。",
+            "date": "2026-10-08",
+            "url": "https://gtav.2t.hk"
+        }
+    ],
+    "update": {
+        "latest_version": "0.2.1",
+        "release_notes": "远程配置入口统一为 https://oss.2t.hk/gtav/。\nmacOS Apple Silicon 测试包已构建；使用开发签名，尚未公证。",
+        "downloads": {}
+    }
+}

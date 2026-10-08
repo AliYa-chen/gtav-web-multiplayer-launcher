@@ -43,7 +43,7 @@ self.createNativeSessionUI = function ({ ex, memory }) {
       && !/[<>~&"'\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/.test(candidate)
       && (!/^[a-z][a-z\d+.-]*:/i.test(candidate) || /^https:\/\/[^\s]+$/i.test(candidate))
       && !/^https:\/\/[^/]*@/i.test(candidate)
-      ? candidate : 'https://gtav.2t.hk';
+      ? candidate : '-';
     return {
       titleMethod: 'SET_HEADER_TITLE', detailsMethod: 'SET_HEADING_DETAILS',
       title: 'GTA V · 公共在線戰局', name: cleanName(summary.name),

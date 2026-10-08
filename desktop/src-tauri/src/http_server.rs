@@ -39,8 +39,8 @@ impl Default for ServerConfig {
             online_ready: false,
             preferred_port: None,
             font_overrides: HashMap::new(),
-            remote_configuration: Arc::new(RwLock::new(json!({ "config": { "oltitle": "https://gtav.2t.hk" },
-                "source": "default", "stale": true }))),
+            remote_configuration: Arc::new(RwLock::new(json!({ "config": {},
+                "source": "unavailable", "stale": true }))),
         }
     }
 }
@@ -246,7 +246,7 @@ fn handle(request: Request, state: &State) {
     }
     if path == "/api/remote-config" {
         let body = state.config.remote_configuration.read().map(|value| value.clone())
-            .unwrap_or_else(|_| json!({ "config": { "oltitle": "https://gtav.2t.hk" }, "source": "default", "stale": true }));
+            .unwrap_or_else(|_| json!({ "config": {}, "source": "unavailable", "stale": true }));
         return reply(request, 200, serde_json::to_vec(&body).unwrap(), "application/json; charset=utf-8", &[]);
     }
     let client_path = if path == "/" || path == "/play" { "/index.html" } else { &path };
@@ -507,7 +507,8 @@ mod tests {
         let body = request(&server, "GET", "/api/local-config", "", b"").1;
         let config: Value = serde_json::from_slice(&body).unwrap(); assert_eq!(config["debug"], false); assert_eq!(config["map"], "gta5");
         let body = request(&server, "GET", "/api/remote-config", "", b"").1;
-        let remote: Value = serde_json::from_slice(&body).unwrap(); assert_eq!(remote["config"]["oltitle"], "https://gtav.2t.hk");
+        let remote: Value = serde_json::from_slice(&body).unwrap(); assert!(remote["config"]["oltitle"].is_null());
+        assert_eq!(remote["source"], "unavailable");
         let port = server.port(); drop(server);
         assert!(TcpStream::connect(("127.0.0.1", port)).is_err(), "dropping launcher must stop its HTTP listener");
     }

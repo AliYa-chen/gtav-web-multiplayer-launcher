@@ -24,7 +24,7 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
   let lastReport = '';
   let networkMessage = '', gameMessage = '';
   let lastCombatNotice = '', lastCombatNoticeAt = -Infinity;
-  let remoteConfig = { oltitle: 'https://gtav.2t.hk', source: 'default', stale: true };
+  let remoteConfig = { oltitle: '-', source: 'unavailable', stale: true };
   const stopRemoteConfiguration = watchOnlineConfiguration?.((value) => { remoteConfig = value; schedule(); });
   function mergeCombat(value) {
     if (!value || typeof value.id !== 'string') return;

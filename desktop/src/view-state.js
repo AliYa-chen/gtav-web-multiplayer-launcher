@@ -69,20 +69,24 @@ export function isNewerVersion(latest, current) {
   return false;
 }
 export function remotePresentation(snapshot, version, platform = '') {
-  const config = snapshot?.config || {};
+  const loaded = snapshot?.source === 'remote' && snapshot?.stale !== true;
+  const config = loaded ? snapshot.config || {} : {};
   const latest = typeof config.latest_version === 'string' ? config.latest_version : '';
   const update = isNewerVersion(latest, version);
   const available = Boolean(platform && config.downloads?.[platform]?.url && config.downloads?.[platform]?.sha256);
   return {
-    title: typeof config.oltitle === 'string' ? config.oltitle : '',
+    loaded,
+    title: typeof config.oltitle === 'string' && config.oltitle ? config.oltitle : '-',
     websiteAvailable: Boolean(config.website || /^https:\/\//i.test(config.oltitle || '')),
     announcements: Array.isArray(config.announcements) ? config.announcements.filter((item) => item && typeof item === 'object').map((item) => ({
       title: String(item.title || '战局公告'), body: String(item.body || ''), date: String(item.date || ''),
     })) : [],
+    servers: (Array.isArray(config.servers) ? config.servers : Array.isArray(config.server) ? config.server : config.server ? [config.server] : [])
+      .filter((item) => item && typeof item.address === 'string').map((item) => ({ address: item.address, name: String(item.name || '公共战局'), role: String(item.role || '') })),
     releaseNotes: typeof config.release_notes === 'string' ? config.release_notes : '',
     latest, update, downloadAvailable: update && available,
-    versionText: !latest ? '暂无版本信息' : update ? `新版本 ${latest}` : `已安装 ${version}`,
-    sourceText: snapshot?.source === 'cache' ? '离线缓存' : snapshot?.source === 'remote' ? '已更新' : '内置配置',
+    versionText: !latest ? '-' : update ? `新版本 ${latest}` : `已安装 ${version}`,
+    sourceText: loaded ? '已更新' : '-',
   };
 }
 export function launcherActions({ selected, busy, desktop, urls }, remoteBusy = false) {

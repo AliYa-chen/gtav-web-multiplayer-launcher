@@ -156,12 +156,12 @@ test('其他原生面板及无效pane返回值不被覆盖，切换至线上页�
   h.setPanelId(42); h.setPanelPointer(999999n); assert.equal(h.ui.tick(6, summary()).content_applied, false);
 });
 
-test('不合法远程标题使用默认地址，原生内容Begin未就绪不Add/End且header仍可用', () => {
+test('不合法远程标题显示横线，原生内容Begin未就绪不Add/End且header仍可用', () => {
   const h = harness(); h.setPanel('MENU_UNIQUE_ID_MISSION_CREATOR');
   for (const [now, oltitle] of [[0, 'javascript:alert(1)'], [750, 'https://x.test/~r~'],
     [1500, 'https://x.test/<b>'], [2250, 'https://x.test/\u202e']]) {
     h.ui.tick(now, summary({ remote_config: { oltitle } }));
-    assert.match(h.methods.at(-1).parameters[4], /^線上模式伺服器狀態：https:\/\/gtav\.2t\.hk\n/);
+    assert.match(h.methods.at(-1).parameters[4], /^線上模式伺服器狀態：-\n/);
   }
   const before = h.methods.length;
   h.setContentBegin(false); const result = h.ui.tick(3000, summary());
@@ -174,5 +174,5 @@ test('不合法远程标题使用默认地址，原生内容Begin未就绪不Add
 test('浏览器共享内存中的真实pane名字先复制再解码，正文保持可用', () => {
   const h = harness(true); h.setPanel('MENU_UNIQUE_ID_MISSION_CREATOR');
   assert.equal(h.ui.tick(0, summary()).content_applied, true);
-  assert.equal(h.methods.at(-1).parameters[4].split('\n')[0], '線上模式伺服器狀態：https://gtav.2t.hk');
+  assert.equal(h.methods.at(-1).parameters[4].split('\n')[0], '線上模式伺服器狀態：-');
 });

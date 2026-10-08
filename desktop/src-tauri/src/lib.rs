@@ -20,10 +20,8 @@ struct LauncherState { inner: Mutex<Inner>, busy: Arc<AtomicBool>, remote_busy: 
 impl Default for LauncherState {
     fn default() -> Self {
         Self { inner: Mutex::new(Inner::default()), busy: Arc::new(AtomicBool::new(false)),
-            remote_busy: Arc::new(AtomicBool::new(false)), remote: Arc::new(RwLock::new(serde_json::json!({
-                "config": { "oltitle": "https://gtav.2t.hk", "website": "https://gtav.2t.hk", "server": null,
-                    "announcements": [], "latest_version": null, "downloads": {}, "release_notes": "" },
-                "source": "default", "stale": true, "fetched_at": null, "checked_at": null, "error": null }))) }
+            remote_busy: Arc::new(AtomicBool::new(false)), remote: Arc::new(RwLock::new(
+                serde_json::to_value(remote_config::ConfigSnapshot::default()).unwrap_or_default())) }
     }
 }
 struct BusyGuard(Arc<AtomicBool>);
@@ -155,8 +153,7 @@ async fn remote_configuration(app: tauri::AppHandle, state: State<'_, LauncherSt
         return state.remote.read().map(|value| value.clone()).map_err(|e| e.to_string());
     }
     let _guard = BusyGuard(state.remote_busy.clone());
-    let path = app.path().app_cache_dir().map_err(|e| e.to_string())?.join("remote-configuration.json");
-    let snapshot = tauri::async_runtime::spawn_blocking(move || remote_config::load(&path)).await.map_err(|e| e.to_string())?;
+    let snapshot = tauri::async_runtime::spawn_blocking(remote_config::load).await.map_err(|e| e.to_string())?;
     let value = serde_json::to_value(snapshot).map_err(|e| e.to_string())?;
     *state.remote.write().map_err(|e| e.to_string())? = value.clone();
     let _ = app.emit("launcher-remote-config", &value);
@@ -165,6 +162,9 @@ async fn remote_configuration(app: tauri::AppHandle, state: State<'_, LauncherSt
 
 fn configured_remote(state: &LauncherState) -> Result<remote_config::RemoteConfig, String> {
     let value = state.remote.read().map_err(|e| e.to_string())?;
+    if value.get("source").and_then(|source| source.as_str()) != Some("remote") {
+        return Err("远程配置尚未加载，请检查更新后重试。".into());
+    }
     remote_config::parse_config(&serde_json::to_vec(value.get("config").ok_or("远程配置尚未加载")?).map_err(|e| e.to_string())?)
 }
 
@@ -181,7 +181,8 @@ fn open_update_download(state: State<'_, LauncherState>) -> Result<(), String> {
 #[tauri::command]
 fn open_project_website(state: State<'_, LauncherState>) -> Result<(), String> {
     let config = configured_remote(&state)?;
-    let url = config.website.as_deref().unwrap_or("https://gtav.2t.hk");
+    let url = config.website.as_deref().or_else(|| (!config.oltitle.is_empty()).then_some(config.oltitle.as_str()))
+        .ok_or("远程配置尚未提供状态页面地址。")?;
     remote_config::https_url(url)?;
     open::that(url).map_err(|e| e.to_string())
 }
@@ -197,12 +198,11 @@ pub fn run() {
             inner.selected = settings.selected_directory; inner.preferred_port = settings.preferred_port;
             drop(inner);
             let remote = state.remote.clone(); let busy = state.remote_busy.clone();
-            let cache = app.path().app_cache_dir()?.join("remote-configuration.json");
             let handle = app.handle().clone();
             busy.store(true, Ordering::Release);
             tauri::async_runtime::spawn_blocking(move || {
                 let _guard = BusyGuard(busy);
-                let value = serde_json::to_value(remote_config::load(&cache)).unwrap_or_default();
+                let value = serde_json::to_value(remote_config::load()).unwrap_or_default();
                 if let Ok(mut snapshot) = remote.write() { *snapshot = value.clone(); }
                 let _ = handle.emit("launcher-remote-config", value);
             });
@@ -223,7 +223,7 @@ pub fn verify_resources(selected: &Path, cache: &Path) -> Result<serde_json::Val
     let info = resources::inspect_game_resources(selected)?;
     engine::prepare(&info.original_wasm, &cache.join("runtime"))?;
     let fonts = fonts::prepare(&info.root, &info.original_wasm, &cache.join("fonts"))?;
-    let remote = remote_config::load(&cache.join("remote-configuration.json"));
+    let remote = remote_config::load();
     let remote_value = serde_json::to_value(&remote).map_err(|e| e.to_string())?;
     let server = http_server::start(info.clone(), cache.join("runtime"), embedded_client(), http_server::ServerConfig {
         online_ready: true, font_overrides: fonts.clone(), log_file: cache.join("browser.log"),
@@ -242,5 +242,8 @@ pub fn verify_resources(selected: &Path, cache: &Path) -> Result<serde_json::Val
     Ok(serde_json::json!({ "resources": info, "embedded_client": true, "fonts_cached": fonts.len(),
         "offline_engine": cache.join("runtime/offline/game.wasm"), "online_engine": cache.join("runtime/online/game.wasm"),
         "http_started": true, "python_required": false, "game_resources_changed": false,
-        "remote_source": remote.source, "oltitle": remote.config.oltitle }))
+        "remote_source": remote.source, "oltitle": remote.config.oltitle,
+        "remote_error": remote.error, "remote_servers": remote.config.servers,
+        "remote_announcements": remote.config.announcements.len(),
+        "remote_latest_version": remote.config.latest_version }))
 }

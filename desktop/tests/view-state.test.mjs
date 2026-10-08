@@ -55,23 +55,40 @@ test('仅 oltitle 的现有配置不伪造更新或公告，预览缺失配置�
   const remote = remotePresentation({ config: { oltitle: 'https://gtav.2t.hk' }, source: 'remote' }, '0.1.2', 'macos_arm64');
   assert.equal(remote.title, 'https://gtav.2t.hk');
   assert.equal(remote.websiteAvailable, true);
-  assert.equal(remote.versionText, '暂无版本信息');
+  assert.equal(remote.versionText, '-');
   assert.equal(remote.downloadAvailable, false);
   assert.deepEqual(remote.announcements, []);
-  assert.equal(remotePresentation(null, '0.1.2').versionText, '暂无版本信息');
+  assert.equal(remotePresentation(null, '0.1.2').versionText, '-');
 });
-test('更新仅向本机平台提供可用下载，断网仍呈现缓存公告，内容作为文字转义', () => {
+test('更新仅向本机平台提供可用下载，内容作为文字转义', () => {
   const config = { latest_version: '0.2.0', announcements: [{ title: '<img onerror="bad">', body: '<script>bad</script>', date: '2026-10-08' }], downloads: { windows_x64: { url: 'https://oss.2t.hk/new.exe', sha256: 'a'.repeat(64) } } };
-  const mac = remotePresentation({ config, source: 'cache', stale: true }, '0.1.2', 'macos_arm64');
+  const mac = remotePresentation({ config, source: 'remote', stale: false }, '0.1.2', 'macos_arm64');
   assert.equal(mac.versionText, '新版本 0.2.0');
   assert.equal(mac.downloadAvailable, false);
-  assert.equal(mac.sourceText, '离线缓存');
+  assert.equal(mac.sourceText, '已更新');
   assert.equal(escapeHtml(mac.announcements[0].body), '&lt;script&gt;bad&lt;/script&gt;');
   const windows = remotePresentation({ config, source: 'remote' }, '0.1.2', 'windows_x64');
   assert.equal(windows.downloadAvailable, true);
-  assert.equal(remotePresentation({ config }, '0.2.0', 'windows_x64').downloadAvailable, false);
+  assert.equal(remotePresentation({ config, source: 'remote' }, '0.2.0', 'windows_x64').downloadAvailable, false);
   delete config.downloads.windows_x64.sha256;
-  assert.equal(remotePresentation({ config }, '0.1.2', 'windows_x64').downloadAvailable, false);
+  assert.equal(remotePresentation({ config, source: 'remote' }, '0.1.2', 'windows_x64').downloadAvailable, false);
+});
+test('加载失败或旧缓存快照只显示横线，不显示历史公告或下载', () => {
+  const config = { oltitle: 'https://gtav.2t.hk', website: 'https://gtav.2t.hk', latest_version: '99.0.0',
+    announcements: [{ title: '旧公告', body: '旧正文' }], server: { address: '183.66.27.21:47485' },
+    release_notes: '旧说明', downloads: { macos_arm64: { url: 'https://example.com/mac.zip', sha256: 'a'.repeat(64) } } };
+  for (const snapshot of [null, { config, source: 'cache' }, { config, source: 'unavailable' }, { config, source: 'remote', stale: true }]) {
+    const view = remotePresentation(snapshot, '0.2.3', 'macos_arm64');
+    assert.equal(view.title, '-'); assert.equal(view.versionText, '-'); assert.equal(view.sourceText, '-');
+    assert.equal(view.websiteAvailable, false); assert.equal(view.downloadAvailable, false);
+    assert.deepEqual(view.announcements, []); assert.deepEqual(view.servers, []); assert.equal(view.releaseNotes, '');
+  }
+});
+test('远程服务器数组保留两条线路，不把它们当成无效对象', () => {
+  const server = [{ id: 'main', name: '公共战局', role: '主线路', address: '183.66.27.21:47485' },
+    { id: 'experimental', name: '实验战局', role: '实验线路', address: '183.66.27.21:47486' }];
+  assert.deepEqual(remotePresentation({ config: { server }, source: 'remote' }, '0.2.3').servers.map((item) => item.address),
+    ['183.66.27.21:47485', '183.66.27.21:47486']);
 });
 test('版本比较区分数字、正式版本与预发行版本，无效版本不会启动下载', () => {
   assert.equal(isNewerVersion('0.10.0', '0.9.1'), true);

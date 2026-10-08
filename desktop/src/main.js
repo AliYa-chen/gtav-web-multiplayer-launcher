@@ -31,7 +31,12 @@ function updateStatus(value) {
   state.urls = value.running_urls || [];
   state.version = value.version || state.version;
   state.platform = value.platform || state.platform;
-  if (value.remote_configuration) state.remote = value.remote_configuration;
+  if (value.remote_configuration) applyRemote(value.remote_configuration);
+}
+function applyRemote(snapshot) {
+  state.remote = snapshot;
+  state.remoteError = typeof snapshot?.error === 'string' ? snapshot.error : '';
+  if (snapshot?.source !== 'remote' || snapshot?.stale === true) state.reading = null;
 }
 function render() {
   const running = state.urls.length > 0, ready = Boolean(state.resources);
@@ -62,12 +67,12 @@ function render() {
           ${running ? `<button id="additional" class="secondary" ${actions.additional ? '' : 'disabled'}>另开一个客户端</button><button id="stop" class="text-button" ${actions.stop ? '' : 'disabled'}>停止游戏服务</button>` : `<button id="verify" class="text-button" ${actions.launch ? '' : 'disabled'}>检查资源</button>`}</div></div>
       ${running ? `<div class="addresses">${visibleClients.map((url, offset) => `<button data-open="${state.clientPage * 4 + offset}" ${state.busy ? 'disabled' : ''}><span class="status-dot live"></span>客户端 ${state.clientPage * 4 + offset + 1}<code>${html(url)}</code> ↗</button>`).join('')}${state.urls.length > 4 ? `<button id="clients-next" class="client-page" aria-label="显示下一组客户端">${state.clientPage + 1} / ${Math.ceil(state.urls.length / 4)} ${icons.arrow}</button>` : ''}</div>` : ''}</section></div>
       <aside class="community-column"><section class="glass announcement-card"><div class="card-heading"><h2>${icons.bell} 战局公告</h2><span class="config-source">${html(remote.sourceText)}</span></div>
-        ${announcement ? `<div class="announcements"><article><div class="announcement-heading"><h3 title="${html(announcement.title)}">${html(announcement.title)}</h3>${announcement.date ? `<time>${html(announcement.date)}</time>` : ''}</div><p>${html(announcement.body)}</p></article><div class="announcement-actions"><button class="text-button" data-read="announcement">查看详情 ↗</button>${remote.announcements.length > 1 ? `<div class="pager"><button id="announcement-prev" aria-label="上一条公告" ${state.announcementIndex ? '' : 'disabled'}>‹</button><span>${state.announcementIndex + 1} / ${remote.announcements.length}</span><button id="announcement-next" aria-label="下一条公告" ${state.announcementIndex < remote.announcements.length - 1 ? '' : 'disabled'}>›</button></div>` : ''}</div></div>` : '<p class="empty-note">暂无公告。准备好，就出发吧。</p>'}
-        ${remote.title ? `<div class="server-info"><span>在线模式服务器状态</span><strong>${html(remote.title)}</strong>${remote.websiteAvailable && state.desktop ? '<button id="website" class="text-button">查看服务器状态 ↗</button>' : ''}</div>` : ''}
+        ${announcement ? `<div class="announcements"><article><div class="announcement-heading"><h3 title="${html(announcement.title)}">${html(announcement.title)}</h3>${announcement.date ? `<time>${html(announcement.date)}</time>` : ''}</div><p>${html(announcement.body)}</p></article><div class="announcement-actions"><button class="text-button" data-read="announcement">查看详情 ↗</button>${remote.announcements.length > 1 ? `<div class="pager"><button id="announcement-prev" aria-label="上一条公告" ${state.announcementIndex ? '' : 'disabled'}>‹</button><span>${state.announcementIndex + 1} / ${remote.announcements.length}</span><button id="announcement-next" aria-label="下一条公告" ${state.announcementIndex < remote.announcements.length - 1 ? '' : 'disabled'}>›</button></div>` : ''}</div></div>` : '<p class="empty-note">-</p>'}
+        <div class="server-info"><span>在线模式服务器状态</span><strong>${html(remote.title)}</strong>${remote.websiteAvailable && state.desktop ? '<button id="website" class="text-button">查看服务器状态 ↗</button>' : ''}${remote.servers.length ? `<ul class="server-routes">${remote.servers.map((item) => `<li><span>${html(item.name)}${item.role ? ` · ${html(item.role)}` : ''}</span><code>${html(item.address)}</code></li>`).join('')}</ul>` : ''}</div>
       </section><section class="glass update-card"><div class="card-heading"><h2>版本更新</h2><span class="version-chip">v${html(state.version)}</span></div><p class="update-state ${remote.update ? 'update-available' : ''}">${html(remote.versionText)}</p>
         ${remote.releaseNotes ? `<p class="release-notes">${html(remote.releaseNotes)}</p><button class="text-button notes-link" data-read="release">版本详情 ↗</button>` : ''}
         <div class="update-actions">${remote.downloadAvailable ? `<button id="update-download" class="secondary download-button" ${state.remoteBusy || !state.desktop ? 'disabled' : ''}>${icons.download} 下载新版本</button>` : ''}<button id="check-updates" class="text-button" ${actions.refresh ? '' : 'disabled'}>${state.remoteBusy ? '<span class="spinner"></span>' : icons.refresh}${state.remoteBusy ? '正在检查…' : '检查更新'}</button></div>
-        ${state.remoteError ? `<p class="remote-note" role="status">${html(state.remoteError)}</p>` : state.remote?.source === 'cache' ? '<p class="remote-note">暂时无法连接，正在显示已缓存的信息。</p>' : ''}
+        ${state.remoteError ? `<p class="remote-note" role="status">${html(state.remoteError)}</p>` : ''}
       </section></aside></div>
       <footer><span>GTA V / 公共战局 <i></i> 启动器 ${html(state.version)}</span><span>保持启动器开启，畅游洛圣都</span></footer>
     </main></div>${state.reading ? `<div class="reader-overlay"><button id="reader-dismiss" class="reader-backdrop" aria-label="关闭详情"></button><section class="glass reader" role="dialog" aria-modal="true" aria-labelledby="reader-title"><div class="reader-heading"><h2 id="reader-title">${html(state.reading.title)}</h2><button id="reader-close" class="icon-button" aria-label="关闭详情">${icons.close}</button></div><div class="reader-text">${html(pages[state.readingPage] || '')}</div><div class="reader-footer"><span>第 ${state.readingPage + 1} / ${Math.max(1, pages.length)} 页</span><div class="pager"><button id="reader-prev" ${state.readingPage ? '' : 'disabled'} aria-label="上一页">‹</button><button id="reader-next" ${state.readingPage < pages.length - 1 ? '' : 'disabled'} aria-label="下一页">›</button></div></div></section></div>` : ''}`;
@@ -84,9 +89,8 @@ async function refreshRemote(forceRefresh = true) {
   if (!state.desktop || state.remoteBusy) return;
   state.remoteBusy = true; state.remoteError = ''; render();
   try {
-    state.remote = await invoke('remote_configuration', { forceRefresh });
-    if (state.remote?.error && !state.remote?.config?.latest_version) state.remoteError = '暂时无法检查更新，请稍后重试。';
-  } catch { state.remoteError = '暂时无法连接，游戏仍可正常启动。'; }
+    applyRemote(await invoke('remote_configuration', { forceRefresh }));
+  } catch { applyRemote({ config: {}, source: 'unavailable', stale: true, error: '远程配置暂时无法加载，请稍后重试。' }); }
   finally { state.remoteBusy = false; render(); }
 }
 async function prepare() {
@@ -161,7 +165,7 @@ document.addEventListener('keydown', (event) => {
 render();
 if (state.desktop) {
   listen('launcher-progress', ({ payload }) => { state.phase = payload.phase; state.message = payload.text; render(); });
-  listen('launcher-remote-config', ({ payload }) => { state.remote = payload; render(); });
+  listen('launcher-remote-config', ({ payload }) => { applyRemote(payload); render(); });
   invoke('launcher_status').then(updateStatus).then(render).catch((error) => { state.error = String(error); render(); }).finally(() => refreshRemote(false));
   setInterval(() => refreshRemote(true), 5 * 60 * 1000);
 } else { state.message = '界面预览：通过桌面启动器选择资源并开始游戏。'; render(); }

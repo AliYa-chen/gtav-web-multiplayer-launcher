@@ -9,7 +9,8 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
 async function launcher(desktop = true) {
   const calls = [], values = new Map(), events = new Map(), intervals = [];
   let urls = [];
-  const remote = { config: { oltitle: 'https://gtav.2t.hk', latest_version: '0.2.0', downloads: { windows_x64: { url: 'https://oss.2t.hk/launcher.exe', sha256: 'a'.repeat(64) } }, announcements: [{ title: '<img>', body: '<script>unsafe</script>' }] }, source: 'remote' };
+  let remoteFailure = false;
+  let remote = { config: { oltitle: 'https://gtav.2t.hk', latest_version: '0.2.0', downloads: { windows_x64: { url: 'https://oss.2t.hk/launcher.exe', sha256: 'a'.repeat(64) } }, announcements: [{ title: '<img>', body: '<script>unsafe</script>' }] }, source: 'remote' };
   const status = () => ({ selected_directory: '/游戏资源', resources: { manifest_file_count: 5814 }, running_urls: urls, version: '0.1.2', platform: 'windows_x64', remote_configuration: remote });
   const app = { innerHTML: '', addEventListener(name, callback) { events.set(`app:${name}`, callback); } };
   const document = { activeElement: null, documentElement: { style: { setProperty() {} } }, querySelector(selector) { return selector === '#app' ? app : null; }, addEventListener(name, callback) { events.set(`document:${name}`, callback); } };
@@ -21,14 +22,14 @@ async function launcher(desktop = true) {
       if (command === 'choose_game_directory') return '/新资源';
       if (command === 'start_game') urls = [...urls, `http://127.0.0.1:${61000 + urls.length}/`];
       if (command === 'stop_game') urls = [];
-      if (command === 'remote_configuration') return remote;
+      if (command === 'remote_configuration') { if (remoteFailure) throw new Error('failed request'); return remote; }
       return status();
     },
     setInterval: (callback, delay) => { intervals.push({ callback, delay }); return intervals.length; },
   });
   vm.runInContext(source, context);
   await tick();
-  return { calls, app, values, events, intervals, async click(id, dataset = {}) { const button = { id, dataset, disabled: false }; await events.get('app:click')({ target: { closest: () => button } }); } };
+  return { calls, app, values, events, intervals, setRemote(value) { remote = value; remoteFailure = false; }, failRemote() { remoteFailure = true; }, async click(id, dataset = {}) { const button = { id, dataset, disabled: false }; await events.get('app:click')({ target: { closest: () => button } }); } };
 }
 
 test('实际启动界面仅通过后端读取远程配置，并从目录选择完成校验、启动、多开和停止', async () => {
@@ -73,7 +74,7 @@ test('后台远程配置刷新事件立即更新公告，文字不会变为HTML'
 test('网页预览不调用桌面或网络命令，背景设置保持可用', async () => {
   const ui = await launcher(false);
   assert.deepEqual(ui.calls, []);
-  assert.match(ui.app.innerHTML, /暂无版本信息/);
+  assert.match(ui.app.innerHTML, /class="update-state ">-</);
   await ui.click('', { background: 'beach' });
   await ui.click('check-updates');
   assert.equal(ui.values.get(presentation.backgroundPreferenceKey), 'beach');
@@ -86,6 +87,36 @@ test('运行中的启动器每五分钟后台刷新公告配置，不重启游�
   const before = ui.calls.length; await ui.intervals[0].callback();
   assert.deepEqual(ui.calls.slice(before).map(call => call.command), ['remote_configuration']);
   assert.equal(ui.calls.at(-1).args.forceRefresh, true);
+});
+test('真实接口数据展示两条线路和新公告，失败后清空旧数据，再次请求能恢复', async () => {
+  const ui = await launcher();
+  const config = JSON.parse(await readFile(new URL('../../tools/tests/fixtures/remote-launcher-server-array.json', import.meta.url), 'utf8'));
+  // The backend normalizes release metadata before passing the snapshot to the view.
+  const snapshot = { source: 'remote', stale: false, config: { ...config, ...config.update } };
+  ui.setRemote(snapshot); await ui.click('check-updates');
+  assert.match(ui.app.innerHTML, /欢迎来到 GTA V 公共战局/);
+  assert.match(ui.app.innerHTML, /183\.66\.27\.21:47485/);
+  assert.match(ui.app.innerHTML, /183\.66\.27\.21:47486/);
+  assert.match(ui.app.innerHTML, /主线路|实验线路/);
+  await ui.click('announcement-next');
+  assert.match(ui.app.innerHTML, /实验功能说明/);
+  await ui.click('', { read: 'announcement' });
+  ui.failRemote(); await ui.click('check-updates');
+  assert.doesNotMatch(ui.app.innerHTML, /欢迎来到 GTA V 公共战局|实验功能说明|183\.66\.27\.21|class="reader-overlay"|离线缓存|已缓存/);
+  assert.match(ui.app.innerHTML, /class="empty-note">-</);
+  assert.match(ui.app.innerHTML, /class="update-state ">-</);
+  assert.doesNotMatch(ui.app.innerHTML, /id="website"|id="update-download"/);
+  ui.setRemote(snapshot); await ui.click('check-updates');
+  assert.match(ui.app.innerHTML, /欢迎来到 GTA V 公共战局/);
+  assert.match(ui.app.innerHTML, /183\.66\.27\.21:47486/);
+});
+test('后台请求失败的通知清空之前的成功快照，即使失败载荷残留旧版本也不显示', async () => {
+  const ui = await launcher();
+  const event = ui.events.get('tauri:launcher-remote-config');
+  event({ payload: { config: { latest_version: '99.0.0', announcements: [{ title: '不可显示的旧公告' }] }, source: 'unavailable', stale: true, error: '远程配置 JSON 格式或字段类型无效。' } });
+  assert.doesNotMatch(ui.app.innerHTML, /不可显示的旧公告|99\.0\.0|&lt;script&gt;unsafe/);
+  assert.match(ui.app.innerHTML, /class="update-state ">-</);
+  assert.match(ui.app.innerHTML, /远程配置 JSON 格式或字段类型无效/);
 });
 
 function readerPage(ui) {

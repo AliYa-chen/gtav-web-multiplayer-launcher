@@ -3,14 +3,13 @@
 
 use reqwest::{blocking::Client, redirect::Policy};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fs, io::{Read, Write}, path::Path,
-    sync::atomic::{AtomicU64, Ordering}, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{collections::{BTreeMap, BTreeSet}, io::Read,
+    time::{Duration, SystemTime, UNIX_EPOCH}};
 use url::Url;
 
 pub const CONFIG_URL: &str = "https://oss.2t.hk/gtav/";
 pub const MAX_CONFIG_BYTES: usize = 256 * 1024;
-const CACHE_FORMAT: u32 = 1;
-static CACHE_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+const MAX_SERVERS: usize = 32;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Announcement {
@@ -32,9 +31,13 @@ pub struct DownloadInfo {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub address: String,
     #[serde(default)]
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_url: Option<String>,
 }
@@ -46,6 +49,9 @@ pub struct RemoteConfig {
     pub website: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<ServerInfo>,
+    /// Complete normalized list. `server` is its main line, or first entry.
+    #[serde(default)]
+    pub servers: Vec<ServerInfo>,
     #[serde(default)]
     pub announcements: Vec<Announcement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -58,22 +64,22 @@ pub struct RemoteConfig {
 
 impl Default for RemoteConfig {
     fn default() -> Self {
-        Self { oltitle: "https://gtav.2t.hk".into(), website: Some("https://gtav.2t.hk/".into()),
-            server: None, announcements: Vec::new(), latest_version: None,
+        Self { oltitle: String::new(), website: None,
+            server: None, servers: Vec::new(), announcements: Vec::new(), latest_version: None,
             downloads: BTreeMap::new(), release_notes: String::new() }
     }
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum ConfigSource { Remote, Cache, Default }
+pub enum ConfigSource { Remote, Unavailable }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ConfigSnapshot {
     pub config: RemoteConfig,
     pub source: ConfigSource,
     pub stale: bool,
-    /// UTC Unix seconds of the last successful remote fetch, absent for defaults.
+    /// UTC Unix seconds of this successful fetch; absent until success or on failure.
     pub fetched_at: Option<u64>,
     pub checked_at: u64,
     pub error: Option<String>,
@@ -81,7 +87,7 @@ pub struct ConfigSnapshot {
 
 impl Default for ConfigSnapshot {
     fn default() -> Self {
-        Self { config: RemoteConfig::default(), source: ConfigSource::Default, stale: true,
+        Self { config: RemoteConfig::default(), source: ConfigSource::Unavailable, stale: true,
             fetched_at: None, checked_at: now(), error: None }
     }
 }
@@ -96,6 +102,13 @@ struct RawUpdate {
     release_notes: String,
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawServer {
+    One(ServerInfo),
+    Many(Vec<ServerInfo>),
+}
+
 #[derive(Default, Deserialize)]
 struct RawConfig {
     #[serde(default)]
@@ -103,7 +116,9 @@ struct RawConfig {
     #[serde(default)]
     website: Option<String>,
     #[serde(default)]
-    server: Option<ServerInfo>,
+    server: Option<RawServer>,
+    #[serde(default)]
+    servers: Option<Vec<ServerInfo>>,
     #[serde(default)]
     announcements: Vec<Announcement>,
     #[serde(default, alias = "latestversion")]
@@ -115,9 +130,6 @@ struct RawConfig {
     #[serde(default)]
     update: Option<RawUpdate>,
 }
-
-#[derive(Serialize, Deserialize)]
-struct CachedConfig { format: u32, fetched_at: u64, config: RemoteConfig }
 
 fn now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() }
 
@@ -152,6 +164,13 @@ fn clean_title(value: &str) -> Result<String, String> {
 }
 
 fn clean_server(mut server: ServerInfo) -> Result<ServerInfo, String> {
+    server.id = server.id.as_deref().map(|value| -> Result<String, String> {
+        let value = text(value, 64, "server.id")?;
+        if value.is_empty() || !value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+            return Err("远程服务器 ID 只能包含字母、数字、下划线或连字符。".into());
+        }
+        Ok(value)
+    }).transpose()?;
     server.address = text(&server.address, 256, "server.address")?;
     if server.address.is_empty() || server.address.contains(['/', '\\', '@', '?', '#']) ||
         server.address.chars().any(char::is_whitespace) {
@@ -162,8 +181,51 @@ fn clean_server(mut server: ServerInfo) -> Result<ServerInfo, String> {
         return Err("远程服务器地址格式无效。".into());
     }
     server.name = text(&server.name, 80, "server.name")?;
+    server.role = server.role.as_deref().map(|value| text(value, 80, "server.role")).transpose()?;
     server.status_url = server.status_url.as_deref().map(https_url).transpose()?;
     Ok(server)
+}
+
+fn clean_servers(servers: Vec<ServerInfo>) -> Result<Vec<ServerInfo>, String> {
+    if servers.len() > MAX_SERVERS { return Err("远程服务器线路超过 32 条限制。".into()); }
+    let servers = servers.into_iter().map(clean_server).collect::<Result<Vec<_>, _>>()?;
+    let mut ids = BTreeSet::new();
+    for server in &servers {
+        if let Some(id) = &server.id {
+            if !ids.insert(id) { return Err("远程服务器线路 ID 不能重复。".into()); }
+        }
+    }
+    Ok(servers)
+}
+
+fn primary_server(servers: &[ServerInfo]) -> Option<&ServerInfo> {
+    servers.iter().find(|server| server.id.as_deref() == Some("main")).or_else(|| servers.first())
+}
+
+fn normalize_servers(server: Option<RawServer>, servers: Option<Vec<ServerInfo>>)
+    -> Result<(Option<ServerInfo>, Vec<ServerInfo>), String> {
+    // Both names are accepted, but a document cannot silently override one line list
+    // with another. Our normalized output includes the selected object plus the list.
+    let list = match (server, servers) {
+        (None, None) => Vec::new(),
+        (Some(RawServer::One(server)), None) => clean_servers(vec![server])?,
+        (Some(RawServer::Many(list)), None) | (None, Some(list)) => clean_servers(list)?,
+        (Some(RawServer::One(server)), Some(list)) => {
+            let server = clean_server(server)?;
+            let list = clean_servers(list)?;
+            if primary_server(&list) != Some(&server) {
+                return Err("远程配置的 server 与 servers 主线路不一致。".into());
+            }
+            list
+        }
+        (Some(RawServer::Many(first)), Some(second)) => {
+            let first = clean_servers(first)?;
+            let second = clean_servers(second)?;
+            if first != second { return Err("远程配置中的两组服务器线路不一致。".into()); }
+            first
+        }
+    };
+    Ok((primary_server(&list).cloned(), list))
 }
 
 /// Unknown fields are ignored for forward compatibility. Known fields remain typed and validated.
@@ -174,6 +236,7 @@ pub fn parse_config(bytes: &[u8]) -> Result<RemoteConfig, String> {
 }
 
 fn clean_config(raw: RawConfig) -> Result<RemoteConfig, String> {
+    let (server, servers) = normalize_servers(raw.server, raw.servers)?;
     let update = raw.update.unwrap_or_default();
     let latest_version = raw.latest_version.or(update.latest_version)
         .map(|version| semver::Version::parse(version.trim().trim_start_matches('v'))
@@ -202,9 +265,9 @@ fn clean_config(raw: RawConfig) -> Result<RemoteConfig, String> {
     }
     let notes = if raw.release_notes.is_empty() { update.release_notes } else { raw.release_notes };
     Ok(RemoteConfig {
-        oltitle: clean_title(raw.oltitle.as_deref().unwrap_or("https://gtav.2t.hk"))?,
+        oltitle: raw.oltitle.as_deref().map(clean_title).transpose()?.unwrap_or_default(),
         website: raw.website.as_deref().map(https_url).transpose()?,
-        server: raw.server.map(clean_server).transpose()?, announcements, latest_version, downloads,
+        server, servers, announcements, latest_version, downloads,
         release_notes: text(&notes, 8192, "release_notes")?,
     })
 }
@@ -234,8 +297,8 @@ fn client() -> Result<Client, String> {
 
 fn fetch() -> Result<RemoteConfig, String> {
     let response = client()?.get(CONFIG_URL).send().map_err(|error| {
-        if error.is_timeout() { "远程配置请求超时，将使用本地配置。".to_string() }
-        else { "无法连接远程配置服务，将使用本地配置。".to_string() }
+        if error.is_timeout() { "远程配置请求超时。".to_string() }
+        else { "无法连接远程配置服务。".to_string() }
     })?;
     if !response.status().is_success() { return Err(format!("远程配置服务返回 HTTP {}。", response.status().as_u16())); }
     if response.content_length().is_some_and(|length| length > MAX_CONFIG_BYTES as u64) {
@@ -244,56 +307,19 @@ fn fetch() -> Result<RemoteConfig, String> {
     parse_config(&read_bounded(response)?)
 }
 
-fn read_cache(path: &Path) -> Result<CachedConfig, String> {
-    // Normalized URLs and the cache envelope can exceed the network payload size.
-    // Keep the disk read bounded separately, then revalidate every known field.
-    let bytes = read_bounded_limit(fs::File::open(path).map_err(|_| "远程配置缓存不存在。".to_string())?, MAX_CONFIG_BYTES * 2)?;
-    let cache: CachedConfig = serde_json::from_slice(&bytes).map_err(|_| "远程配置缓存无效。".to_string())?;
-    if cache.format != CACHE_FORMAT { return Err("远程配置缓存版本无效。".into()); }
-    // Revalidate cached content through the same untrusted-data boundary.
-    let raw = serde_json::from_value(serde_json::to_value(&cache.config).map_err(|_| "远程配置缓存无效。".to_string())?)
-        .map_err(|_| "远程配置缓存无效。".to_string())?;
-    let config = clean_config(raw)?;
-    Ok(CachedConfig { config, ..cache })
-}
-
-fn save_cache(path: &Path, config: &RemoteConfig, fetched_at: u64) -> Result<(), String> {
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).ok_or("远程配置缓存目录无效。")?;
-    fs::create_dir_all(parent).map_err(|_| "无法创建远程配置缓存目录。".to_string())?;
-    let bytes = serde_json::to_vec(&CachedConfig { format: CACHE_FORMAT, fetched_at, config: config.clone() })
-        .map_err(|_| "无法保存远程配置缓存。".to_string())?;
-    let sequence = CACHE_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let temporary = path.with_extension(format!("tmp-{}-{sequence}", std::process::id()));
-    let written = (|| {
-        let mut file = fs::File::create(&temporary).map_err(|_| "无法保存远程配置缓存。".to_string())?;
-        file.write_all(&bytes).and_then(|_| file.sync_all()).map_err(|_| "无法保存远程配置缓存。".to_string())?;
-        fs::rename(&temporary, path).map_err(|_| "无法更新远程配置缓存。".to_string())
-    })();
-    if written.is_err() { let _ = fs::remove_file(temporary); }
-    written
-}
-
-fn fallback(path: &Path, error: String, checked_at: u64) -> ConfigSnapshot {
-    match read_cache(path) {
-        Ok(cache) => ConfigSnapshot { config: cache.config, source: ConfigSource::Cache, stale: true,
-            fetched_at: Some(cache.fetched_at), checked_at, error: Some(error) },
-        Err(_) => ConfigSnapshot { config: RemoteConfig::default(), source: ConfigSource::Default, stale: true,
+fn snapshot(result: Result<RemoteConfig, String>, checked_at: u64) -> ConfigSnapshot {
+    match result {
+        Ok(config) => ConfigSnapshot { config, source: ConfigSource::Remote, stale: false,
+            fetched_at: Some(checked_at), checked_at, error: None },
+        Err(error) => ConfigSnapshot { config: RemoteConfig::default(), source: ConfigSource::Unavailable, stale: true,
             fetched_at: None, checked_at, error: Some(error) },
     }
 }
 
 /// Blocking, at most eight seconds of networking. Call from a background worker.
-/// `cache_path` must be provided by the launcher app cache directory, never a game path.
-pub fn load(cache_path: &Path) -> ConfigSnapshot {
-    let checked_at = now();
-    match fetch() {
-        Ok(config) => {
-            let error = save_cache(cache_path, &config, checked_at).err();
-            ConfigSnapshot { config, source: ConfigSource::Remote, stale: false,
-                fetched_at: Some(checked_at), checked_at, error }
-        }
-        Err(error) => fallback(cache_path, error, checked_at),
-    }
+/// Every call requests fresh remote data. No metadata is loaded from or saved to disk.
+pub fn load() -> ConfigSnapshot {
+    snapshot(fetch(), now())
 }
 
 pub fn has_update(current: &str, latest: Option<&str>) -> bool {
@@ -360,24 +386,84 @@ mod tests {
     }
 
     #[test]
-    fn last_valid_cache_survives_network_failure_and_bad_cache_uses_defaults() {
-        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("remote-config.json");
-        let config = parse_config(r#"{"oltitle":"维护公告"}"#.as_bytes()).unwrap();
-        save_cache(&path, &config, 123).unwrap();
-        let snapshot = fallback(&path, "请求失败".into(), 456);
-        assert_eq!(snapshot.source, ConfigSource::Cache);
-        assert_eq!(snapshot.fetched_at, Some(123)); assert!(snapshot.stale);
-        fs::write(&path, b"not JSON").unwrap();
-        let snapshot = fallback(&path, "请求失败".into(), 456);
-        assert_eq!(snapshot.source, ConfigSource::Default); assert!(snapshot.fetched_at.is_none());
+    fn real_server_array_document_preserves_all_lines_and_release_information() {
+        let config = parse_config(include_bytes!("../../../tools/tests/fixtures/remote-launcher-server-array.json")).unwrap();
+        assert_eq!(config.servers.len(), 2);
+        assert_eq!(config.servers[0].id.as_deref(), Some("main"));
+        assert_eq!(config.servers[0].role.as_deref(), Some("主线路"));
+        assert_eq!(config.servers[1].id.as_deref(), Some("experimental"));
+        assert_eq!(config.servers[1].role.as_deref(), Some("实验线路"));
+        assert_eq!(config.servers[1].address, "183.66.27.21:47486");
+        assert_eq!(config.server.as_ref(), Some(&config.servers[0]));
+        assert_eq!(config.announcements.len(), 2);
+        assert!(config.announcements[0].body.contains('\n'));
+        assert_eq!(config.latest_version.as_deref(), Some("0.2.1"));
+        assert!(config.downloads.is_empty());
     }
 
     #[test]
-    fn cached_links_are_revalidated() {
-        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("remote-config.json");
-        let mut config = RemoteConfig::default(); config.website = Some("javascript:alert(1)".into());
-        save_cache(&path, &config, 123).unwrap();
-        assert_eq!(fallback(&path, "请求失败".into(), 456).source, ConfigSource::Default);
+    fn server_object_and_plural_list_are_normalized_with_main_priority() {
+        let legacy = parse_config(br#"{"server":{"address":"localhost:47485","name":"Legacy"}}"#).unwrap();
+        assert_eq!(legacy.servers.len(), 1);
+        assert_eq!(legacy.server.as_ref(), Some(&legacy.servers[0]));
+        assert!(legacy.servers[0].id.is_none());
+        let config = parse_config(br#"{"servers":[{"id":"test","address":"localhost:47486"},{"id":"main","address":"localhost:47485"}]}"#).unwrap();
+        assert_eq!(config.server.as_ref(), Some(&config.servers[1]));
+        let no_main = parse_config(br#"{"server":[{"id":"test","address":"localhost:47486"},{"address":"localhost:47485"}]}"#).unwrap();
+        assert_eq!(no_main.server.as_ref(), Some(&no_main.servers[0]));
+        for bytes in [br#"{"server":[]}"#.as_slice(), br#"{"servers":[]}"#.as_slice()] {
+            let empty = parse_config(bytes).unwrap();
+            assert!(empty.server.is_none()); assert!(empty.servers.is_empty());
+        }
+    }
+
+    #[test]
+    fn normalized_server_configuration_roundtrips_without_losing_lines() {
+        let config = parse_config(include_bytes!("../../../tools/tests/fixtures/remote-launcher-server-array.json")).unwrap();
+        let serialized = serde_json::to_vec(&config).unwrap();
+        assert_eq!(parse_config(&serialized).unwrap(), config);
+        let redundant = parse_config(br#"{"server":[{"id":"main","address":"localhost:47485"}],"servers":[{"id":"main","address":"localhost:47485"}]}"#).unwrap();
+        assert_eq!(redundant.servers.len(), 1);
+    }
+
+    #[test]
+    fn server_lists_are_bounded_and_every_entry_is_validated() {
+        for value in [
+            serde_json::json!({"server":[{"id":"main","address":"localhost:47485"},{"address":"https://bad.example"}]}),
+            serde_json::json!({"server":[{"id":"main","address":"localhost:47485"},{"id":"main","address":"localhost:47486"}]}),
+            serde_json::json!({"server":[{"id":"","address":"localhost:47485"}]}),
+            serde_json::json!({"server":[{"id":"bad id","address":"localhost:47485"}]}),
+            serde_json::json!({"server":[{"id":"x".repeat(65),"address":"localhost:47485"}]}),
+            serde_json::json!({"server":[{"address":"localhost:0"}]}),
+            serde_json::json!({"server":[{"address":"localhost:47485","status_url":"http://example.com"}]}),
+            serde_json::json!({"server":[{"address":"localhost:47485","role":0}]}),
+            serde_json::json!({"server":"localhost:47485"}),
+            serde_json::json!({"servers":{"address":"localhost:47485"}}),
+            serde_json::json!({"server":{"address":"localhost:47485"},"servers":[{"address":"localhost:47486"}]}),
+            serde_json::json!({"server":[],"servers":[{"address":"localhost:47485"}]}),
+        ] { assert!(parse_config(&serde_json::to_vec(&value).unwrap()).is_err(), "accepted: {value}"); }
+        let too_many: Vec<_> = (0..=MAX_SERVERS).map(|i| serde_json::json!({"id":format!("line-{i}"),"address":"localhost:47485"})).collect();
+        assert!(parse_config(&serde_json::to_vec(&serde_json::json!({"server":too_many})).unwrap()).is_err());
+        let maximum: Vec<_> = (0..MAX_SERVERS).map(|i| serde_json::json!({"id":format!("line-{i}"),"address":"localhost:47485"})).collect();
+        assert_eq!(parse_config(&serde_json::to_vec(&serde_json::json!({"servers":maximum})).unwrap()).unwrap().servers.len(), MAX_SERVERS);
+    }
+
+    #[test]
+    fn failed_or_not_yet_fetched_configuration_contains_no_local_fallback_data() {
+        let initial = ConfigSnapshot::default();
+        assert_eq!(initial.source, ConfigSource::Unavailable);
+        assert_eq!(initial.config, RemoteConfig::default());
+        assert!(initial.config.oltitle.is_empty()); assert!(initial.config.website.is_none());
+        assert!(initial.fetched_at.is_none());
+        let success = snapshot(parse_config(include_bytes!("../../../tools/tests/fixtures/remote-launcher-server-array.json")), 123);
+        assert_eq!(success.source, ConfigSource::Remote);
+        assert_eq!(success.fetched_at, Some(123)); assert!(!success.stale);
+        let failed = snapshot(Err("远程配置请求超时。".into()), 456);
+        assert_eq!(failed.source, ConfigSource::Unavailable);
+        assert_eq!(failed.checked_at, 456); assert!(failed.fetched_at.is_none()); assert!(failed.stale);
+        assert_eq!(failed.config, RemoteConfig::default());
+        assert!(failed.config.announcements.is_empty()); assert!(failed.config.servers.is_empty());
+        assert_eq!(failed.error.as_deref(), Some("远程配置请求超时。"));
     }
 
     #[test]
