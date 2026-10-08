@@ -42,6 +42,7 @@ ADDITIONAL_EXPORTS = {
     "mpFree": (91002, "emscripten_builtin_free", ["i64"], []),
 }
 ENTITY_EXPORTS = {
+    "mpCachedMeleeInputs": (41719, "CPlayerInfo::GetCachedMeleeInputs(bool&, bool&)", ["i64", "i64"], []),
     "mpCreateVehicle": (61266, "vehicle_commands::CommandCreateVehicle(int, rage::scrVector const&, float, bool, bool, bool)", ["i32", "i64", "f32", "i32", "i32", "i32"], ["i32"]),
     "mpDeleteVehicle": (61267, "vehicle_commands::CommandDeleteVehicle(int&)", ["i64"], []),
     "mpGetQuaternion": (50044, "entity_commands::CommandGetEntityQuaternion(int, float&, float&, float&, float&)", ["i32", "i64", "i64", "i64", "i64"], []),
@@ -59,6 +60,14 @@ ENTITY_EXPORTS = {
     "mpIsArrested": (58711, "player_commands::CommandIsPlayerBeingArrested(int, bool)", ["i32", "i32"], ["i32"]),
     "mpMeleeAction": (57608, "ped_commands::CommandIsPedPeformingMeleeAction(int)", ["i32"], ["i32"]),
     "mpMeleeTarget": (57612, "ped_commands::CommandGetMeleeTargetForPed(int)", ["i32"], ["i32"]),
+    # 单独播放原剪辑仅用于表现；不得使用真实战斗任务在本地再次产生伤害。
+    # 字典/剪辑参数为 NUL 结尾 UTF-8 指针；Request/Play 必须在有效脚本 handler 上执行。
+    "mpAnimDictExists": (60331, "streaming_commands::DoesAnimDictExist(char const*)", ["i64"], ["i32"]),
+    "mpRequestAnimDict": (60332, "streaming_commands::RequestAnimDict(char const*)", ["i64"], []),
+    "mpHasAnimDictLoaded": (60333, "streaming_commands::HasAnimDictLoaded(char const*)", ["i64"], ["i32"]),
+    "mpTaskPlayAnim": (60617, "task_commands::CommandTaskPlayAnim(int, char const*, char const*, float, float, int, int, float, bool, int, bool)", ["i32", "i64", "i64", "f32", "f32", "i32", "i32", "f32", "i32", "i32", "i32"], []),
+    "mpIsPlayingAnim": (50077, "entity_commands::CommandIsEntityPlayingAnim(int, char const*, char const*, int)", ["i32", "i64", "i64", "i32"], ["i32"]),
+    "mpAnimTime": (50024, "entity_commands::CommandGetEntityAnimCurrentTime(int, char const*, char const*)", ["i32", "i64", "i64"], ["f32"]),
     "mpPedDensity": (57186, "ped_commands::CommandSetPedDensityMultiplierThisFrame(float)", ["f32"], []),
     "mpScenarioDensity": (57187, "ped_commands::CommandSetScenarioPedDensityMultiplierThisFrame(float, float)", ["f32", "f32"], []),
     "mpVehicleDensity": (61298, "vehicle_commands::CommandSetVehicleDensityMultiplierThisFrame(float)", ["f32"], []),

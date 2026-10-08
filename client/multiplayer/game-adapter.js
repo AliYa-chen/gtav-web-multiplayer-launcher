@@ -10,6 +10,9 @@ export function installGameAdapter(worker, network = null) {
   let nextShotId = 0;
   let combat = [];
   let world = null;
+  let worldEvents = [], nextWorldEventId = 0;
+  const seenWorldEvents = new Set();
+  let oldServerNotice = false;
   const combatById = new Map();
   let controls = [], nextControlId = 0;
   let notices = [], nextNoticeId = 0;
@@ -97,7 +100,7 @@ export function installGameAdapter(worker, network = null) {
   function publish() {
     timer = 0;
     if (!shared || closed) return;
-    const packet = { ...session, peers: [...peers.values()], shots, combat, controls, notices, world };
+    const packet = { ...session, peers: [...peers.values()], shots, combat, controls, notices, world, world_events: worldEvents };
     const bytes = new TextEncoder().encode(JSON.stringify(packet));
     if (bytes.length > shared.capacity) return;
     const header = new Int32Array(shared.memory.buffer, shared.block, 4);
@@ -129,9 +132,15 @@ export function installGameAdapter(worker, network = null) {
       combatFeedback(data);
       return;
     } else if (data.type === 'world_state_v2') {
+      if (world?.world_epoch && world.world_epoch !== data.world_epoch) { worldEvents = []; seenWorldEvents.clear(); }
       world = { schema_version: 2, world_epoch: data.world_epoch, world_revision: data.world_revision,
         world_tick: data.world_tick, stream_seq: data.stream_seq, ready: data.ready === true,
         entities: Array.isArray(data.entities) ? data.entities : [], tombstones: Array.isArray(data.tombstones) ? data.tombstones : [] };
+    } else if (data.type === 'melee_event') {
+      if (!world || data.world_epoch !== world.world_epoch || !data.event_id || seenWorldEvents.has(data.event_id)) return;
+      seenWorldEvents.add(data.event_id);
+      if (seenWorldEvents.size > 256) seenWorldEvents.delete(seenWorldEvents.values().next().value);
+      worldEvents.push({ id: ++nextWorldEventId, event: data });
     } else if (data.type === 'interaction_result') {
       if (data.accepted === false) notify('互動尚未完成，請稍後重試');
       return;
@@ -151,11 +160,15 @@ export function installGameAdapter(worker, network = null) {
         resume_state: data.resume_state || null,
         resume_position: data.resume_position || null, spawn: data.spawn || null };
       if (session.client_id && previousId && session.client_id !== previousId) { peers.clear(); combatById.clear(); }
+      if (session.connected && (data.world_v2 === false || data.melee_events === false) && !oldServerNotice) {
+        oldServerNotice = true;
+        notify('伺服器不支援近戰，請更新服務端或重新連線');
+      }
       const members = new Set(session.members.map((member) => member.id));
       for (const id of peers.keys()) if (!members.has(id)) peers.delete(id);
       for (const id of combatById.keys()) if (!members.has(id)) combatById.delete(id);
       for (const peer of data.peers || []) mergePeer(peer);
-      if (!session.connected) { shots = []; controls = []; world = null; }
+      if (!session.connected) { shots = []; controls = []; world = null; worldEvents = []; seenWorldEvents.clear(); }
       for (const value of data.combat || []) mergeCombat(value);
       combat = [...combatById.values()];
     } else if (data.type === 'combat_state' && Array.isArray(data.players)) {
@@ -194,6 +207,10 @@ export function installGameAdapter(worker, network = null) {
     } else if (message.type === 'control_ack' && Array.isArray(message.ids)) {
       const consumed = new Set(message.ids);
       controls = controls.filter((control) => !consumed.has(control.id));
+      schedule();
+    } else if (message.type === 'world_event_ack' && Array.isArray(message.ids)) {
+      const consumed = new Set(message.ids);
+      worldEvents = worldEvents.filter((entry) => !consumed.has(entry.id));
       schedule();
     } else if (message.type === 'notice_ack' && Array.isArray(message.ids)) {
       const consumed = new Set(message.ids);
@@ -238,6 +255,9 @@ export function installGameAdapter(worker, network = null) {
     } else if (message.type === 'world_entity_status') {
       reportStatus({ phase: 'world_entity', entity_id: message.entity_id,
         kind: message.kind, state: message.phase });
+    } else if (message.type === 'melee_sample') {
+      reportStatus({ phase: 'melee_sample', request_id: message.request_id,
+        actor_entity_id: message.actor_entity_id, source: message.source });
     } else if (message.type === 'bridge_error') {
       nativeHud = false;
       const hud = document.getElementById('hud');

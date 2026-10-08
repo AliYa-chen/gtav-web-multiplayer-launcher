@@ -1068,6 +1068,7 @@ test('交互允许同代际的旧基线并携带目标 generation，旧角色生
   const remote = worldPed('REMOTE', { revision: 6, generation: 2 });
   const car = worldVehicle({ revision: 4, generation: 3 });
   worldSnapshot(socket, [worldPed(), remote, car], { cut_revision: 10 }); await page.api.ready;
+  page.api.onWorkerMessage({ type: 'local_state', state: playerState() });
   page.api.onWorkerMessage({ type: 'interaction_request', action: 'melee', entity_id: remote.entity_id,
     expected_revision: 3, target_generation: 2 });
   assert.equal(socket.messages('interaction_request').length, 1);
@@ -1105,5 +1106,135 @@ test('从本地玩家解析离车目标使用车辆代际，不能误用玩家�
   assert.equal(leave.entity_id, car.entity_id); assert.equal(leave.target_generation, 3); assert.equal(leave.expected_revision, 8);
   page.api.onWorkerMessage({ type: 'interaction_request', action: 'leave_vehicle' });
   assert.equal(socket.messages('interaction_request').at(-1).target_generation, 3);
+  page.api.close();
+});
+
+const meleeEvent = (changes = {}) => ({ type: 'melee_event', schema_version: 2, world_epoch: 'epochA',
+  event_id: 'm:epochA:1', request_id: 'melee1', action: 'punch', attacker_entity_id: worldPed().entity_id,
+  attacker_id: 'LOCAL', attacker_generation: 1, target_entity_id: worldPed('REMOTE').entity_id,
+  target_generation: 1, accepted: true, hit: true, damage: 20, health: 180, revision: 2, world_tick: 120, ...changes });
+
+test('近战发送前强制刷新最新位置朝向，低于状态预算时自动等待，不丢挥空动作意图', async () => {
+  const page = await harness(); const socket = page.enter(undefined, 'LOCAL', {}, [...capabilities, 'world_v2', 'melee_events']);
+  worldSnapshot(socket, [worldPed(), worldPed('REMOTE')]); await page.api.ready;
+  assert.ok(socket.messages('hello')[0].capabilities.includes('melee_events'));
+  page.api.onWorkerMessage({ type: 'local_state', state: playerState() }); page.advance(10);
+  const next = { ...playerState(), position: [713, -1088, 22.4], heading: 175 };
+  page.api.onWorkerMessage({ type: 'local_state', state: next });
+  page.api.onWorkerMessage({ type: 'interaction_request', action: 'melee', request_id: 'punch1', attacker_generation: 1 });
+  assert.equal(socket.messages('interaction_request').length, 0);
+  page.advance(30);
+  assert.deepEqual(socket.sent.slice(-2).map((value) => value.type), ['player_state', 'interaction_request']);
+  assert.equal(socket.sent.at(-2).heading, 175); assert.deepEqual(socket.sent.at(-2).position, next.position);
+  const request = socket.sent.at(-1); assert.equal(request.action, 'melee'); assert.match(request.request_id, /^p[A-Za-z0-9]+:[a-z0-9]+$/);
+  assert.ok(!Object.hasOwn(request, 'entity_id')); assert.ok(!Object.hasOwn(request, 'target_generation'));
+  const sent = page.logs.filter((line) => line.startsWith('[public-melee] ')).map((line) => JSON.parse(line.slice('[public-melee] '.length)));
+  assert.equal(sent[0].stage, 'sent'); assert.equal(sent[0].attacker_entity_id, worldPed().entity_id);
+  assert.equal(sent[0].target_entity_id, null); assert.ok(!JSON.stringify(sent).includes('position'));
+  page.api.close();
+});
+
+test('近战输入同帧 native 完整状态覆盖旧缓存，先同步最新方向且不把本地 state 字段发到协议', async () => {
+  const page = await harness(); const socket = page.enter(undefined, 'LOCAL', {}, [...capabilities, 'world_v2', 'melee_events']);
+  worldSnapshot(socket, [worldPed(), worldPed('REMOTE')]); await page.api.ready;
+  page.api.onWorkerMessage({ type: 'local_state', state: { ...playerState(), heading: 0 } }); page.advance(10);
+  const fresh = { ...playerState(), heading: 270, position: [713, -1088, 22.4], actions: actionState() };
+  page.api.onWorkerMessage({ type: 'interaction_request', action: 'melee', actor_generation: 1,
+    request_id: 'native-fresh', state: fresh });
+  assert.equal(socket.messages('interaction_request').length, 0);
+  page.advance(30);
+  assert.deepEqual(socket.sent.slice(-2).map((value) => value.type), ['player_state', 'interaction_request']);
+  assert.equal(socket.sent.at(-2).heading, 270); assert.deepEqual(socket.sent.at(-2).position, fresh.position);
+  const request = socket.sent.at(-1); assert.match(request.request_id, /^p[A-Za-z0-9]+:[a-z0-9]+$/);
+  assert.ok(!Object.hasOwn(request, 'state')); assert.ok(!Object.hasOwn(request, 'actor_generation'));
+  page.api.onWorkerMessage({ type: 'interaction_request', action: 'melee', actor_generation: 0, state: fresh });
+  page.api.onWorkerMessage({ type: 'interaction_request', action: 'melee', actor_generation: 1,
+    state: { ...fresh, actions: { aiming: true } } });
+  page.advance(100); assert.equal(socket.messages('interaction_request').length, 1,
+    '非法同帧状态或旧本地代际不能触发挥击，也不能覆盖有效缓存');
+  page.api.close();
+});
+
+test('近战候选等待期间目标新代际出现即丢弃，不把旧请求升级到新生命并且结果日志保留拒绝原因', async () => {
+  const page = await harness(); const socket = page.enter(undefined, 'LOCAL', {}, [...capabilities, 'world_v2', 'melee_events']);
+  worldSnapshot(socket, [worldPed(), worldPed('REMOTE')]); await page.api.ready;
+  page.api.onWorkerMessage({ type: 'local_state', state: playerState() }); page.advance(10);
+  page.api.onWorkerMessage({ type: 'local_state', state: { ...playerState(), heading: 180 } });
+  page.api.onWorkerMessage({ type: 'interaction_request', action: 'melee', entity_id: worldPed('REMOTE').entity_id,
+    target_generation: 1, expected_revision: 1, request_id: 'old-life' });
+  worldDelta(socket, [worldPed('REMOTE', { revision: 2, generation: 2 })]);
+  page.advance(100); assert.equal(socket.messages('interaction_request').length, 0);
+  page.api.onWorkerMessage({ type: 'interaction_request', action: 'melee', entity_id: worldPed('REMOTE').entity_id,
+    target_generation: 2, expected_revision: 2, request_id: 'new-life' });
+  assert.equal(socket.messages('interaction_request').length, 1);
+  socket.receive({ type: 'interaction_result', request_id: socket.messages('interaction_request')[0].request_id, accepted: false, reason: 'not_facing' });
+  socket.receive({ type: 'error', code: 'not_facing', message: '角色前方没有该目标' });
+  const logs = page.logs.filter((line) => line.startsWith('[public-melee] ')).map((line) => JSON.parse(line.slice('[public-melee] '.length)));
+  assert.deepEqual(logs.map((value) => value.stage), ['sent', 'result']);
+  assert.equal(logs[1].reason, 'not_facing'); assert.equal(logs[1].accepted, false);
+  assert.ok(page.statuses.at(-1).connected); assert.equal(socket.readyState, 1); page.api.close();
+});
+
+test('近战广播严格验证世界、实体和代际，重复 event_id 仅发一次，挥空仍为合法动作', async () => {
+  const page = await harness(); const socket = page.enter(undefined, 'LOCAL', {}, [...capabilities, 'world_v2', 'melee_events']);
+  worldSnapshot(socket, [worldPed(), worldPed('REMOTE')]); await page.api.ready;
+  const packets = []; page.api.setReceiver((value) => packets.push(copy(value)));
+  socket.receive(meleeEvent()); socket.receive(meleeEvent());
+  assert.equal(packets.filter((value) => value.type === 'melee_event').length, 1);
+  for (const invalid of [{ world_epoch: 'wrong' }, { attacker_generation: 2 }, { target_generation: 2 },
+    { attacker_id: 'OTHER' }, { target_entity_id: 'missing' }, { damage: 99 }, { action: 'shoot' }, { hit: 'yes' }]) {
+    socket.receive(meleeEvent({ event_id: 'm:epochA:bad', ...invalid }));
+  }
+  assert.equal(packets.filter((value) => value.type === 'melee_event').length, 1);
+  socket.receive(meleeEvent({ event_id: 'm:epochA:2', request_id: 'swing2', target_entity_id: null, target_generation: null,
+    hit: false, damage: 0, health: null, revision: 1 }));
+  assert.equal(packets.filter((value) => value.type === 'melee_event').length, 2);
+  const logs = page.logs.filter((line) => line.startsWith('[public-melee] ')).map((line) => JSON.parse(line.slice('[public-melee] '.length)));
+  assert.equal(logs.length, 2); assert.ok(logs.every((value) => value.stage === 'event'));
+  assert.ok(logs.every((value) => !Object.hasOwn(value, 'origin') && !Object.hasOwn(value, 'resume_token')));
+  assert.equal(socket.readyState, 1); page.api.close();
+});
+
+test('引擎尚未挂接时保留已确认近战广播，旧服务不支持通知仅提示更新不改变服务器地址', async () => {
+  const page = await harness(); const socket = page.enter(undefined, 'LOCAL', {}, [...capabilities, 'world_v2', 'melee_events']);
+  worldSnapshot(socket, [worldPed(), worldPed('REMOTE')]); await page.api.ready;
+  socket.receive(meleeEvent());
+  const packets = []; page.api.setReceiver((value) => packets.push(copy(value)));
+  assert.equal(packets.filter((value) => value.type === 'melee_event').length, 1); page.api.close();
+  const legacy = await harness(); const oldSocket = legacy.enter();
+  oldSocket.receive(meleeEvent()); assert.equal(oldSocket.readyState, 1); legacy.api.close();
+});
+
+test('刷新恢复同一玩家时请求 namespace 更新，同页重复请求和自动重连保持同一幂等键', async () => {
+  const storage = new Map(); const first = await harness({ storage });
+  const firstSocket = first.enter(undefined, 'LOCAL', {}, [...capabilities, 'world_v2', 'melee_events']);
+  worldSnapshot(firstSocket); await first.api.ready;
+  first.api.onWorkerMessage({ type: 'local_state', state: playerState() });
+  const intent = { type: 'interaction_request', action: 'melee', request_id: 'engine:1', actor_generation: 1, state: playerState() };
+  first.api.onWorkerMessage(intent); const firstId = firstSocket.messages('interaction_request')[0].request_id;
+  first.api.onWorkerMessage(intent);
+  assert.equal(firstSocket.messages('interaction_request')[1].request_id, firstId);
+  firstSocket.close(); first.advance(500); const resumedSocket = first.enter(undefined, 'LOCAL', {}, [...capabilities, 'world_v2', 'melee_events']);
+  resumedSocket.receive({ type: 'world_state', room_id: 'PUBLIC', states: [] }); worldSnapshot(resumedSocket);
+  first.api.onWorkerMessage(intent);
+  assert.equal(resumedSocket.messages('interaction_request')[0].request_id, firstId, '自动重连不能改变同页请求幂等键');
+  first.api.close();
+  const refreshed = await harness({ storage, intent: { reconnect: true } });
+  const refreshSocket = refreshed.enter(undefined, 'LOCAL', {}, [...capabilities, 'world_v2', 'melee_events']);
+  refreshSocket.receive({ type: 'world_state', room_id: 'PUBLIC', states: [] }); worldSnapshot(refreshSocket); await refreshed.api.ready;
+  refreshed.api.onWorkerMessage(intent);
+  const secondId = refreshSocket.messages('interaction_request')[0].request_id;
+  assert.notEqual(secondId, firstId, '新页面不能命中服务端保留的 engine:1 旧请求结果');
+  assert.ok(secondId.length <= 64); refreshed.api.close();
+});
+
+test('不同完整长请求 ID 映射为不同短键，重发任一长 ID 仍使用原键', async () => {
+  const page = await harness(); const socket = page.enter(undefined, 'LOCAL', {}, [...capabilities, 'world_v2', 'melee_events']);
+  worldSnapshot(socket); await page.api.ready;
+  const first = 'x'.repeat(63) + 'a', second = 'x'.repeat(63) + 'b';
+  const send = (request_id) => page.api.onWorkerMessage({ type: 'interaction_request', action: 'melee', request_id, state: playerState() });
+  send(first); send(second); send(first);
+  const ids = socket.messages('interaction_request').map((request) => request.request_id);
+  assert.notEqual(ids[0], ids[1]); assert.equal(ids[0], ids[2]); assert.ok(ids.every((id) => id.length <= 64));
   page.api.close();
 });

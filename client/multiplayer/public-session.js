@@ -9,6 +9,13 @@ const ACTION_KEYS = ['aiming', 'reloading', 'jumping', 'ducking', 'sprinting'];
 const validResumeIdentity = (value) => value && typeof value.client_id === 'string'
   && value.client_id.length > 0 && value.client_id.length <= 128
   && typeof value.resume_token === 'string' && value.resume_token.length > 0 && value.resume_token.length <= 512;
+let pageInstanceSequence = 0;
+function newRequestNamespace() {
+  let random;
+  try { random = globalThis.crypto?.randomUUID?.().replaceAll('-', ''); } catch {}
+  if (!random) random = Date.now().toString(36) + Math.random().toString(36).slice(2) + (++pageInstanceSequence).toString(36);
+  return 'p' + random.slice(0, 36);
+}
 function cleanPlayerState(value) {
   if (!value || !coordinates(value.position) || !Number.isFinite(value.heading) || value.heading < 0 || value.heading > 360
     || !unsignedHash(value.model) || !unsignedHash(value.weapon) || !Number.isInteger(value.health)
@@ -73,6 +80,10 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   const peers = new Map();
   const combat = new Map();
   const world = createWorldState(), entityInputSequences = new Map(), entityReadyEpochs = new Map();
+  const requestNamespace = newRequestNamespace(), requestAliases = new Map();
+  let wireRequestSequence = 0;
+  const meleeRequests = new Map(), consumedMeleeEvents = new Set();
+  let pendingMelee = null, meleeTimer = 0;
   const pendingEntityInputs = new Map();
   let entityTimer = 0, lastEntityBatchSentAt = -Infinity;
   let lastWorldSyncAt = -Infinity, interactionSequence = 0;
@@ -81,6 +92,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   // 每个游戏页独占连接与桥接，避免同一来源的多个标签页混用角色和身份。
   let receiver = null, latestStatus = null;
   const pendingControls = [];
+  const pendingWorldEvents = new Map();
   const identityKey = 'gta5.public.identity:' + address + ':' + preferences.name;
   let savedIdentity = null;
   // 主页主动选择角色属于新加入；刷新游戏页才读取上一身份。当前连接的自动重连仍使用之后保存的身份。
@@ -96,6 +108,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   let supportsCombatFeedback = false;
   let supportsWorldV2 = false;
   let supportsEntityBatch = false;
+  let supportsMeleeEvents = false;
   let spawn = null;
   let reconnectTimer = 0, connectionTimer = 0, stateTimer = 0, shotTimer = 0, heartbeatTimer = 0, snapshotTimer = 0, attempts = 0;
   let lastServerMessageAt = performance.now(), pingNonce = 0;
@@ -144,6 +157,8 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     if (receiver) {
       // 渲染器失败不能被当作网络错误，从而反复注销和重建服务端身份。
       try { receiver(data); } catch { /* 游戏桥自行报告同步错误。 */ }
+    } else if (data.type === 'melee_event') {
+      pendingWorldEvents.set(data.event_id, data);
     } else if (['damage', 'death', 'respawn', 'correction'].includes(data.type)) {
       pendingControls.push(data);
       if (pendingControls.length > 64) pendingControls.shift();
@@ -178,6 +193,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
       spawn: connected ? spawn : null,
       weapon_rules: weaponRules.map((rule) => ({ ...rule })),
       world_v2: supportsWorldV2,
+      melee_events: supportsMeleeEvents,
       avatar: preferences.preset.endsWith('_female') ? 'female' : 'male', preset: preferences.preset, seed: preferences.seed,
       model: modelForPreset(preferences), appearance_spec: randomAppearance(preferences) });
   }
@@ -189,6 +205,70 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     if (!supportsWorldV2 || !profiled || now - lastWorldSyncAt < 1000) return;
     const current = world.state();
     if (send('world_sync', current.world_epoch ? { world_epoch: current.world_epoch, after_revision: current.world_revision } : {})) lastWorldSyncAt = now;
+  }
+  function logMelee(value) {
+    try { fetch('/log', { method: 'POST', body: '[public-melee] ' + JSON.stringify(value) }).catch(() => {}); } catch {}
+  }
+  function wireRequestId(value) {
+    if (typeof value !== 'string' || !/^[A-Za-z0-9_.:-]{1,64}$/.test(value)) return null;
+    if (requestAliases.has(value)) return requestAliases.get(value);
+    const wire = requestNamespace + ':' + (++wireRequestSequence).toString(36);
+    requestAliases.set(value, wire);
+    // 请求文本不截断，避免不同长ID映射到同一个服务器幂等键。
+    if (requestAliases.size > 4096) requestAliases.delete(requestAliases.keys().next().value);
+    return wire;
+  }
+  function receiveMeleeEvent(message) {
+    const current = world.state();
+    const id = (value) => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,160}$/.test(value);
+    const generation = (value) => Number.isSafeInteger(value) && value > 0;
+    if (!supportsMeleeEvents || message.schema_version !== 2 || message.world_epoch !== current.world_epoch
+      || !id(message.event_id) || !id(message.request_id) || !id(message.attacker_entity_id)
+      || !id(message.attacker_id) || !generation(message.attacker_generation) || message.action !== 'punch'
+      || message.accepted !== true || typeof message.hit !== 'boolean' || !Number.isInteger(message.damage)
+      || message.damage < 0 || message.damage > 20 || !Number.isSafeInteger(message.revision) || message.revision < 0
+      || !Number.isSafeInteger(message.world_tick) || message.world_tick < 0) return;
+    const attacker = world.entity(message.attacker_entity_id);
+    const target = message.target_entity_id === null ? null : world.entity(message.target_entity_id);
+    if (!attacker || attacker.kind !== 'ped' || attacker.generation !== message.attacker_generation
+      || attacker.player_id !== message.attacker_id || (message.target_entity_id !== null
+        && (!id(message.target_entity_id) || !target || target.kind !== 'ped' || target.generation !== message.target_generation))
+      || (message.target_entity_id === null && message.target_generation !== null)
+      || (message.hit && (!target || !Number.isInteger(message.health) || message.health < 0 || message.health > 200))
+      || (!message.hit && (message.damage !== 0 || message.health !== null))) return;
+    if (consumedMeleeEvents.has(message.event_id)) return;
+    consumedMeleeEvents.add(message.event_id);
+    if (consumedMeleeEvents.size > 256) consumedMeleeEvents.delete(consumedMeleeEvents.values().next().value);
+    const event = { type: 'melee_event', schema_version: 2, world_epoch: message.world_epoch, event_id: message.event_id,
+      request_id: message.request_id, action: 'punch', attacker_entity_id: message.attacker_entity_id,
+      attacker_id: message.attacker_id, attacker_generation: message.attacker_generation,
+      target_entity_id: message.target_entity_id, target_generation: message.target_generation,
+      accepted: true, hit: message.hit, damage: message.damage, health: message.health, revision: message.revision, world_tick: message.world_tick };
+    logMelee({ stage: 'event', request_id: event.request_id, event_id: event.event_id,
+      attacker_entity_id: event.attacker_entity_id, target_entity_id: event.target_entity_id, hit: event.hit, reason: '' });
+    emit(event);
+  }
+  function clearPendingMelee() { pendingMelee = null; clearTimeout(meleeTimer); meleeTimer = 0; }
+  function flushMelee() {
+    clearTimeout(meleeTimer); meleeTimer = 0;
+    if (!pendingMelee || stopped || !profiled) return;
+    const current = world.state(), attempt = pendingMelee, target = attempt.entity_id ? world.entity(attempt.entity_id) : null;
+    const actor = current.entities.find((entity) => entity.player_id === clientId);
+    if (!current.ready || current.world_epoch !== attempt.world_epoch || performance.now() - attempt.at >= 250
+      || (attempt.entity_id && (!target || target.generation !== attempt.target_generation)) || !actor
+      || actor.generation !== attempt.attacker_generation || actor.components.combat?.alive === false) { clearPendingMelee(); return; }
+    const state = latestLocalState;
+    if (!state) { clearPendingMelee(); return; }
+    pendingState = state;
+    if (!socket || socket.bufferedAmount > 65536 || !flushState(true)) { meleeTimer = setTimeout(flushMelee, 10); return; }
+    if (!send('interaction_request', { world_epoch: attempt.world_epoch, request_id: attempt.request_id,
+      action: 'melee', ...(target ? { entity_id: target.entity_id, target_generation: attempt.target_generation,
+        expected_revision: attempt.expected_revision } : {}) })) { meleeTimer = setTimeout(flushMelee, 10); return; }
+    const details = { request_id: attempt.request_id, attacker_entity_id: actor.entity_id,
+      attacker_generation: actor.generation, target_entity_id: target?.entity_id || null, target_generation: target?.generation || null };
+    meleeRequests.set(attempt.request_id, details);
+    if (meleeRequests.size > 128) meleeRequests.delete(meleeRequests.keys().next().value);
+    logMelee({ stage: 'sent', ...details }); clearPendingMelee();
   }
   function clearEntityInputs() {
     pendingEntityInputs.clear(); clearTimeout(entityTimer); entityTimer = 0;
@@ -234,14 +314,16 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   }
   function worldWorkerMessage(data) {
     if (!supportsWorldV2 || !world.state().ready || !socket
-      || (data.type !== 'entity_input' && socket.bufferedAmount > 65536)) return;
+      || (data.type !== 'entity_input' && !(data.type === 'interaction_request' && data.action === 'melee')
+        && socket.bufferedAmount > 65536)) return;
     const current = world.state();
     const ownPlayer = current.entities.find((entry) => entry.player_id === clientId);
+    const meleeNoTarget = data.type === 'interaction_request' && data.action === 'melee' && !data.entity_id;
     const leaveFromPlayer = data.type === 'interaction_request' && data.action === 'leave_vehicle'
       && (!data.entity_id || data.entity_id === ownPlayer?.entity_id);
     const targetId = leaveFromPlayer ? ownPlayer?.components.attachment?.entity_id
       : data.type === 'simulation_result' && !Object.hasOwn(data, 'entity_id') ? ownPlayer?.entity_id : data.entity_id;
-    const entity = world.entity(targetId);
+    const entity = meleeNoTarget ? ownPlayer : world.entity(targetId);
     if (!entity || (Object.hasOwn(data, 'world_epoch') && data.world_epoch !== current.world_epoch)) return;
     if (data.type === 'entity_ready') {
       if (entity.owner_id !== clientId || (entity.ownership && entity.ownership !== 'offered')
@@ -253,13 +335,28 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     }
     if (data.type === 'interaction_request') {
       if (!['enter_vehicle', 'leave_vehicle', 'melee'].includes(data.action)
-        || Object.keys(data).some((key) => !['type', 'world_epoch', 'entity_id', 'action', 'seat', 'request_id', 'expected_revision', 'target_generation'].includes(key))
+        || Object.keys(data).some((key) => !['type', 'world_epoch', 'entity_id', 'action', 'seat', 'request_id', 'expected_revision', 'target_generation', 'attacker_generation', 'actor_generation', 'state'].includes(key))
         || (data.action === 'enter_vehicle' && (entity.kind !== 'vehicle' || !/^(driver|passenger:(?:[0-9]|1[0-5]))$/.test(data.seat)))
-        || (Object.hasOwn(data, 'target_generation') && data.target_generation !== entity.generation)
-        || (!leaveFromPlayer && Object.hasOwn(data, 'expected_revision') && (!Number.isSafeInteger(data.expected_revision)
+        || (!meleeNoTarget && Object.hasOwn(data, 'target_generation') && data.target_generation !== entity.generation)
+        || (!leaveFromPlayer && !meleeNoTarget && Object.hasOwn(data, 'expected_revision') && (!Number.isSafeInteger(data.expected_revision)
           || data.expected_revision < 0 || data.expected_revision > entity.revision))) return;
-      const requestId = data.request_id ?? 'request-' + (++interactionSequence);
-      if (typeof requestId !== 'string' || !/^[A-Za-z0-9_.:-]{1,64}$/.test(requestId)) return;
+      const requestId = wireRequestId(data.request_id ?? 'request-' + (++interactionSequence));
+      if (!requestId) return;
+      if (data.action === 'melee') {
+        if (!ownPlayer || entity.kind !== 'ped'
+          || (Object.hasOwn(data, 'attacker_generation') && data.attacker_generation !== ownPlayer.generation)
+          || (Object.hasOwn(data, 'actor_generation') && data.actor_generation !== ownPlayer.generation)) return;
+        if (Object.hasOwn(data, 'state')) {
+          const clean = cleanPlayerState(data.state);
+          if (!clean) return;
+          latestLocalState = clean; pendingState = clean;
+        }
+        if (!latestLocalState) return;
+        pendingMelee = { world_epoch: current.world_epoch, request_id: requestId, entity_id: meleeNoTarget ? null : entity.entity_id,
+          target_generation: meleeNoTarget ? null : entity.generation, attacker_generation: ownPlayer.generation,
+          expected_revision: meleeNoTarget ? null : (data.expected_revision ?? entity.revision), at: performance.now() };
+        flushMelee(); return;
+      }
       send('interaction_request', { world_epoch: current.world_epoch, request_id: requestId, action: data.action,
         entity_id: entity.entity_id, target_generation: entity.generation,
         expected_revision: leaveFromPlayer ? entity.revision : (data.expected_revision ?? entity.revision),
@@ -409,6 +506,8 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     shotSequence++; lastShotSentAt = now;
     logCombat({ stage: 'sent', client_id: clientId, seq: shotSequence, weapon: shot.event.weapon });
     clearPendingShot();
+    clearPendingMelee(); meleeRequests.clear(); consumedMeleeEvents.clear();
+    pendingWorldEvents.clear();
     clearEntityInputs(); lastEntityBatchSentAt = -Infinity;
   }
   function onWorkerMessage(data) {
@@ -455,6 +554,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     supportsCombatFeedback = false;
     supportsWorldV2 = false; world.reset(); entityInputSequences.clear(); entityReadyEpochs.clear(); lastWorldSyncAt = -Infinity;
     supportsEntityBatch = false;
+    supportsMeleeEvents = false;
     peers.clear(); combat.clear(); pendingState = null;
     latestLocalState = null;
     weaponRules = []; weaponRuleByHash.clear();
@@ -477,6 +577,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
       ...(supportsActions ? ['actions'] : []),
       ...(supportsWorldV2 ? ['world_v2'] : []),
       ...(supportsEntityBatch ? ['entity_batch'] : []),
+      ...(supportsMeleeEvents ? ['melee_events'] : []),
     ];
     const identity = includeResume && supportsResume && validResumeIdentity(savedIdentity) ? savedIdentity : null;
     attemptedResumeId = null;
@@ -539,6 +640,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
         supportsCombatFeedback = message.capabilities.includes('combat_feedback');
         supportsWorldV2 = message.capabilities.includes('world_v2');
         supportsEntityBatch = supportsWorldV2 && message.capabilities.includes('entity_batch');
+        supportsMeleeEvents = supportsWorldV2 && message.capabilities.includes('melee_events');
         weaponRules = Object.hasOwn(message, 'weapon_rules') ? cleanWeaponRules(message.weapon_rules) : [];
         if (!weaponRules) throw new Error('服务器武器规则格式无效。');
         weaponRuleByHash.clear(); for (const rule of weaponRules) weaponRuleByHash.set(rule.weapon, rule);
@@ -589,7 +691,8 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
         const previousEpoch = world.state().world_epoch;
         const result = world.receive(message);
         if ((message.type === 'snapshot_begin' && result.changed) || result.needsSnapshot
-          || previousEpoch !== world.state().world_epoch) clearEntityInputs();
+          || previousEpoch !== world.state().world_epoch) { clearEntityInputs(); clearPendingMelee(); }
+        if (previousEpoch && previousEpoch !== world.state().world_epoch) pendingWorldEvents.clear();
         if (result.changed) postWorld();
         if (result.needsSnapshot) requestWorldSync();
         completeInitialJoin();
@@ -597,9 +700,19 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
       }
       case 'interaction_result':
         if (supportsWorldV2 && typeof message.request_id === 'string' && message.request_id.length <= 64
-          && typeof message.accepted === 'boolean' && (!Object.hasOwn(message, 'reason') || typeof message.reason === 'string')) emit({
-          type: 'interaction_result', request_id: message.request_id, accepted: message.accepted,
-          ...(typeof message.reason === 'string' ? { reason: message.reason.slice(0, 200) } : {}) });
+          && typeof message.accepted === 'boolean' && (!Object.hasOwn(message, 'reason') || typeof message.reason === 'string')) {
+          const previous = meleeRequests.get(message.request_id);
+          if (previous) logMelee({ stage: 'result', ...previous, accepted: message.accepted,
+            hit: message.hit === true, reason: typeof message.reason === 'string' ? message.reason.slice(0, 200) : '',
+            ...(typeof message.attacker_entity_id === 'string' ? { attacker_entity_id: message.attacker_entity_id } : {}),
+            ...(typeof message.target_entity_id === 'string' || message.target_entity_id === null ? { target_entity_id: message.target_entity_id } : {}) });
+          emit({ type: 'interaction_result', request_id: message.request_id, accepted: message.accepted,
+            ...(message.action === 'melee' || previous ? { action: 'melee', hit: message.hit === true } : {}),
+            ...(typeof message.reason === 'string' ? { reason: message.reason.slice(0, 200) } : {}) });
+        }
+        break;
+      case 'melee_event':
+        receiveMeleeEvent(message);
         break;
       case 'player_state': {
         if (message.room_id !== room?.id || !room.members.some(({ id }) => id === message.player_id)) return;
@@ -714,6 +827,8 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
       if (latestStatus) emit(latestStatus);
       const controls = pendingControls.splice(0);
       for (const control of controls) emit(control);
+      const events = [...pendingWorldEvents.values()]; pendingWorldEvents.clear();
+      for (const event of events) if (event.world_epoch === world.state().world_epoch) emit(event);
     }
   }
   function close() {
@@ -724,7 +839,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     removeEventListener('online', checkConnection);
     document.removeEventListener('visibilitychange', onVisibilityChange);
     releaseIdentityLock();
-    receiver = null; pendingControls.length = 0;
+    receiver = null; pendingControls.length = 0; pendingWorldEvents.clear();
     if (!initialDone) { initialDone = true; readyReject(new Error('已取消连接。')); }
   }
   addEventListener('pagehide', close, { once: true });

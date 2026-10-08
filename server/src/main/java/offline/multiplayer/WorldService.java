@@ -15,6 +15,7 @@ final class WorldService {
     private final Map<String,Offer> offers=new LinkedHashMap<>();
     private final Map<String,LinkedHashMap<String,CompletedRequest>> completedRequests=new HashMap<>();
     private record CompletedRequest(Map<String,Object> input,Map<String,Object> result) {}
+    private long meleeRequests,meleeEvents,meleeHits;
     private final Map<String,Long> interactions=new HashMap<>(),lifeReports=new LinkedHashMap<>();
     private final Map<String,String> playerCell=new HashMap<>();
     private final Set<String> populationCells=new LinkedHashSet<>();
@@ -116,6 +117,7 @@ final class WorldService {
         lifeReports.keySet().removeIf(key->key.startsWith(id+":"));
     }
     Map<String,Object> profile(String id){return combat.profile(id);}
+    Map<String,Object> meleeStats(){return map("melee_requests_received",meleeRequests,"melee_events_approved",meleeEvents,"melee_hits",meleeHits);}
     int statePlayers(){return combat.statePlayers();}
     Map<String,Object> combatState(){return combat.combatState();}
     Map<String,Object> worldState(){return combat.worldState();}
@@ -237,6 +239,7 @@ final class WorldService {
     List<Map<String,Object>> interaction(String actor,Map<String,Object> input)throws Problem,WorldRegistry.Rejection{
         fields(input,"type","world_epoch","request_id","action","entity_id","seat","expected_revision","target_generation");epoch(input);
         String request=text(input.get("request_id"),64),action=text(input.get("action"),40);
+        if("melee".equals(action))meleeRequests++;
         LinkedHashMap<String,CompletedRequest> cache=completedRequests.get(actor);
         CompletedRequest previous=cache==null?null:cache.get(request);
         if(previous!=null){
@@ -245,13 +248,19 @@ final class WorldService {
         }
         Entity player=registry.playerEntity(actor);
         if(player==null)throw new Problem("not_in_room","请先加入公共世界");
-        long revision=integer(input.get("expected_revision"),0,9_007_199_254_740_991L);String target=text(input.get("entity_id"),128);
-        Entity targetEntity=required(target);
-        if(input.containsKey("target_generation") && integer(input.get("target_generation"),1,9_007_199_254_740_991L)!=targetEntity.generation())
-            throw new Problem("stale_generation","目标已进入新的生命周期");
-        if(revision<(targetEntity.generation()==1?0:registry.generationStartRevision(target)))throw new Problem("stale_generation","请求基线属于旧生命周期");
-        if(revision>targetEntity.revision())throw new Problem("invalid_revision","请求基线超出当前目标版本");
-        List<Map<String,Object>> events=new ArrayList<>();
+        boolean untargeted="melee".equals(action) && (!input.containsKey("entity_id") || input.get("entity_id")==null);
+        if(untargeted && (input.containsKey("expected_revision") || input.containsKey("target_generation")))
+            throw new Problem("invalid_message","无目标近战不应携带目标版本");
+        long revision=untargeted?0:integer(input.get("expected_revision"),0,9_007_199_254_740_991L);
+        String target=untargeted?null:text(input.get("entity_id"),128);
+        Entity targetEntity=untargeted?null:required(target);
+        if(targetEntity!=null){
+            if(input.containsKey("target_generation") && integer(input.get("target_generation"),1,9_007_199_254_740_991L)!=targetEntity.generation())
+                throw new Problem("stale_generation","目标已进入新的生命周期");
+            if(revision<(targetEntity.generation()==1?0:registry.generationStartRevision(target)))throw new Problem("stale_generation","请求基线属于旧生命周期");
+            if(revision>targetEntity.revision())throw new Problem("invalid_revision","请求基线超出当前目标版本");
+        }
+        List<Map<String,Object>> events=new ArrayList<>();Map<String,Object> meleeResult=null;
         if("enter_vehicle".equals(action)){
             String seat=text(input.get("seat"),32);registry.enterSeat(actor,player.entityId(),player.ownerEpoch(),target,seat,revision,now());
             if("driver".equals(seat))offer(target,actor);
@@ -259,28 +268,66 @@ final class WorldService {
             if(player.components().attachment()==null || !player.components().attachment().entityId().equals(target))throw new Problem("invalid_seat","目标不是当前乘坐的车辆");
             registry.leaveSeat(actor,player.entityId(),player.ownerEpoch(),now());offers.remove(target);
         }else if("melee".equals(action)){
+            if(input.containsKey("seat"))throw new Problem("invalid_message","近战不接受座位字段");
             if(!actor.equals(player.ownerId()) || player.leaseUntilTick()<=now())throw new Problem("stale_owner","玩家角色需要有效活动租约");
-            Entity victim=required(target);if(victim.kind()!=Kind.PED || victim.entityId().equals(player.entityId()) || victim.components().combat()==null)
-                throw new Problem("invalid_target","近战目标必须是另一个角色");
-            if(!player.components().combat().alive() || !victim.components().combat().alive())throw new Problem("dead_entity","死亡角色不能参与近战");
-            Vector source=position(player),destination=position(victim);
-            double dx=destination.x()-source.x(),dy=destination.y()-source.y(),horizontal=Math.hypot(dx,dy);
-            if(source.distance(destination)>2 || Math.abs(destination.z()-source.z())>1.5)
-                throw new Problem("too_far","近战距离或高度差超出范围");
-            if(horizontal>.1){
-                double heading=Math.toRadians(player.components().transform().rotation().heading());
-                double facing=(-Math.sin(heading)*dx+Math.cos(heading)*dy)/horizontal;
-                if(facing<.15)throw new Problem("not_facing","近战目标必须位于角色前方");
+            if(!player.components().combat().alive())throw new Problem("dead_entity","死亡角色不能参与近战");
+            Entity victim=untargeted?nearestMeleeTarget(player):targetEntity;
+            if(victim!=null){
+                if(victim.kind()!=Kind.PED || victim.entityId().equals(player.entityId()) || victim.components().combat()==null)
+                    throw new Problem("invalid_target","近战目标必须是另一个角色");
+                if(!victim.components().combat().alive())throw new Problem("dead_entity","死亡角色不能参与近战");
+                String geometry=meleeGeometry(player,victim);
+                if(geometry!=null)throw new Problem(geometry,"too_far".equals(geometry)?"近战距离或高度差超出范围":"近战目标必须位于角色前方");
             }
-            long last=interactions.getOrDefault(actor,Long.MIN_VALUE);
-            if(last!=Long.MIN_VALUE && now()-last<700)throw new Problem("rate_limited","近战冷却尚未结束");
-            interactions.put(actor,now());events.addAll(applyDamage(player,victim,20,now()));
+            long tick=now(),last=interactions.getOrDefault(actor,Long.MIN_VALUE);
+            if(last!=Long.MIN_VALUE && tick-last<700)throw new Problem("rate_limited","近战冷却尚未结束");
+            boolean hit=victim!=null;int damage=hit?Math.min(20,victim.components().combat().health()):0;
+            if(hit)events.addAll(applyDamage(player,victim,20,tick));
+            interactions.put(actor,tick);meleeEvents++;if(hit)meleeHits++;
+            Entity updated=hit?registry.entity(victim.entityId()):registry.entity(player.entityId());
+            Integer health=hit?updated.components().combat().health():null;
+            long currentRevision=updated.revision();
+            Map<String,Object> event=map("type","melee_event","schema_version",2,"world_epoch",epoch(),
+                "event_id","m:"+epoch()+":"+meleeEvents,"request_id",request,"action","punch","accepted",true,
+                "attacker_entity_id",player.entityId(),"attacker_id",actor,"attacker_generation",player.generation(),
+                "target_entity_id",hit?victim.entityId():null,"target_generation",hit?victim.generation():null,
+                "hit",hit,"damage",damage,"health",health,"revision",currentRevision,
+                "world_revision",registry.snapshot().cutRevision(),"world_tick",tick);
+            events.add(event);
+            meleeResult=map("action","melee","hit",hit,"damage",damage,"health",health,
+                "attacker_entity_id",player.entityId(),"attacker_generation",player.generation(),
+                "target_entity_id",hit?victim.entityId():null,"target_generation",hit?victim.generation():null,
+                "revision",currentRevision);
         }else throw new Problem("unsupported_interaction","不支持该交互动作");
-        Map<String,Object> result=Collections.unmodifiableMap(map("type","interaction_result","request_id",request,"accepted",true));
+        Map<String,Object> resultValues=map("type","interaction_result","request_id",request,"accepted",true);
+        if(meleeResult!=null)resultValues.putAll(meleeResult);
+        Map<String,Object> result=Collections.unmodifiableMap(resultValues);
         cache=completedRequests.computeIfAbsent(actor,ignored->new LinkedHashMap<>());
         cache.put(request,new CompletedRequest(Collections.unmodifiableMap(new LinkedHashMap<>(input)),result));
         while(cache.size()>64)cache.remove(cache.keySet().iterator().next());
         events.add(result);return events;
+    }
+    private Entity nearestMeleeTarget(Entity player){
+        Entity target=null;double nearest=2.0001;
+        for(Entity candidate:registry.snapshot().entities()){
+            if(candidate.kind()!=Kind.PED || candidate.entityId().equals(player.entityId()) || candidate.components().combat()==null
+                || !candidate.components().combat().alive() || meleeGeometry(player,candidate)!=null)continue;
+            if(candidate.playerId()!=null){Map<String,Object> profile=profile(candidate.playerId());
+                // 断线角色已撤销所有权，不能被继续当作近战活体目标。
+                if(profile==null || candidate.ownerId()==null)continue;
+            }else if(candidate.ownerId()==null)continue;
+            double distance=position(player).distance(position(candidate));
+            if(distance<nearest){nearest=distance;target=candidate;}
+        }
+        return target;
+    }
+    private String meleeGeometry(Entity attacker,Entity victim){
+        Vector source=position(attacker),destination=position(victim);
+        double dx=destination.x()-source.x(),dy=destination.y()-source.y(),horizontal=Math.hypot(dx,dy);
+        if(source.distance(destination)>2 || Math.abs(destination.z()-source.z())>1.5)return "too_far";
+        if(horizontal>.1){double heading=Math.toRadians(attacker.components().transform().rotation().heading());
+            if((-Math.sin(heading)*dx+Math.cos(heading)*dy)/horizontal<.15)return "not_facing";}
+        return null;
     }
     List<Map<String,Object>> simulation(String actor,Map<String,Object> input)throws Problem,WorldRegistry.Rejection{
         fields(input,"type","world_epoch","entity_id","owner_epoch","input_seq","kind","reason","health","engine_health","body_health");epoch(input);

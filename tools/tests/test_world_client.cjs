@@ -150,3 +150,57 @@ test('适配器将完整 world 基线交给引擎并保持 v1 信息，游戏输
   const disconnected = JSON.parse(new TextDecoder().decode(new Uint8Array(memory.buffer, block + 16, Atomics.load(new Int32Array(memory.buffer, block, 4), 1))));
   assert.equal(disconnected.world, null);
 });
+
+function adapterHarness() {
+  const timers = new Map(), hud = { style: {}, textContent: '' }; let receiver, timer = 0;
+  const context = vm.createContext({ TextEncoder, Atomics, Int32Array, Uint8Array,
+    BroadcastChannel: class { close() {} }, document: { getElementById: () => hud }, addEventListener() {},
+    fetch: () => Promise.resolve({ ok: true }), performance: { now: () => 100 },
+    setTimeout: (callback) => { timers.set(++timer, callback); return timer; }, clearTimeout: (id) => timers.delete(id) });
+  vm.runInContext(read('game-adapter.js').replace('export function installGameAdapter', 'function installGameAdapter') + '\nglobalThis.install=installGameAdapter;', context);
+  const api = context.install({}, { setReceiver: (callback) => { receiver = callback; }, onWorkerMessage() {} });
+  const memory = { buffer: new SharedArrayBuffer(262144) }, block = 128, capacity = 128 * 1024;
+  api.onWorkerMessage({ multiplayer: { type: 'memory', memory, block, capacity } });
+  const packet = () => {
+    const callbacks = [...timers.values()]; timers.clear(); for (const callback of callbacks) callback();
+    return JSON.parse(new TextDecoder().decode(new Uint8Array(memory.buffer, block + 16, Atomics.load(new Int32Array(memory.buffer, block, 4), 1))));
+  };
+  const world = (changes = {}) => receiver({ type: 'world_state_v2', schema_version: 2, world_epoch: 'epochA', world_revision: 5,
+    world_tick: 100, stream_seq: 0, ready: true, entities: [ped(), vehicle()], tombstones: [], ...changes });
+  const session = (changes = {}) => receiver({ type: 'session', connected: true, client_id: 'LOCAL', members: [{ id: 'LOCAL' }],
+    peers: [], world_v2: true, melee_events: true, ...changes });
+  return { api, receive: (value) => receiver(value), world, session, packet, hud };
+}
+
+test('可靠近战事件队列跨世界快照和会话更新保留，成功确认只移除匹配事件，重复广播不重新入队', () => {
+  const page = adapterHarness(); page.session(); page.world();
+  const event = { type: 'melee_event', schema_version: 2, world_epoch: 'epochA', event_id: 'm:epochA:1', request_id: 'punch1',
+    attacker_entity_id: ped().entity_id, attacker_generation: 1, target_entity_id: null, target_generation: null,
+    action: 'punch', accepted: true, hit: false, damage: 0, health: null, revision: 1, world_tick: 120 };
+  page.receive(event); page.receive(event);
+  let packet = page.packet(); assert.equal(packet.world_events.length, 1);
+  const first = packet.world_events[0].id;
+  page.receive({ ...event, event_id: 'm:epochA:2', request_id: 'punch2' });
+  page.world({ ready: false }); page.session(); page.world({ world_revision: 7, stream_seq: 2 });
+  packet = page.packet(); assert.equal(packet.world_events.length, 2); assert.equal(packet.world_events[0].id, first);
+  page.api.onWorkerMessage({ multiplayer: { type: 'world_event_ack', ids: [first] } });
+  packet = page.packet(); assert.equal(packet.world_events.length, 1);
+  assert.equal(packet.world_events[0].event.event_id, 'm:epochA:2');
+  page.api.onWorkerMessage({ multiplayer: { type: 'world_event_ack', ids: [first] } });
+  assert.equal(page.packet().world_events.length, 1);
+  page.receive(event); assert.equal(page.packet().world_events.length, 1, '已确认动作不能在服务器重发后重复播放');
+  page.world({ world_epoch: 'epochB' }); assert.equal(page.packet().world_events.length, 0, '新的世界不能继承旧动作');
+});
+
+test('未确认世界事件不能因后续高频快照静默丢弃，老服务器仅提示能力缺失不改目标地址', () => {
+  const page = adapterHarness(); page.session(); page.world();
+  for (let index = 0; index < 70; index++) page.receive({ type: 'melee_event', world_epoch: 'epochA',
+    event_id: 'm:epochA:' + index, request_id: 'p' + index, action: 'punch' });
+  assert.equal(page.packet().world_events.length, 70, '待确认可靠动作不能用shift丢弃旧事件');
+  page.session({ connected: false, client_id: null }); assert.equal(page.packet().world_events.length, 0);
+  const legacy = adapterHarness(); legacy.session({ world_v2: false, melee_events: false });
+  let packet = legacy.packet(); assert.equal(packet.notices.filter((notice) => notice.text.includes('不支援近戰')).length, 1);
+  assert.ok(!packet.notices.some((notice) => /47486/.test(notice.text)));
+  legacy.session({ world_v2: false, melee_events: false });
+  packet = legacy.packet(); assert.equal(packet.notices.filter((notice) => notice.text.includes('不支援近戰')).length, 1);
+});

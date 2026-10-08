@@ -616,6 +616,11 @@ self.prepareMultiplayerBridge = function (imports) {
         worldEntities?.suppressPopulation(packet);
         if (!useOwner(thread, handler, now)) return;
         sampleShots(now);
+        const meleePed = ex.mpGetPlayerPed(-1);
+        worldEntities?.sampleMelee(packet, now, meleePed, {
+          localReady: initialPlacement && avatarInitialized && !avatarChangeRequested && !modelRestore
+            && Boolean(meleePed && (ex.mpGetModel(meleePed) >>> 0) === avatarTarget),
+        });
         if (now - lastTick < 40) return;
         lastTick = now;
         observeWorldReadiness(now);

@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[2]
@@ -23,6 +24,14 @@ from inspect_native_bridge import WasmAudit
 
 
 class PublicEnginePatchTests(unittest.TestCase):
+    def test_cached_melee_inputs_use_two_byte_outputs_and_preserve_original_body(self):
+        index = 41719
+        self.assertIn('mpCachedMeleeInputs', self.audits['public'].exports[index])
+        self.assertEqual(self.original.descriptor(index)['signature'], {'parameters': ['i64', 'i64'], 'results': []})
+        operations = self.original.instructions(index)['instructions']
+        self.assertEqual(sum(item['operation'] == 'i32.store8' for item in operations), 2)
+        self.assertEqual(self.body(self.original, index), self.body(self.audits['public'], index))
+
     def test_world_component_native_abis_and_original_function_bodies(self):
         expected = {
             'mpCreateVehicle': (61266, ['i32', 'i64', 'f32', 'i32', 'i32', 'i32'], ['i32']),
@@ -347,6 +356,91 @@ class PublicEnginePatchTests(unittest.TestCase):
             for result in (self.audits["replica"], self.audits["public"]):
                 self.assertIn(name, result.exports[index])
                 self.assertEqual(self.body(self.original, index), self.body(result, index), name)
+
+    def test_script_animation_exports_abis_and_original_bodies(self):
+        expected = {
+            "mpAnimDictExists": (60331, "streaming_commands::DoesAnimDictExist(char const*)", ["i64"], ["i32"]),
+            "mpRequestAnimDict": (60332, "streaming_commands::RequestAnimDict(char const*)", ["i64"], []),
+            "mpHasAnimDictLoaded": (60333, "streaming_commands::HasAnimDictLoaded(char const*)", ["i64"], ["i32"]),
+            "mpTaskPlayAnim": (60617, "task_commands::CommandTaskPlayAnim(int, char const*, char const*, float, float, int, int, float, bool, int, bool)", ["i32", "i64", "i64", "f32", "f32", "i32", "i32", "f32", "i32", "i32", "i32"], []),
+            "mpIsPlayingAnim": (50077, "entity_commands::CommandIsEntityPlayingAnim(int, char const*, char const*, int)", ["i32", "i64", "i64", "i32"], ["i32"]),
+            "mpAnimTime": (50024, "entity_commands::CommandGetEntityAnimCurrentTime(int, char const*, char const*)", ["i32", "i64", "i64"], ["f32"]),
+        }
+        for name, (index, native_name, parameters, results) in expected.items():
+            self.assertEqual(export_map(True)[name], (index, native_name, parameters, results))
+            self.assertEqual(self.original.descriptor(index)["signature"], {"parameters": parameters, "results": results})
+            self.assertNotIn(name, self.audits["probe"].exports.get(index, []))
+            for result in (self.audits["replica"], self.audits["public"]):
+                self.assertIn(name, result.exports[index])
+                self.assertEqual(self.body(self.original, index), self.body(result, index), name)
+
+    def test_script_animation_wrapper_preserves_string_order_and_secondary_flags(self):
+        wrapper = self.original.instructions(60617)
+        self.assertTrue(wrapper["decode_complete"])
+        items = wrapper["instructions"]
+        call = next(index for index, item in enumerate(items)
+                    if item["operation"] == "call" and item["target"]["function_index"] == 60616)
+        args = items[call - 15:call]
+        self.assertEqual([item["operation"] for item in args], ["local.get"] * 8
+                         + ["i32.const", "i64.const", "i64.const", "local.get", "i32.const", "local.get", "local.get"])
+        self.assertEqual([item["index"] for item in args[:8]], [0, 2, 1, 3, 4, 5, 6, 9],
+                         "公开 native 顺序为字典、剪辑；内部优化参数顺序不可套作公开接口")
+        self.assertEqual(args[8]["value"], 0)
+        self.assertEqual(args[9]["value"], args[10]["value"])
+        self.assertEqual(args[11]["index"], 7)
+        self.assertEqual(args[12]["value"], 2)
+        self.assertEqual([item["index"] for item in args[-2:]], [8, 10])
+        helper = self.original.instructions(60616)
+        self.assertTrue(helper["decode_complete"])
+        calls = {item["target"]["function_index"] for item in helper["instructions"] if item["operation"] == "call"}
+        self.assertIn(65950, calls, "普通脚本动画创建 CTaskScriptedAnimation")
+        self.assertIn(65951, calls)
+        self.assertIn(29870, calls, "secondary 分支存在独立次级任务插入")
+        self.assertFalse(calls & {66224, 89361, 52889, 60656}, "视觉剪辑入口不调用近战结果、伤害事件或真实射击任务")
+        constants = {item["value"] for item in helper["instructions"] if item["operation"] == "i32.const"}
+        self.assertIn(16, constants)
+        self.assertIn(32, constants)
+        request = self.original.instructions(60332)
+        self.assertTrue(request["decode_complete"])
+        self.assertTrue(any(item["operation"] == "call" and item["target"]["function_index"] == 63772
+                            for item in request["instructions"]), "动画请求归当前有效脚本 handler 的流式资源")
+
+    def test_melee_queries_are_task_presence_and_target_not_attack_counters(self):
+        presence = self.original.instructions(57608)
+        target = self.original.instructions(57612)
+        self.assertTrue(presence["decode_complete"])
+        self.assertTrue(target["decode_complete"])
+        self.assertTrue(any(item["operation"] == "call" and item["target"]["function_index"] == 41387
+                            for item in presence["instructions"]))
+        find = self.original.instructions(41387)
+        task = next(index for index, item in enumerate(find["instructions"])
+                    if item["operation"] == "call" and item["target"]["function_index"] == 5949)
+        self.assertEqual(find["instructions"][task - 1]["value"], 131)
+        self.assertTrue(any(item["operation"] == "i64.load" and item["memory"]["offset"] == 368
+                            for item in target["instructions"]))
+        self.assertTrue(any(item["operation"] == "call" and item["target"]["function_index"] == 8689
+                            for item in target["instructions"]), "返回值是本地 GUID，必须映射到统一实体")
+        self.assertFalse(any(item["operation"] == "i32.load" and item["memory"]["offset"] == 408
+                             for item in target["instructions"]), "该查询没有直接读取 invincible 标记")
+
+    def test_unarmed_punch_clip_names_are_referenced_by_current_project_resources(self):
+        result_path = ROOT / "gta5data/data/common/data/action/results.meta"
+        metadata_path = ROOT / "gta5data/data/common/non_final/anim/clip_dictionary_metadata/clip_melee@.xml"
+        weapons_path = ROOT / "gta5data/data/common/data/ai/weaponanimations.meta"
+        dictionary = "melee@unarmed@streamed_core"
+        results = ET.parse(result_path)
+        entries = {item.findtext("Name"): item for item in results.iter("Item")
+                   if item.findtext("ClipSet") == dictionary}
+        for name, clip in (("AR_heavy_1a", "heavy_punch_a"), ("AR_heavy_2a", "heavy_punch_b"), ("AR_heavy_3a", "heavy_punch_c")):
+            self.assertEqual(entries[name].findtext("Anim"), clip)
+            self.assertIn("RA_IS_STANDARD_ATTACK", entries[name].findtext("ResultAttrs"))
+            self.assertFalse(clip.startswith("victim_"), "攻击视觉不能误选受害者/倒地动画")
+        metadata = ET.parse(metadata_path)
+        resource = next(item for item in metadata.iter("Item") if item.get("key") == dictionary + ".icd.zip")
+        self.assertGreater(int(resource.find("sizeAfter").get("value")), 0)
+        weapons = ET.parse(weapons_path)
+        self.assertTrue(any(item.get("key") == "WEAPON_UNARMED" and item.findtext("MeleeClipSetHash") == dictionary
+                            for item in weapons.iter("Item")))
 
     def test_disabling_ragdoll_restores_animation_using_original_defaults(self):
         decoded = self.original.instructions(57471)

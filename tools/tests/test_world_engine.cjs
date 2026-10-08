@@ -27,6 +27,8 @@ function harness() {
   const local = { position: [711, -1088, 22.4], health: 200, arrested: false, dead: false, vehicle: 0 };
   entities.set(7, local); entities.set(8, { position: [713, -1088, 22.4], health: 200 });
   let allocated = 256, next = 100, loaded = true, melee = false, meleeTarget = 8, trying = 0;
+  let attackInput = false, animationLoaded = true, animationFailure = false;
+  const playing = new Map();
   const v = () => new DataView(memory.buffer);
   const writeVector = (pointer, values) => values.forEach((value, index) => v().setFloat32(Number(pointer) + 8 * index, value, true));
   const readVector = pointer => [0, 8, 16].map(index => v().getFloat32(Number(pointer) + index, true));
@@ -62,6 +64,13 @@ function harness() {
     mpLeaveVehicle: handle => { entities.get(handle).vehicle = 0; },
     mpPlayerId: () => 0, mpIsArrested: () => local.arrested ? 1 : 0,
     mpMeleeAction: () => melee ? 1 : 0, mpMeleeTarget: () => meleeTarget,
+    mpCachedMeleeInputs: (first, second) => { v().setUint8(Number(first), attackInput ? 1 : 0); v().setUint8(Number(second), 0); },
+    mpHeading: handle => entities.get(handle).heading || 270,
+    mpGetModel: () => 0x705e61f2, mpSelectedWeapon: () => 0xa2719263,
+    mpAnimDictExists: () => 1, mpHasAnimDictLoaded: () => animationLoaded ? 1 : 0, mpRequestAnimDict() {},
+    mpTaskPlayAnim: (handle, dict, clip) => { if (!animationFailure) playing.set(handle, { dict, clip }); },
+    mpIsPlayingAnim: (handle, dict, clip) => playing.get(handle)?.dict === dict && playing.get(handle)?.clip === clip ? 1 : 0,
+    mpAnimTime: () => .4,
     mpTryingVehicle: () => trying, mpTryingSeat: () => -1, mpClearTasksImmediately() {},
     mpFadeAfterDeath() {}, mpFadeAfterArrest() {}, mpFadeAfterRestart() {},
     mpPedDensity() {}, mpScenarioDensity() {}, mpVehicleDensity() {}, mpRandomVehicleDensity() {}, mpParkedVehicleDensity() {},
@@ -78,11 +87,13 @@ function harness() {
   const ex = Object.fromEntries(Object.entries(implementation).map(([name, callback]) => [name, (...arguments_) => {
     calls.push({ name, arguments: arguments_ }); return callback(...arguments_);
   }]));
-  const self = {}, context = vm.createContext({ self, DataView, Uint8Array, BigInt });
+  const self = {}, context = vm.createContext({ self, DataView, Uint8Array, BigInt, TextEncoder });
   vm.runInContext(source, context);
   const bridge = self.createWorldEntityBridge({ ex, memory, post: value => messages.push(copy(value)), playerReplica: id => id === 'REMOTE' ? 8 : 0 });
-  return { bridge, entities, calls, messages, local, setLoaded: value => { loaded = value; },
-    setMelee: (value, target = 8) => { melee = value; meleeTarget = target; }, setTrying: value => { trying = value; } };
+  return { bridge, memory, entities, calls, messages, local, setLoaded: value => { loaded = value; },
+    setMelee: (value, target = 8) => { melee = value; meleeTarget = target; }, setTrying: value => { trying = value; },
+    setAttackInput: value => { attackInput = value; }, setAnimationLoaded: value => { animationLoaded = value; },
+    setAnimationFailure: value => { animationFailure = value; }, playing };
 }
 test('模型加载完成前不创建或确认，offered只就绪，active才模拟和上报', () => {
   const h = harness(), state = packet([player(), car()]); h.setLoaded(false); h.bridge.update(state, 100, 7);
@@ -164,8 +175,66 @@ test('服务器重生换代时不把尚未恢复的旧尸体再次上报为新�
 test('近战只上报统一实体目标，不调用本地伤害命令，持续同动作不重复发送', () => {
   const h = harness(), target = player({ entity_id: 'p2', player_id: 'REMOTE' });
   const state = packet([player(), target]); h.setMelee(true); h.bridge.update(state, 600, 7); h.bridge.update(state, 1200, 7);
-  const melee = h.messages.filter(m => m.action === 'melee'); assert.equal(melee.length, 1); assert.equal(melee[0].entity_id, 'p2');
+  const melee = h.messages.filter(m => m.action === 'melee'); assert.equal(melee.length, 1);
+  assert.ok(!Object.hasOwn(melee[0], 'entity_id'), '服务器自行选择前方目标，不能依赖本机GUID');
+  assert.equal(melee[0].state.heading, 270);
   assert.equal(h.entities.get(8).health, 200);
+});
+
+test('本机近战目标为0仍上报意图，连续任务内新缓存输入可产生下一拳', () => {
+  const h = harness(), target = player({ entity_id: 'p2', player_id: 'REMOTE' });
+  const state = packet([player(), target]); h.setMelee(true, 0); h.bridge.update(state, 600, 7);
+  const intents = () => h.messages.filter(m => m.action === 'melee');
+  assert.equal(intents().length, 1);
+  h.bridge.sampleMelee(state, 605, 7); assert.equal(intents().length, 1);
+  h.setAttackInput(true); h.bridge.sampleMelee(state, 1400, 7); assert.equal(intents().length, 2);
+  h.bridge.sampleMelee(state, 1405, 7); assert.equal(intents().length, 2);
+  assert.equal(h.entities.get(8).health, 200);
+});
+
+const meleeEvent = (changes = {}) => ({ type: 'melee_event', schema_version: 2, world_epoch: 'epoch1', event_id: 'melee:1',
+  attacker_entity_id: 'p2', attacker_generation: 1, target_entity_id: 'p1', target_generation: 1,
+  request_id: 'request:1', action: 'punch', hit: true, damage: 20, health: 180, revision: 2, ...changes });
+test('远端挥拳由服务器事件播放安全动画，成功确认后同ID不重放且不独立扣血', () => {
+  const h = harness(), state = packet([player(), player({ entity_id: 'p2', player_id: 'REMOTE' })]);
+  state.world_events = [{ id: 1, event: meleeEvent() }]; h.bridge.update(state, 100, 7);
+  assert.equal(h.calls.filter(c => c.name === 'mpTaskPlayAnim').length, 1);
+  const animation = h.calls.find(c => c.name === 'mpTaskPlayAnim');
+  assert.equal(animation.arguments[0], 8);
+  assert.deepEqual(animation.arguments.slice(3), [8, -8, 700, 48, 0, 0, 0, 0]);
+  const text = pointer => {
+    const bytes = new Uint8Array(h.memory.buffer, Number(pointer), 64);
+    const nul = bytes.indexOf(0); assert.ok(nul > 0);
+    return new TextDecoder().decode(bytes.slice(0, nul));
+  };
+  assert.equal(text(animation.arguments[1]), 'melee@unarmed@streamed_core');
+  assert.equal(text(animation.arguments[2]), 'heavy_punch_a');
+  assert.ok(h.messages.some(m => m.type === 'world_event_ack' && m.ids.includes(1)));
+  h.bridge.update(state, 500, 7); assert.equal(h.calls.filter(c => c.name === 'mpTaskPlayAnim').length, 1);
+  assert.equal(h.local.health, 200); assert.equal(h.entities.get(8).health, 200);
+});
+
+test('动画资源未就绪时保留事件，载入后播放；自己与旧代际事件只确认不播放', () => {
+  const h = harness(), state = packet([player(), player({ entity_id: 'p2', player_id: 'REMOTE' })]);
+  state.world_events = [{ id: 1, event: meleeEvent() }]; h.setAnimationLoaded(false); h.bridge.update(state, 100, 7);
+  assert.equal(h.calls.filter(c => c.name === 'mpTaskPlayAnim').length, 0);
+  assert.equal(h.messages.filter(m => m.type === 'world_event_ack').length, 0);
+  assert.ok(h.calls.some(c => c.name === 'mpRequestAnimDict'));
+  h.setAnimationLoaded(true); h.bridge.update(state, 500, 7);
+  assert.equal(h.calls.filter(c => c.name === 'mpTaskPlayAnim').length, 1);
+  state.world_events = [{ id: 2, event: meleeEvent({ attacker_entity_id: 'p1' }) },
+    { id: 3, event: meleeEvent({ attacker_generation: 0 }) }]; h.bridge.update(state, 600, 7);
+  assert.equal(h.calls.filter(c => c.name === 'mpTaskPlayAnim').length, 1);
+  assert.ok(h.messages.some(m => m.type === 'world_event_ack' && m.ids.includes(2) && m.ids.includes(3)));
+});
+
+test('动画调用未实际开始会限频重试并软报告，不停止角色世界同步', () => {
+  const h = harness(), state = packet([player(), player({ entity_id: 'p2', player_id: 'REMOTE' }), car()]);
+  state.world_events = [{ id: 1, event: meleeEvent() }]; h.setAnimationFailure(true);
+  for (const at of [100, 200, 500, 900, 2200]) h.bridge.update(state, at, 7);
+  assert.equal(h.calls.filter(c => c.name === 'mpTaskPlayAnim').length, 3);
+  assert.ok(h.messages.some(m => m.phase === 'melee_animation_unavailable'));
+  assert.ok(h.bridge.entityHandle('v1'));
 });
 test('密度限制只在统一世界已就绪时应用，断线冻结并清理世界副本', () => {
   const h = harness(), state = packet([player(), car()]); state.world.ready = false;

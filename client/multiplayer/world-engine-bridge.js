@@ -8,6 +8,12 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica }) {
   let lastSeat = null, leavePendingAt = -Infinity;
   let enumerationBuffer = 0, lastPopulationCleanup = -Infinity;
   let localGeneration = null;
+  let animationBuffer = 0, animationRequestedAt = -Infinity;
+  let lastMeleeSampleAt = -Infinity, lastMeleeSentAt = -Infinity, lastMeleeInput = false;
+  let pendingMelee = null, lastMeleePhase = null;
+  const consumedWorldEvents = new Set(), animationEvents = new Map();
+  const meleeDict = 'melee@unarmed@streamed_core';
+  const meleeClips = ['heavy_punch_a', 'heavy_punch_b', 'heavy_punch_c'];
   const validPosition = (value) => Array.isArray(value) && value.length === 3
     && value.every((part) => Number.isFinite(part) && Math.abs(part) <= 16000);
   const data = () => new DataView(memory.buffer);
@@ -25,6 +31,8 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica }) {
   function clear() {
     for (const replica of replicas.values()) erase(replica);
     replicas.clear(); requestedModels.clear(); epoch = null; pendingLife = null; lastMelee = false; localGeneration = null;
+    pendingMelee = null; lastMeleeInput = false; lastMeleePhase = null;
+    consumedWorldEvents.clear(); animationEvents.clear();
   }
   function transform(handle) {
     ex.mpGetEntityCoords(BigInt(buffer), handle, 1);
@@ -53,6 +61,100 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica }) {
       ...(entity ? { entity_id: entity.entity_id, expected_revision: entity.revision } : {}),
       ...(entity && action !== 'leave_vehicle' ? { target_generation: entity.generation } : {}),
       ...(seat ? { seat } : {}) });
+  }
+  function animationPointers() {
+    if (!animationBuffer) {
+      animationBuffer = Number(ex.mpAlloc(256n));
+      if (!animationBuffer) return null;
+      const bytes = new Uint8Array(memory.buffer, animationBuffer, 256); bytes.fill(0);
+      const encoder = new TextEncoder(); bytes.set(encoder.encode(meleeDict));
+      meleeClips.forEach((clip, index) => bytes.set(encoder.encode(clip), 64 + index * 48));
+    }
+    return { dict: BigInt(animationBuffer), clips: meleeClips.map((_clip, index) => BigInt(animationBuffer + 64 + index * 48)) };
+  }
+  function sampleMelee(packet, now, localPed, { localReady = true } = {}) {
+    if (now - lastMeleeSampleAt < 5 || !packet?.connected || !packet.world?.ready || !localReady || !localPed) return;
+    lastMeleeSampleAt = now;
+    const actor = packet.world.entities.find((entity) => entity.player_id === packet.client_id);
+    if (!actor || !actor.components.combat?.alive || actor.components.attachment || ex.mpIsDead(localPed, 0)) { pendingMelee = null; return; }
+    if (!buffer) buffer = Number(ex.mpAlloc(128n));
+    if (!buffer) return;
+    const melee = Boolean(ex.mpMeleeAction?.(localPed));
+    const bytes = new Uint8Array(memory.buffer, buffer + 112, 2); bytes.fill(0);
+    ex.mpCachedMeleeInputs?.(BigInt(buffer + 112), BigInt(buffer + 113));
+    const input = Boolean(bytes[0] || bytes[1]);
+    let phase = null;
+    const pointers = ex.mpIsPlayingAnim && ex.mpAnimTime ? animationPointers() : null;
+    if (pointers) {
+      for (let index = 0; index < pointers.clips.length; index++) if (ex.mpIsPlayingAnim(localPed, pointers.dict, pointers.clips[index], 3)) {
+        phase = { clip: index, time: ex.mpAnimTime(localPed, pointers.dict, pointers.clips[index]) }; break;
+      }
+    }
+    const newAnimation = phase && (!lastMeleePhase || phase.clip !== lastMeleePhase.clip || phase.time < lastMeleePhase.time - .25);
+    const edge = (input && !lastMeleeInput) || (melee && !lastMelee) || newAnimation;
+    // 缓存输入捕获重复按键；动画相位补充连招，任务状态只作为兜底，不能把目标0当成已命中。
+    if (edge || (input && melee && !phase && now - lastMeleeSentAt >= 900)) {
+      pendingMelee = { at: now, actor: actor.entity_id, generation: actor.generation, world: packet.world.world_epoch };
+    }
+    lastMelee = melee; lastMeleeInput = input; lastMeleePhase = phase;
+    if (!pendingMelee) return;
+    if (pendingMelee.actor !== actor.entity_id || pendingMelee.generation !== actor.generation
+        || pendingMelee.world !== packet.world.world_epoch || now - pendingMelee.at > 350) { pendingMelee = null; return; }
+    if (now - lastMeleeSentAt < 715) return;
+    const requestId = 'engine:' + (++requestNumber);
+    post({ type: 'melee_sample', request_id: requestId, actor_entity_id: actor.entity_id,
+      source: newAnimation ? 'animation' : input ? 'input' : 'task' });
+    // 不依赖 GET_MELEE_TARGET 的瞬时本机 GUID；服务器使用已确认位置和面向选取目标。
+    ex.mpGetEntityCoords(BigInt(buffer), localPed, 1);
+    const position = readVector(0);
+    const heading = ((ex.mpHeading(localPed) % 360) + 360) % 360;
+    const state = { position, heading, model: ex.mpGetModel(localPed) >>> 0, health: Math.max(0, Math.min(1000, ex.mpGetHealth(localPed))),
+      weapon: ex.mpSelectedWeapon(localPed) >>> 0, shooting: false,
+      actions: { aiming: false, reloading: false, jumping: false, ducking: Boolean(ex.mpIsDucking?.(localPed)), sprinting: false },
+      ...(actor.components.appearance ? { appearance: actor.components.appearance } : {}) };
+    post({ type: 'interaction_request', request_id: requestId, action: 'melee', actor_generation: actor.generation, state });
+    lastMeleeSentAt = now; pendingMelee = null;
+  }
+  function playWorldEvents(packet, entities, now) {
+    const acknowledge = [];
+    for (const item of packet.world_events || []) {
+      if (consumedWorldEvents.has(item.id)) { acknowledge.push(item.id); continue; }
+      const event = item.event, actor = entities.get(event?.attacker_entity_id);
+      const obsolete = event?.world_epoch !== packet.world.world_epoch || !actor
+        || actor.generation !== event.attacker_generation || actor.components.combat?.alive === false;
+      if (obsolete || actor.player_id === packet.client_id) { consumedWorldEvents.add(item.id); acknowledge.push(item.id); continue; }
+      const handle = actor.player_id ? playerReplica(actor.player_id) : replicas.get(actor.entity_id)?.handle;
+      let state = animationEvents.get(item.id);
+      if (!state) { state = { at: now, playedAt: -Infinity, attempts: 0 }; animationEvents.set(item.id, state); }
+      if (!handle || !ex.mpExists(handle)) {
+        if (now - state.at < 3000) continue;
+      } else if (ex.mpTaskPlayAnim && ex.mpHasAnimDictLoaded) {
+        const pointers = animationPointers();
+        if (pointers && (!ex.mpAnimDictExists || ex.mpAnimDictExists(pointers.dict))) {
+          if (!ex.mpHasAnimDictLoaded(pointers.dict)) {
+            if (now - animationRequestedAt >= 1000) { ex.mpRequestAnimDict?.(pointers.dict); animationRequestedAt = now; }
+            if (now - state.at < 3000) continue;
+          } else {
+            if (state.attempts && ex.mpIsPlayingAnim?.(handle, pointers.dict, pointers.clips[0], 3)) {
+              consumedWorldEvents.add(item.id); acknowledge.push(item.id); animationEvents.delete(item.id); continue;
+            }
+            if (now - state.playedAt >= 400 && state.attempts < 3) {
+              // 纯脚本动画：不会创建战斗任务、实弹或本地伤害。
+              ex.mpTaskPlayAnim(handle, pointers.dict, pointers.clips[0], 8, -8, 700, 48, 0, 0, 0, 0);
+              state.playedAt = now; state.attempts++;
+            }
+            if (!ex.mpIsPlayingAnim || ex.mpIsPlayingAnim(handle, pointers.dict, pointers.clips[0], 3)) {
+              consumedWorldEvents.add(item.id); acknowledge.push(item.id); animationEvents.delete(item.id); continue;
+            }
+            if (now - state.at < 2000) continue;
+          }
+        }
+      }
+      post({ type: 'world_entity_status', entity_id: actor.entity_id, kind: 'ped', phase: 'melee_animation_unavailable' });
+      consumedWorldEvents.add(item.id); acknowledge.push(item.id); animationEvents.delete(item.id);
+    }
+    while (consumedWorldEvents.size > 128) consumedWorldEvents.delete(consumedWorldEvents.values().next().value);
+    if (acknowledge.length) post({ type: 'world_event_ack', ids: acknowledge });
   }
   function update(packet, now, localPed, { localReady = true } = {}) {
     const world = packet?.world;
@@ -217,6 +319,7 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica }) {
         } else if (replica && !replica.active) replica.driveStarted = false;
       }
     }
+    playWorldEvents(packet, entities, now);
     if (!local) return { active: true };
     if (localGeneration !== null && localGeneration !== local.generation) {
       // 服务器刚允许重生，本机实体尚在恢复事务中，不能把旧尸体再报告成新一轮死亡。
@@ -249,14 +352,7 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica }) {
         entity_id: local.entity_id, owner_epoch: local.owner_epoch, generation: local.generation,
         health: arrested || dead ? 0 : Math.max(0, Math.min(200, Math.round((actualHealth - 100) * 2))) });
     }
-    const melee = Boolean(ex.mpMeleeAction?.(localPed));
-    if (melee && !lastMelee && now - lastInteractionAt >= 715) {
-      const targetHandle = ex.mpMeleeTarget?.(localPed);
-      const target = [...entities.values()].find((entity) => entity.kind === 'ped' && entity.entity_id !== local.entity_id
-        && targetHandle && (entity.player_id ? playerReplica(entity.player_id) : replicas.get(entity.entity_id)?.handle) === targetHandle);
-      if (target) { lastInteractionAt = now; request('melee', target); }
-    }
-    lastMelee = melee;
+    sampleMelee(packet, now, localPed, { localReady });
     const tryingVehicle = ex.mpTryingVehicle?.(localPed) || 0;
     if (tryingVehicle && now - lastInteractionAt >= 1000) {
       const target = [...entities.values()].find((entity) => replicas.get(entity.entity_id)?.handle === tryingVehicle);
@@ -274,5 +370,5 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica }) {
     ex.mpPedDensity?.(0); ex.mpScenarioDensity?.(0, 0);
     ex.mpVehicleDensity?.(0); ex.mpRandomVehicleDensity?.(0); ex.mpParkedVehicleDensity?.(0);
   }
-  return { update, suppressPopulation, clear, entityHandle: (id) => replicas.get(id)?.handle || 0 };
+  return { update, sampleMelee, suppressPopulation, clear, entityHandle: (id) => replicas.get(id)?.handle || 0 };
 };

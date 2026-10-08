@@ -35,8 +35,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** 独立公共战局服务：鉴权恢复、权威移动校验、伤害、死亡、重生及状态分发。 */
 public final class Main {
-    private static final String VERSION = "0.3.0-world-experimental";
-    private static final List<String> CAPABILITIES = List.of("public_session", "chat", "player_state", "shoot_events", "appearance", "combat", "resume", "heartbeat", "snapshot", "actions", "combat_feedback", "weapon_rules", "world_registry", "world_v2", "entity_batch");
+    private static final String VERSION = "0.3.1-world-experimental";
+    private static final List<String> CAPABILITIES = List.of("public_session", "chat", "player_state", "shoot_events", "appearance", "combat", "resume", "heartbeat", "snapshot", "actions", "combat_feedback", "weapon_rules", "world_registry", "world_v2", "entity_batch", "melee_events");
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final int MAX_MESSAGE_BYTES = 64 * 1024;
 
@@ -395,7 +395,9 @@ public final class Main {
                     "combat_authoritative", true, "transport", "websocket", "resume_ttl_seconds", 60,
                     "idle_timeout_seconds", idleTimeoutSeconds, "hello_timeout_seconds", helloTimeoutSeconds,
                     "world_epoch", view.get("world_epoch"), "world_revision", view.get("cut_revision"),
-                    "world_entities", ((List<?>) view.get("entities")).size(), "shared_population", view.get("shared_population"));
+                    "world_entities", ((List<?>) view.get("entities")).size(), "shared_population", view.get("shared_population"),
+                    "melee_requests_received",world.meleeStats().get("melee_requests_received"),
+                    "melee_events_approved",world.meleeStats().get("melee_events_approved"),"melee_hits",world.meleeStats().get("melee_hits"));
             }
         }
 
@@ -438,6 +440,7 @@ public final class Main {
                                 if (client.resumeCapable) declared.add("resume");
                                 if (client.combatFeedbackCapable) declared.add("combat_feedback");
                                 if (client.worldCapable) declared.add("world_v2");
+                                if (client.meleeEventsCapable) declared.add("melee_events");
                                 hello(client, object("type", "hello", "name", client.name, "capabilities", declared));
                             } else {
                                 requireSession(client);
@@ -504,6 +507,7 @@ public final class Main {
             boolean resumeCapable = false;
             boolean combatFeedbackCapable = false;
             boolean worldCapable = false;
+            boolean meleeEventsCapable = false;
             if (message.containsKey("capabilities")) {
                 if (!(message.get("capabilities") instanceof List<?> values) || values.size() > 16
                         || values.stream().anyMatch(value -> !(value instanceof String text) || text.length() > 40))
@@ -512,6 +516,7 @@ public final class Main {
                 resumeCapable = values.contains("resume");
                 combatFeedbackCapable = values.contains("combat_feedback");
                 worldCapable = values.contains("world_v2");
+                meleeEventsCapable = values.contains("melee_events") && worldCapable;
             }
             boolean hasId = message.containsKey("client_id");
             boolean hasToken = message.containsKey("resume_token");
@@ -545,6 +550,7 @@ public final class Main {
             client.resumeCapable = resumeCapable;
             client.combatFeedbackCapable = combatFeedbackCapable;
             client.worldCapable = worldCapable;
+            client.meleeEventsCapable = meleeEventsCapable;
             Map<String, Object> profile = object("type", "profile", "client_id", session.id, "name", name);
             profile.putAll(combat.join(session.id));
             world.worldParticipant(session.id,worldCapable);
@@ -739,7 +745,8 @@ public final class Main {
             byte[] bytes = textFrame(message);
             for (Session session : sessions.values()) {
                 Client client = session.client;
-                if (session.connected() && (!combatOnly || client.combatCapable)) client.enqueue(bytes, false);
+                if (session.connected() && (!combatOnly || client.combatCapable)
+                    && (!"melee_event".equals(message.get("type")) || client.meleeEventsCapable)) client.enqueue(bytes, false);
             }
         }
 
@@ -843,7 +850,7 @@ public final class Main {
         boolean combatCapable;
         boolean resumeCapable;
         boolean combatFeedbackCapable;
-        boolean worldCapable,worldInitialized;
+        boolean worldCapable,worldInitialized,meleeEventsCapable;
         final java.util.Set<String> scope=new java.util.LinkedHashSet<>();
         long worldRevision,streamSequence;
         final AtomicBoolean closed = new AtomicBoolean();

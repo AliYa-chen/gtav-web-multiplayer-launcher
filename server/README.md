@@ -1,8 +1,8 @@
-# GTA V 统一世界实验服务端 0.3.0-world-experimental
+# GTA V 统一世界实验服务端 0.3.1-world-experimental
 
 本版将 `WorldRegistry` 作为玩家、车辆与 NPC 的唯一实体事实；`CombatWorld` 保留输入序号、移动预算和枪械冷却，规则结果直接提交到注册表，旧 v1 消息也从同一状态产生。已删除广播后的独立玩家镜像。服务端仍是轻量 Java 协调器，NPC AI、道路选择、车辆物理和环境损伤来自指定 GTA 客户端的受限候选，服务器没有 RAGE 物理运行时或地图碰撞。
 
-实验版本最多八位玩家；请单独构建并在 47486 等测试端口运行，不覆盖仍在 47485 上使用的已验证版本。实际游戏内的车辆、NPC 和生命事件需两台 GTA 客户端继续验证，协议测试不能代替这项验收。`game_sync: false` 和 `native_clone_transport: false` 保留；`shared_population` 表示已有统一人口实体登记，不能据此认定原 GTA Online 网络层或完整 AI 已实现。
+当前开发测试版最多八位玩家，公网 47485 和 47486 均已更新 0.3.1，原构建仍保留备份。独立部署可使用 47486 等测试端口。实际游戏内的车辆、NPC 和生命事件需两台 GTA 客户端继续验证，协议测试不能代替这项验收。`game_sync: false` 和 `native_clone_transport: false` 保留；`shared_population` 表示已有统一人口实体登记，不能据此认定原 GTA Online 网络层或完整 AI 已实现。
 
 所有玩家连接同一台服务器后，输入昵称就会自动进入唯一的 `PUBLIC` 公共战局。战局常驻，即使没有玩家也保留；无需创建房间、输入房间码、准备或等待房主开始。地图固定为 GTA V，游戏使用沙盒模式。
 
@@ -360,3 +360,26 @@ python3 -B tools/tests/test_world_v2.py --jar server/multiplayer-world-experimen
 python3 -B tools/tests/test_vehicle_world.py --jar server/multiplayer-world-experimental.jar
 python3 -B tools/tests/test_entity_batch.py --jar server/multiplayer-world-experimental.jar
 ```
+
+
+## 近战动作事件（0.3.1）
+
+客户端同时声明 `world_v2` 和 `melee_events` 后，会收到服务端确认的 `melee_event`。固定动作标识为 `action: "punch"`，服务器不接受客户端选择任意动画、宣称命中或提交伤害。事件含唯一 `event_id`、请求 ID、世界 epoch、攻击者／目标的实体 ID 与 generation，及 `hit/damage/health/revision`。客户端按事件 ID 去重，并在应用前核对 generation；动作播放不能产生第二次原生伤害。
+
+近战请求可以只发送意图：
+
+```json
+{"type":"interaction_request","world_epoch":"当前世界","request_id":"本次唯一请求","action":"melee"}
+```
+
+服务器从自己的当前实体事实选择前方两米内、高度差和角度合格的最近存活目标。找到目标时最多扣除二十点生命值；没有目标时确认挥空，仍广播动作，但 `hit: false`、`damage: 0`，目标与生命值字段为 `null`。服务器不把客户端本地瞄准结果直接视为命中。显式携带目标的请求仍严格检查目标基线／generation、位置、朝向和存活状态，拒绝结果仅发给请求者，不播放被拒绝的攻击。
+
+攻击者必须存活并持有自己的有效租约，每次确认动作均消耗七百毫秒近战冷却，包括挥空。成功请求幂等缓存只重发原 `interaction_result`，不会再次产生动作事件、伤害或世界提交。没有声明动作能力的旧客户端不会收到新增事件类型；原伤害广播继续来自同一注册表。
+
+`GET /health` 增加 `melee_requests_received`、`melee_events_approved` 和 `melee_hits` 三个汇总计数，用于区分意图没到服务器、被拒绝和确认动作未命中。计数不包含身份凭据、坐标或玩家名字。新增验证：
+
+```sh
+python3 -B tools/tests/test_melee_events.py --jar server/multiplayer-world-experimental.jar
+```
+
+这些测试验证消息、命中与幂等规则；游戏内实际挥拳动画仍由 native 适配器执行，需要真实客户端验证。
