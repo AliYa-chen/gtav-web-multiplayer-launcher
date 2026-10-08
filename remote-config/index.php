@@ -125,12 +125,12 @@ function publishedDownloads(array $candidates): stdClass
 
 // ── 配置内容：维护者只需要修改这一段 ──
 $site = 'https://gtav.2t.hk';
-$latestVersion = '0.2.1';
-$releaseNotes = "远程配置入口统一为 https://oss.2t.hk/gtav/。\nmacOS Apple Silicon 测试包已构建；使用开发签名，尚未公证。";
+$latestVersion = '0.2.6';
+$releaseNotes = "新增全屏强制更新和游戏资源页面入口。Windows x64 与 macOS Apple Silicon 测试包已构建。";
 $servers = [
-    ['id' => 'main', 'name' => '公共战局', 'role' => '主线路', 'address' => '183.66.27.21:47485',
+    ['id' => 'main', 'name' => '公共战局', 'role' => '主线路', 'address' => 'gtaserver.2t.hk:47485',
         'health_url' => 'https://gtaserver.2t.hk:47485/47485/health'],
-    ['id' => 'experimental', 'name' => '实验战局', 'role' => '实验线路', 'address' => '183.66.27.21:47486',
+    ['id' => 'experimental', 'name' => '实验战局', 'role' => '实验线路', 'address' => 'gtaserver.2t.hk:47486',
         'health_url' => 'https://gtaserver.2t.hk:47486/47486/health'],
 ];
 // health_url 使用游戏服务器域名的 HTTPS 反向代理；status_url 是网页，不是健康接口。
@@ -150,11 +150,13 @@ $announcements = [
 ];
 $downloadCandidates = [
     'macos_arm64' => [
-        // 将 0.2.1 ZIP 上传到公开下载位置后填写实际 HTTPS 地址；私有 GitHub 链接不适合玩家下载。
-        'url' => '',
-        'sha256' => '3d293acd685bb31f766e88dba798ba060a268a8f012463f87e125d3d162aadde',
+        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-macOS-arm64-v0.2.6-development.zip',
+        'sha256' => '83a5983636ed4e09547294580036bb2fe14eeffc457e5951248ec9c0b5d47184',
     ],
-    // Windows 新版尚未构建，不提供过期版本的下载按钮。
+    'windows_x64' => [
+        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-Windows-x64-v0.2.6.exe',
+        'sha256' => '607a7a58d5cc093d42cac30feeb49bfacdb6989c12b9b098a604bb712e9d13c7',
+    ],
 ];
 // ── 配置内容结束 ──
 
@@ -210,8 +212,7 @@ try {
         'oltitle' => $site,
         'website' => $site,
         // server 保持单对象，兼容现有桌面启动器；servers 提供完整线路目录。
-        'server' => ['address' => $servers[0]['address'], 'name' => $servers[0]['name'], 'status_url' => $site,
-            'health_url' => $servers[0]['health_url']],
+        'server' => $servers,
         'servers' => $servers,
         'announcements' => $announcements,
         'update' => ['latest_version' => $latestVersion, 'release_notes' => $releaseNotes,
