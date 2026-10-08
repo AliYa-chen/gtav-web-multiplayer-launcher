@@ -125,8 +125,8 @@ function publishedDownloads(array $candidates): stdClass
 
 // ── 配置内容：维护者只需要修改这一段 ──
 $site = 'https://gtav.2t.hk';
-$latestVersion = '0.2.8';
-$releaseNotes = "启动游戏默认使用本机局域网 IP 开启共享；另开客户端生成朋友独立邀请地址，统一停止全部服务。缩小顶部和资源区，启动按钮横排，邀请地址更清晰。本机通过系统证书库确认 CA 安装与信任后直接打开 HTTPS，修复 macOS 用户级信任误判；朋友保留证书安装引导与 HTTPS 验证。";
+$latestVersion = '0.2.9';
+$releaseNotes = "支持独立停止每个客户端的 HTTPS 游戏服务和 HTTP 证书引导，其他客户端继续运行；关闭启动器窗口会停止全部服务并退出。客户端编号保持稳定，停止本机客户端后可重新启动。邀请地址按面板剩余空间排满后分页，屏蔽启动器右键菜单，统一共享设置的完成按钮样式。";
 $servers = [
     ['id' => 'main', 'name' => '公共战局', 'role' => '主线路', 'address' => 'gtaserver.2t.hk:47485',
         'health_url' => 'https://gtaserver.2t.hk:47485/47485/health'],
@@ -150,12 +150,12 @@ $announcements = [
 ];
 $downloadCandidates = [
     'macos_arm64' => [
-        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-macOS-arm64-v0.2.8.zip',
-        'sha256' => '3f755d52b77f723d6746ddee6ae13926f0b94be3405ee7a21c435a808262ffed',
+        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-macOS-arm64-v0.2.9.zip',
+        'sha256' => 'e2b4494b822c51d1844ff096b7507f250fb1d6df1167dc2e2d9cf8b369dcbfdb',
     ],
     'windows_x64' => [
-        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-Windows-x64-v0.2.8.exe',
-        'sha256' => 'f84c3cf3df90c1a330ff545e23755967814dbb5bd488fb54a14ac90d392f3100',
+        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-Windows-x64-v0.2.9.exe',
+        'sha256' => '43da544ebe59227045249402942fea5a6617f4362ac4bf18cceb2abe3ad7517e',
     ],
 ];
 // ── 配置内容结束 ──
