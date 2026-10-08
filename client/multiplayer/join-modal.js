@@ -1,4 +1,4 @@
-import { normalizeServerAddress, displayServerAddress } from './server-address.js';
+import { normalizeServerAddress, displayServerAddress, normalizeRemoteServerAddress } from './server-address.js';
 
 export const SESSION_KEY = 'gta5.public.session';
 export const PREFERENCES_KEY = 'gta5.public.preferences';
@@ -19,7 +19,7 @@ export function cleanJoinServerOptions(snapshot, pageUrl = globalThis.location?.
   for (const value of values.slice(0, 32)) {
     if (!value || typeof value.address !== 'string' || !value.address.trim() || value.address.length > 512) continue;
     try {
-      const address = normalizeServerAddress(value.address, pageUrl);
+      const address = normalizeRemoteServerAddress(value, pageUrl);
       const display = displayServerAddress(address, pageUrl);
       if (seen.has(display)) continue;
       seen.add(display);

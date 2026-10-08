@@ -42,3 +42,35 @@ export function displayServerAddress(value, pageUrl = 'http://localhost:8000/') 
   const url = new URL(normalizeServerAddress(value, pageUrl));
   return url.hostname + ':' + (url.port || (url.protocol === 'wss:' ? '443' : '80'));
 }
+
+// 远程列表的显示地址和实际连接端点可以不同；TLS 与代理路径不能从输入框里丢失。
+export function normalizeRemoteServerAddress(server, pageUrl = 'http://localhost:8000/') {
+  if (!server || typeof server.address !== 'string' || !server.address.trim()) {
+    throw new Error('远程服务器地址无效。');
+  }
+  const explicit = server.websocket_url ?? server.ws_url;
+  if (explicit !== undefined && explicit !== null) {
+    if (typeof explicit !== 'string' || !/^wss?:\/\//i.test(explicit.trim())) {
+      throw new Error('远程 WebSocket 端点必须提供完整的 ws:// 或 wss:// 地址。');
+    }
+    return normalizeServerAddress(explicit, pageUrl);
+  }
+  const address = normalizeServerAddress(server.address, pageUrl);
+  if (/^wss?:\/\//i.test(server.address.trim())) return address;
+  if (typeof server.health_url === 'string' && server.health_url.length <= 2048) {
+    try {
+      const health = new URL(server.health_url);
+      const target = new URL('wss://' + server.address.trim());
+      const targetPort = target.port || '443';
+      const healthPort = health.port || '443';
+      const healthPath = health.pathname.replace(/\/+$/, '');
+      if (health.protocol === 'https:' && !health.username && !health.password && !health.hash
+        && health.hostname === target.hostname && healthPort === targetPort && /\/health$/.test(healthPath)) {
+        health.protocol = 'wss:';
+        health.pathname = healthPath.replace(/\/health$/, '/ws');
+        return normalizeServerAddress(health.href, pageUrl);
+      }
+    } catch { /* 健康接口格式不适用时不猜测其它代理路径。 */ }
+  }
+  return address;
+}

@@ -164,6 +164,35 @@ test('服务器地址只显示主机和有效端口，支持 IPv4、IPv6 和标�
   assert.throws(() => displayServerAddress('ws://example.com', 'https://game.example/'), /wss/);
 });
 
+test('远程 HTTPS 健康地址保留 WSS 和完整代理路径，不随 localhost 页面降为 WS', async () => {
+  const { normalizeRemoteServerAddress } = await addressPromise;
+  const line = { id: 'main', name: '主线路', address: 'gtaserver.2t.hk:47485',
+    health_url: 'https://gtaserver.2t.hk:47485/47485/health' };
+  assert.equal(normalizeRemoteServerAddress(line), 'wss://gtaserver.2t.hk:47485/47485/ws');
+  assert.equal(normalizeRemoteServerAddress({ address: 'gtaserver.2t.hk', health_url: 'https://gtaserver.2t.hk/health/' }),
+    'wss://gtaserver.2t.hk/ws');
+  assert.equal(normalizeRemoteServerAddress({ address: '183.66.27.21:47485' }), 'ws://183.66.27.21:47485/ws');
+  assert.equal(normalizeRemoteServerAddress({ ...line, websocket_url: 'wss://gtaserver.2t.hk:47485/custom/ws' }),
+    'wss://gtaserver.2t.hk:47485/custom/ws');
+  assert.equal(normalizeRemoteServerAddress({ ...line, address: 'wss://gtaserver.2t.hk:47485/explicit' }),
+    'wss://gtaserver.2t.hk:47485/explicit');
+  assert.equal(normalizeRemoteServerAddress({ ...line, health_url: 'https://different.example:47485/health' }),
+    'ws://gtaserver.2t.hk:47485/ws');
+  assert.equal(normalizeRemoteServerAddress({ ...line, health_url: 'https://gtaserver.2t.hk:443/47485/health' }),
+    'ws://gtaserver.2t.hk:47485/ws');
+  for (const value of ['https://gtaserver.2t.hk/ws', 'wss://user:secret@gtaserver.2t.hk/ws', 'javascript:alert(1)']) {
+    assert.throws(() => normalizeRemoteServerAddress({ ...line, websocket_url: value }));
+  }
+  const page = await harness({ remoteConfig: remoteSnapshot([line]) });
+  page.modal.open(); await page.settle();
+  assert.equal(page.fields.server.value, 'gtaserver.2t.hk:47485');
+  page.input('nickname', '玩家WSS'); page.blur(); page.submit();
+  assert.equal(page.joined[0].server, 'wss://gtaserver.2t.hk:47485/47485/ws');
+  assert.equal(page.api.readPublicPreferences().server, 'wss://gtaserver.2t.hk:47485/47485/ws');
+  page.modal.close(); page.modal.open(); await page.settle(); page.submit();
+  assert.equal(page.joined.at(-1).server, 'wss://gtaserver.2t.hk:47485/47485/ws');
+});
+
 test('面板偏好保存在 localStorage，昵称修剪、角色和安全地址均可重新读取', async () => {
   const page = await harness({ install: false });
   assert.equal(page.api.savePanelPreferences(preferences({ name: '  玩家甲  ', server: 'wss://game.example:443/custom' })), true);

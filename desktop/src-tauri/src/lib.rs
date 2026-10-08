@@ -123,7 +123,7 @@ fn start_game(app: tauri::AppHandle, state: State<'_, LauncherState>, additional
         online_ready: true, instance_name: format!("玩家{index}"), log_file,
         preferred_port: if index == 1 { inner.preferred_port } else { None }, font_overrides: prepared.fonts.clone(),
         remote_configuration: state.remote.clone(),
-        multiplayer_server: configured_remote(&state).ok().and_then(|config| config.server.map(|server| server.address))
+        multiplayer_server: configured_remote(&state).ok().and_then(|config| config.server.map(|server| server.websocket_url.unwrap_or(server.address)))
             .unwrap_or_else(|| "183.66.27.21:47485".to_string()),
         ..Default::default()
     })?;

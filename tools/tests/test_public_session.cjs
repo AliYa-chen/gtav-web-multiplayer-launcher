@@ -110,6 +110,19 @@ test('远程连接由游戏页持有，首次接入就交付完整快照与独�
   page.api.close();
 });
 
+test('从远程线路取得的 WSS 代理路径在建连和自动重连时保持完整', async () => {
+  const [addresses] = await dependencies;
+  const server = addresses.normalizeRemoteServerAddress({ address: 'gtaserver.2t.hk:47485',
+    health_url: 'https://gtaserver.2t.hk:47485/47485/health' });
+  const page = await harness({ preferences: { ...preferences(), server } });
+  const first = page.enter(); await page.api.ready;
+  assert.equal(first.address, 'wss://gtaserver.2t.hk:47485/47485/ws');
+  first.close(); page.advance(2500);
+  assert.ok(page.sockets.length > 1);
+  assert.ok(page.sockets.every((socket) => socket.address === server));
+  page.api.close();
+});
+
 function fakeLocks() {
   const held = new Map(), requests = [];
   const manager = { request(name, options, callback) {

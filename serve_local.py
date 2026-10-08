@@ -1,5 +1,5 @@
 """本地游戏服务器：提供跨域隔离响应头、范围读取和引擎批量读取。"""
-import argparse, errno, gzip, hashlib, io, json, mimetypes, posixpath, re, shutil, socket, subprocess, threading, time, webbrowser
+import argparse, errno, gzip, hashlib, io, ipaddress, json, mimetypes, posixpath, re, shutil, socket, subprocess, threading, time, webbrowser
 from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -18,8 +18,65 @@ REMOTE_URL = 'https://oss.2t.hk/gtav/'
 mimetypes.add_type('application/wasm', '.wasm')
 mimetypes.add_type('text/javascript', '.js')
 
+def _remote_text(value, limit, *, optional=False):
+    if (not isinstance(value, str) or len(value) > limit
+            or re.search(r'[<>\x00-\x1f\x7f]', value)
+            or (not optional and not value.strip())):
+        raise ValueError('远程配置文字无效')
+    return value.strip()
+
+
+def _remote_url(value, schemes, limit=2048):
+    value = _remote_text(value, limit)
+    if re.search(r'\s|\\', value):
+        raise ValueError('远程配置地址无效')
+    url = urlsplit(value)
+    if (url.scheme not in schemes or not url.hostname or url.username or url.password
+            or url.fragment or (url.port is not None and not 1 <= url.port <= 65535)):
+        raise ValueError('远程配置地址无效')
+    _remote_host(url.hostname)
+    return value
+
+
+def _remote_host(host):
+    try:
+        ipaddress.ip_address(host)
+        return
+    except ValueError:
+        pass
+    if len(host) > 253 or not all(re.fullmatch(r'[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?', part)
+                                  for part in host.rstrip('.').split('.')):
+        raise ValueError('远程服务器主机无效')
+
+
+def _remote_server(value):
+    if not isinstance(value, dict):
+        raise ValueError('远程服务器格式无效')
+    address = _remote_text(value.get('address'), 512)
+    if re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*://', address):
+        address = _remote_url(address, ('ws', 'wss'), 512)
+    else:
+        if re.search(r'\s|[\\/?#@]', address):
+            raise ValueError('远程服务器地址无效')
+        try:
+            ipaddress.IPv6Address(address)
+        except ValueError:
+            url = urlsplit('//' + address)
+            if not url.hostname or (url.port is not None and not 1 <= url.port <= 65535):
+                raise ValueError('远程服务器地址无效')
+            _remote_host(url.hostname)
+    result = {'address': address}
+    for key, limit in (('id', 80), ('name', 80), ('role', 40)):
+        if key in value:
+            result[key] = _remote_text(value[key], limit, optional=True)
+    for key in ('health_url', 'status_url', 'websocket_url', 'ws_url'):
+        if key in value:
+            result[key] = _remote_url(value[key], ('https',) if key in ('health_url', 'status_url') else ('ws', 'wss'))
+    return result
+
+
 def online_remote_configuration():
-    """脚本启动入口只代理游戏菜单所需URL；完整公告/更新配置由桌面启动器校验。"""
+    """只代理已校验的状态地址和线路；不访问接口内指定的服务器URL。"""
     # 每次代理请求都联网；失败不沿用之前的内容，也不提供内置状态地址。
     try:
         with urlopen(REMOTE_URL, timeout=4) as response:
@@ -29,14 +86,20 @@ def online_remote_configuration():
             raw = json.loads(payload)
         if not isinstance(raw, dict):
             raise ValueError('远程配置格式无效')
-        title = raw.get('oltitle')
-        if (not isinstance(title, str) or not title.strip() or len(title) > 160
-                or re.search(r'[<>\x00-\x1f]', title)):
-            raise ValueError('在线模式状态地址无效')
-        url = urlsplit(title)
-        if url.scheme != 'https' or not url.hostname or url.username or url.password:
-            raise ValueError('在线模式状态地址无效')
-        return {'config': {'oltitle': title}, 'source': 'remote', 'stale': False}
+        config = {'oltitle': _remote_url(raw.get('oltitle'), ('https',), 160)}
+        for key in ('server', 'servers'):
+            if key not in raw:
+                continue
+            values = raw[key]
+            if key == 'server' and isinstance(values, dict):
+                values = [values]
+            if not isinstance(values, list) or len(values) > 32:
+                raise ValueError('远程服务器列表无效')
+            config[key] = [_remote_server(value) for value in values]
+        config['servers'] = config.get('servers', config.get('server', []))
+        if 'website' in raw:
+            config['website'] = _remote_url(raw['website'], ('https',))
+        return {'config': config, 'source': 'remote', 'stale': False}
     except (OSError, ValueError):
         return {'config': {'oltitle': ''}, 'source': 'unavailable', 'stale': True,
                 'error': '远程配置暂时无法读取'}
