@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import * as presentation from '../src/view-state.js';
 
-const source = (await readFile(new URL('../src/main.js', import.meta.url), 'utf8')).replace(/^import .*;\n/gm, '');
+const source = (await readFile(new URL('../src/main.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '');
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 async function launcher(desktop = true) {
   const calls = [], values = new Map(), events = new Map(), intervals = [];
