@@ -1,9 +1,18 @@
 //! 仅在用户点击按钮后安装公共 CA；私钥不参与系统信任、命令参数或临时文件。
 use rustls_pki_types::{pem::PemObject, CertificateDer};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::io::Write;
 
 const MAX_CERTIFICATE_BYTES: usize = 256 * 1024;
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Status {
+    pub installed: bool,
+    pub trusted: bool,
+    pub fingerprint: String,
+    pub message: String,
+}
 
 pub fn public_certificate_der() -> Result<Vec<u8>, String> {
     decode_public_ca(crate::lan_ca_embedded::CERTIFICATE_PEM)
@@ -16,6 +25,20 @@ pub fn fingerprint() -> Result<String, String> {
         .map(|byte| format!("{byte:02X}"))
         .collect::<Vec<_>>()
         .join(":"))
+}
+
+pub fn check_status() -> Result<Status, String> {
+    let der = public_certificate_der()?;
+    let fingerprint = fingerprint_from_der(&der);
+    platform::status(&der, &fingerprint)
+}
+
+fn fingerprint_from_der(der: &[u8]) -> String {
+    Sha256::digest(der)
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 fn decode_public_ca(pem: &[u8]) -> Result<Vec<u8>, String> {
@@ -111,148 +134,81 @@ mod platform {
         )
     }
 
-    fn matching_sha1(output: &[u8], der: &[u8]) -> Option<String> {
-        let text = std::str::from_utf8(output).ok()?;
-        let mut sha1 = None;
-        let mut pem = String::new();
-        let mut collecting = false;
-        for line in text.lines() {
-            if let Some(value) = line.strip_prefix("SHA-1 hash: ") {
-                sha1 = (value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
-                    .then(|| value.to_ascii_uppercase());
-            }
-            if line == "-----BEGIN CERTIFICATE-----" {
-                collecting = true;
-                pem.clear();
-            }
-            if collecting {
-                pem.push_str(line);
-                pem.push('\n');
-            }
-            if line == "-----END CERTIFICATE-----" && collecting {
-                collecting = false;
-                if CertificateDer::from_pem_slice(pem.as_bytes())
-                    .ok()
-                    .as_ref()
-                    .map(|certificate| certificate.as_ref() == der)
-                    .unwrap_or(false)
-                {
-                    return sha1;
-                }
-                sha1 = None;
-            }
-        }
-        None
+    fn exact_certificate_in_listing(output: &[u8], der: &[u8]) -> bool {
+        CertificateDer::pem_slice_iter(output).any(|certificate| {
+            certificate.map(|certificate| certificate.as_ref() == der).unwrap_or(false)
+        })
     }
 
-    fn administrator_trusts_root(json: &[u8], sha1: &str) -> bool {
-        let value: serde_json::Value = match serde_json::from_slice(json) {
-            Ok(value) => value,
-            Err(_) => return false,
-        };
-        let entry = value
-            .get("trustList")
-            .and_then(serde_json::Value::as_object)
-            .and_then(|entries| {
-                entries
-                    .iter()
-                    .find(|(key, _)| key.eq_ignore_ascii_case(sha1))
-            })
-            .map(|(_, entry)| entry);
-        let settings = match entry
-            .and_then(|entry| entry.get("trustSettings"))
-            .and_then(serde_json::Value::as_array)
-        {
-            Some(settings) => settings,
-            None => return false,
-        };
-        // macOS 空设置数组表示根证书完全信任；显式设置必须是无策略限制的 trustRoot。
-        settings.is_empty()
-            || settings.iter().any(|setting| {
-                setting
-                    .get("kSecTrustSettingsResult")
-                    .and_then(serde_json::Value::as_u64)
-                    == Some(1)
-                    && setting.get("kSecTrustSettingsPolicy").is_none()
-                    && setting.get("kSecTrustSettingsPolicyName").is_none()
-                    && setting.get("kSecTrustSettingsPolicyString").is_none()
-                    && setting.get("kSecTrustSettingsApplication").is_none()
-                    && setting.get("kSecTrustSettingsKeyUsage").is_none()
-            })
+    fn command_diagnostic(output: &std::process::Output) -> String {
+        let source = if output.stderr.is_empty() { &output.stdout } else { &output.stderr };
+        let message: String = String::from_utf8_lossy(source)
+            .chars().filter(|char| !char.is_control() || char.is_whitespace()).take(500).collect();
+        let message = message.split_whitespace().collect::<Vec<_>>().join(" ");
+        if message.is_empty() {
+            format!("系统工具退出状态：{}", output.status)
+        } else { message }
     }
 
-    fn trusted_exact_certificate(path: &Path, der: &[u8]) -> bool {
-        let found = match Command::new("/usr/bin/security")
-            .args([
-                "find-certificate",
-                "-a",
-                "-Z",
-                "-p",
-                "/Library/Keychains/System.keychain",
-            ])
-            .output()
-        {
-            Ok(output) if output.status.success() && output.stdout.len() <= 16 * 1024 * 1024 => {
-                output
-            }
-            _ => return false,
-        };
-        let sha1 = match matching_sha1(&found.stdout, der) {
-            Some(sha1) => sha1,
-            None => return false,
-        };
-        let settings_file = match tempfile::Builder::new()
-            .prefix("gta5data-admin-trust-")
-            .suffix(".plist")
-            .tempfile()
-        {
-            Ok(file) => file,
-            Err(_) => return false,
-        };
-        // 明确读取管理员信任域，不能让登录钥匙串中另一份同名证书冒充系统安装成功。
-        let exported = Command::new("/usr/bin/security")
-            .args(["trust-settings-export", "-d"])
-            .arg(settings_file.path())
-            .output();
-        if !exported
-            .map(|output| output.status.success())
-            .unwrap_or(false)
-        {
-            return false;
+    fn verify_certificate(path: &Path) -> Result<(), String> {
+        // 交由 Security.framework 处理用户/管理员信任域、SSL policy 和显式拒绝。
+        // 不指定 -r：传入公共 CA 不能把它当作临时信任锚，必须已在系统中受信任。
+        let output = Command::new("/usr/bin/security")
+            .args(["verify-cert", "-p", "ssl", "-L", "-l", "-c"])
+            .arg(path).output().map_err(|error| format!("无法验证 CA 的系统信任：{error}"))?;
+        if output.status.success() { Ok(()) } else { Err(command_diagnostic(&output)) }
+    }
+
+    fn trusted_exact_certificate(path: &Path, der: &[u8]) -> Result<(), String> {
+        // 默认钥匙串搜索列表包括当前用户和 System；精确 DER 匹配不接受同名证书。
+        let found = Command::new("/usr/bin/security")
+            .args(["find-certificate", "-a", "-p"])
+            .output().map_err(|error| format!("无法读取本机钥匙串：{error}"))?;
+        if !found.status.success() { return Err(command_diagnostic(&found)); }
+        if found.stdout.len() > 16 * 1024 * 1024 || !exact_certificate_in_listing(&found.stdout, der) {
+            return Err("本机钥匙串中未找到启动器的精确 CA 证书。".into());
         }
-        let converted = Command::new("/usr/bin/plutil")
-            .args(["-convert", "json", "-o", "-", "--"])
-            .arg(settings_file.path())
-            .output();
-        let converted = match converted {
-            Ok(output) if output.status.success() && output.stdout.len() <= 16 * 1024 * 1024 => {
-                output
-            }
-            _ => return false,
-        };
-        if !administrator_trusts_root(&converted.stdout, &sha1) {
-            return false;
-        }
-        // basic 策略通过系统信任链验证原始根证书；仅匹配钥匙串条目并不足以确认信任。
-        Command::new("/usr/bin/security")
-            .args([
-                "verify-cert",
-                "-p",
-                "basic",
-                "-L",
-                "-l",
-                "-k",
-                "/Library/Keychains/System.keychain",
-                "-c",
-            ])
-            .arg(path)
+        // trust-settings-export 中的 NSData/NSDate 不能转为 JSON；直接验证真实 SSL 信任。
+        verify_certificate(path)
+    }
+
+    pub fn status(der: &[u8], fingerprint: &str) -> Result<super::Status, String> {
+        let certificate = temporary_public_certificate(der)?;
+        let found = Command::new("/usr/bin/security")
+            .args(["find-certificate", "-a", "-p"])
             .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
+            .map_err(|error| format!("无法读取本机钥匙串：{error}"))?;
+        if !found.status.success() {
+            return Err(command_diagnostic(&found));
+        }
+        let installed = found.stdout.len() <= 16 * 1024 * 1024
+            && exact_certificate_in_listing(&found.stdout, der);
+        if !installed {
+            return Ok(Status {
+                installed: false,
+                trusted: false,
+                fingerprint: fingerprint.to_owned(),
+                message: "尚未找到 BinGo Root CA，请点击安装或下载 CA 证书。".into(),
+            });
+        }
+        match verify_certificate(certificate.path()) {
+            Ok(()) => Ok(Status {
+                installed: true,
+                trusted: true,
+                fingerprint: fingerprint.to_owned(),
+                message: "BinGo Root CA 已安装并通过系统 SSL 信任验证。".into(),
+            }),
+            Err(error) => Ok(Status {
+                installed: true,
+                trusted: false,
+                fingerprint: fingerprint.to_owned(),
+                message: format!("BinGo Root CA 已安装，但尚未通过系统 SSL 信任验证：{error}"),
+            }),
+        }
     }
 
     pub fn install(path: &Path, der: &[u8]) -> Result<String, String> {
-        if trusted_exact_certificate(path, der) {
+        if trusted_exact_certificate(path, der).is_ok() {
             return Ok("CA 已安装并通过系统信任验证，可刷新浏览器进入 HTTPS 游戏。".into());
         }
         let path_text = path
@@ -261,7 +217,7 @@ mod platform {
         let output = Command::new("/usr/bin/osascript")
             .args(["-e", &install_script(path_text)])
             .output()
-            .map_err(|_| "无法请求管理员授权，请下载 CA 证书后手动安装并信任。".to_string())?;
+            .map_err(|error| format!("无法请求管理员授权，请下载 CA 后手动安装并信任。系统错误：{error}"))?;
         if !output.status.success() {
             let error = String::from_utf8_lossy(&output.stderr);
             if error.contains("-128") || error.to_ascii_lowercase().contains("canceled") {
@@ -269,21 +225,21 @@ mod platform {
                     "已取消管理员授权，CA 未完成安装。可重试，或下载证书后手动安装并信任。".into(),
                 );
             }
-            return Err(
-                "系统未能完成 CA 安装，请下载证书后在钥匙串中手动安装并设为始终信任。".into(),
-            );
+            return Err(format!(
+                "系统未能完成 CA 安装，请下载证书后在钥匙串中手动安装并设为始终信任。系统错误：{}",
+                command_diagnostic(&output)
+            ));
         }
-        if !trusted_exact_certificate(path, der) {
-            return Err(
-                "安装命令已完成，但系统信任验证未通过。请手动检查钥匙串中的 CA 信任设置。".into(),
-            );
-        }
+        trusted_exact_certificate(path, der).map_err(|error| format!(
+            "安装命令已完成，但系统 SSL 信任验证未通过。请检查钥匙串中的 CA 信任设置。系统错误：{error}"
+        ))?;
         Ok("CA 已安装并通过系统信任验证。请刷新浏览器；若仍有证书错误，请重启浏览器。".into())
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
+
 
         #[test]
         fn administrator_script_quotes_special_paths_without_executing_them() {
@@ -303,38 +259,40 @@ mod platform {
         }
 
         #[test]
-        fn system_certificate_and_administrator_trust_must_match_exactly() {
+        fn exact_ca_match_accepts_real_pem_listing_without_hash_or_trust_metadata() {
             let pem = super::super::tests::public_fixture(true);
             let der = decode_public_ca(&pem).unwrap();
-            let sha1 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-            let listing = format!(
-                "SHA-256 hash: unused\nSHA-1 hash: {sha1}\n{}",
-                std::str::from_utf8(&pem).unwrap()
-            );
-            assert_eq!(
-                matching_sha1(listing.as_bytes(), &der).as_deref(),
-                Some(sha1)
-            );
-            assert!(matching_sha1(listing.as_bytes(), b"different certificate").is_none());
-            let trusted = serde_json::json!({"trustList": {(sha1): {"trustSettings": [{"kSecTrustSettingsResult": 1}]}}});
-            let json = serde_json::to_vec(&trusted).unwrap();
-            assert!(administrator_trusts_root(&json, sha1));
-            assert!(!administrator_trusts_root(
-                &json,
-                "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
-            ));
-            for setting in [
-                serde_json::json!({"kSecTrustSettingsResult": 3}),
-                serde_json::json!({"kSecTrustSettingsResult": 1, "kSecTrustSettingsPolicyName": "ssl"}),
-                serde_json::json!({"kSecTrustSettingsResult": 1, "kSecTrustSettingsApplication": "another app"}),
-            ] {
-                let value =
-                    serde_json::json!({"trustList": {(sha1): {"trustSettings": [setting]}}});
-                assert!(!administrator_trusts_root(
-                    &serde_json::to_vec(&value).unwrap(),
-                    sha1
-                ));
-            }
+            let unrelated = super::super::tests::public_fixture(true);
+            let listing = [unrelated.as_slice(), pem.as_slice()].concat();
+            assert!(exact_certificate_in_listing(&listing, &der));
+            assert!(!exact_certificate_in_listing(&unrelated, &der));
+            assert!(!exact_certificate_in_listing(b"unreadable certificate", &der));
+            // `find-certificate -Z` omits leading zeroes in hashes on some versions.
+            // Matching the public DER does not depend on those display-only hashes.
+            let listing = [b"SHA-1 hash: 17568DE01039970BFDB3E832C85FA5FAF95F9C9\n".as_slice(), pem.as_slice()].concat();
+            assert!(exact_certificate_in_listing(&listing, &der));
+        }
+
+        #[test]
+        fn system_ssl_verification_rejects_untrusted_generated_root() {
+            let der = decode_public_ca(&super::super::tests::public_fixture(true)).unwrap();
+            let certificate = temporary_public_certificate(&der).unwrap();
+            let error = verify_certificate(certificate.path()).unwrap_err();
+            assert!(!error.is_empty());
+            assert!(trusted_exact_certificate(certificate.path(), &der).is_err());
+        }
+
+        #[test]
+        fn system_command_failure_preserves_diagnostic_without_unbounded_output() {
+            use std::os::unix::process::ExitStatusExt;
+            let output = std::process::Output {
+                status: std::process::ExitStatus::from_raw(256),
+                stdout: b"ignored stdout".to_vec(),
+                stderr: b"security: CSSMERR_TP_NOT_TRUSTED\n".to_vec(),
+            };
+            assert_eq!(command_diagnostic(&output), "security: CSSMERR_TP_NOT_TRUSTED");
+            let output = std::process::Output { stderr: vec![b'x'; 5000], ..output };
+            assert_eq!(command_diagnostic(&output).len(), 500);
         }
     }
 }
@@ -383,6 +341,17 @@ mod windows_platform {
             })
     }
 
+    fn powershell_command(executable: &Path) -> Command {
+        #[cfg_attr(not(windows), allow(unused_mut))]
+        let mut command = Command::new(executable);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000); // CREATE_NO_WINDOW；系统 UAC 授权仍正常显示。
+        }
+        command
+    }
+
     fn elevated_install_script(path: &str, executable: &str) -> String {
         let child = format!(
             "& (Join-Path $env:SystemRoot 'System32/certutil.exe') -addstore -f Root {}; exit $LASTEXITCODE",
@@ -395,26 +364,116 @@ mod windows_platform {
     }
 
     fn verification_script(path: &str) -> String {
-        format!(
-            "$ErrorActionPreference = 'Stop'; try {{ $expected = [Convert]::ToBase64String([IO.File]::ReadAllBytes({})); $store = New-Object Security.Cryptography.X509Certificates.X509Store('Root','LocalMachine'); $store.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly); $match = @($store.Certificates | Where-Object {{ [Convert]::ToBase64String($_.RawData) -eq $expected }}); $store.Close(); if ($match.Count -gt 0) {{ exit 0 }}; exit 1 }} catch {{ exit 1 }}",
-            powershell_literal(path)
-        )
+        // 只读枚举两个位置现有的证书库，不创建空库，也不只依据 Root 条目推断信任。
+        const SCRIPT: &str = r#"
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+try {
+    $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new([IO.File]::ReadAllBytes(__CERTIFICATE_PATH__))
+    $expected = [Convert]::ToBase64String($certificate.RawData)
+    $installed = $false
+    $denied = $false
+    foreach ($location in @('CurrentUser', 'LocalMachine')) {
+        $stores = @(Get-ChildItem -Path ('Cert:\' + $location) -ErrorAction Stop)
+        foreach ($entry in $stores) {
+            $store = [Security.Cryptography.X509Certificates.X509Store]::new([string]$entry.Name, [Security.Cryptography.X509Certificates.StoreLocation]$location)
+            try {
+                $flags = [Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly -bor [Security.Cryptography.X509Certificates.OpenFlags]::OpenExistingOnly
+                $store.Open($flags)
+                foreach ($candidate in $store.Certificates) {
+                    if ([Convert]::ToBase64String($candidate.RawData) -eq $expected) {
+                        $installed = $true
+                        if ($entry.Name -eq 'Disallowed') { $denied = $true }
+                    }
+                }
+            } finally { $store.Close() }
+        }
+    }
+    $trusted = $false
+    $errors = @()
+    if ($installed -and -not $denied) {
+        $chain = [Security.Cryptography.X509Certificates.X509Chain]::new()
+        try {
+            $chain.ChainPolicy.RevocationMode = [Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+            $chain.ChainPolicy.VerificationFlags = [Security.Cryptography.X509Certificates.X509VerificationFlags]::NoFlag
+            [void]$chain.ChainPolicy.ApplicationPolicy.Add([Security.Cryptography.Oid]::new('1.3.6.1.5.5.7.3.1'))
+            if ($chain.ChainPolicy.PSObject.Properties.Name -contains 'DisableCertificateDownloads') {
+                $chain.ChainPolicy.DisableCertificateDownloads = $true
+            }
+            # The pinned input is a validated self-signed root without AIA. Building
+            # that single certificate never needs an issuer or a network download,
+            # including Windows PowerShell's older .NET Framework implementation.
+            $trusted = $chain.Build($certificate)
+            $errors = @($chain.ChainStatus | ForEach-Object { $_.Status.ToString() })
+        } finally { $chain.Dispose() }
+    }
+    @{ installed = [bool]$installed; trusted = [bool]$trusted; denied = [bool]$denied; errors = $errors } | ConvertTo-Json -Compress
+    $certificate.Dispose()
+    exit 0
+} catch {
+    [Console]::Error.WriteLine($_.Exception.Message)
+    exit 1
+}
+"#;
+        SCRIPT.replace("__CERTIFICATE_PATH__", &powershell_literal(path))
     }
 
-    fn trusted_exact_certificate(executable: &Path, path: &str) -> bool {
-        Command::new(executable)
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-EncodedCommand",
-                &encoded_command(&verification_script(path)),
-            ])
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
+    #[derive(serde::Deserialize)]
+    struct NativeStatus {
+        installed: bool,
+        trusted: bool,
+        denied: bool,
+        errors: Vec<String>,
     }
 
-    pub fn install(path: &Path, _der: &[u8]) -> Result<String, String> {
+    fn command_diagnostic(output: &std::process::Output) -> String {
+        let source = if output.stderr.is_empty() { &output.stdout } else { &output.stderr };
+        let message = String::from_utf8_lossy(source).split_whitespace()
+            .collect::<Vec<_>>().join(" ").chars().take(500).collect::<String>();
+        if message.is_empty() { format!("系统工具退出状态：{}", output.status) } else { message }
+    }
+
+    fn parse_status_output(output: &std::process::Output, fingerprint: &str) -> Result<super::Status, String> {
+        if !output.status.success() {
+            return Err(format!("无法读取 Windows 证书信任状态：{}", command_diagnostic(output)));
+        }
+        if output.stdout.len() > 16 * 1024 { return Err("Windows 证书状态响应超过大小限制。".into()); }
+        let status: NativeStatus = serde_json::from_slice(&output.stdout)
+            .map_err(|error| format!("Windows 证书状态响应无法解析：{error}"))?;
+        if (status.trusted && (!status.installed || status.denied)) || (status.denied && !status.installed) {
+            return Err("Windows 证书状态响应不一致，请重新检测。".into());
+        }
+        let message = if status.denied {
+            "BinGo Root CA 已安装，但 Windows 的 Disallowed 证书库明确拒绝此 CA，请检查不受信任证书。".into()
+        } else if status.trusted {
+            "BinGo Root CA 已安装并通过 Windows 系统 SSL 信任验证。".into()
+        } else if status.installed {
+            let detail = status.errors.join(", ").chars().take(300).collect::<String>();
+            if detail.is_empty() {
+                "BinGo Root CA 已安装，但尚未通过 Windows 系统 SSL 信任验证，请导入受信任的根证书颁发机构。".into()
+            } else { format!("BinGo Root CA 已安装，但尚未通过 Windows 系统 SSL 信任验证：{detail}") }
+        } else {
+            "尚未找到 BinGo Root CA，请点击安装或下载 CA 证书。".into()
+        };
+        Ok(super::Status { installed: status.installed, trusted: status.trusted,
+            fingerprint: fingerprint.to_owned(), message })
+    }
+
+    fn query_status(executable: &Path, path: &str, fingerprint: &str) -> Result<super::Status, String> {
+        let output = powershell_command(executable)
+            .args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &encoded_command(&verification_script(path))])
+            .output().map_err(|error| format!("无法启动 Windows 证书状态查询：{error}"))?;
+        parse_status_output(&output, fingerprint)
+    }
+
+    pub fn status(der: &[u8], fingerprint: &str) -> Result<super::Status, String> {
+        let executable = powershell()?;
+        let certificate = super::temporary_public_certificate(der)?;
+        let path = certificate.path().to_str().ok_or_else(|| "证书暂存路径无法使用。".to_string())?;
+        query_status(&executable, path, fingerprint)
+    }
+
+    pub fn install(path: &Path, der: &[u8]) -> Result<String, String> {
         let executable = powershell()?;
         let path_text = path
             .to_str()
@@ -422,11 +481,11 @@ mod windows_platform {
         let executable_text = executable
             .to_str()
             .ok_or_else(|| "系统工具路径无法使用，请手动安装并信任 CA。".to_string())?;
-        if trusted_exact_certificate(&executable, path_text) {
-            return Ok("CA 已在系统受信任根证书库中，可刷新浏览器进入 HTTPS 游戏。".into());
-        }
+        let fingerprint = super::fingerprint_from_der(der);
+        let before = query_status(&executable, path_text, &fingerprint)?;
+        if before.trusted { return Ok(before.message); }
         let script = elevated_install_script(path_text, executable_text);
-        let output = Command::new(&executable)
+        let output = powershell_command(&executable)
             .args([
                 "-NoProfile",
                 "-NonInteractive",
@@ -434,31 +493,41 @@ mod windows_platform {
                 &encoded_command(&script),
             ])
             .output()
-            .map_err(|_| "无法请求管理员授权，请下载 CA 后手动安装并信任。".to_string())?;
+            .map_err(|error| format!("无法请求管理员授权，请下载 CA 后手动安装并信任。系统错误：{error}"))?;
         if output.status.code() == Some(1223) {
             return Err(
                 "已取消管理员授权，CA 未完成安装。可重试，或下载证书后手动安装并信任。".into(),
             );
         }
         if !output.status.success() {
-            return Err(
-                "系统未能完成 CA 安装，请下载证书后手动导入受信任的根证书颁发机构。".into(),
-            );
+            return Err(format!(
+                "系统未能完成 CA 安装，请下载证书后手动导入受信任的根证书颁发机构。系统错误：{}",
+                command_diagnostic(&output)
+            ));
         }
-        if !trusted_exact_certificate(&executable, path_text) {
-            return Err(
-                "安装命令已完成，但未能确认 CA 已在系统受信任根证书库中，请手动检查。".into(),
-            );
-        }
-        Ok(
-            "CA 已安装并核验系统受信任根证书库。请刷新浏览器；若仍有证书错误，请重启浏览器。"
-                .into(),
-        )
+        let after = query_status(&executable, path_text, &fingerprint)?;
+        if !after.trusted { return Err(format!("安装命令已完成。{}", after.message)); }
+        Ok(format!("{} 请刷新浏览器；若仍有证书错误，请重启浏览器。", after.message))
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        fn status_output(code: i32, stdout: &[u8], stderr: &[u8]) -> std::process::Output {
+            #[cfg(unix)]
+            let status = {
+                use std::os::unix::process::ExitStatusExt;
+                std::process::ExitStatus::from_raw(code << 8)
+            };
+            #[cfg(windows)]
+            let status = {
+                use std::os::windows::process::ExitStatusExt;
+                std::process::ExitStatus::from_raw(code as u32)
+            };
+            std::process::Output { status, stdout: stdout.to_vec(), stderr: stderr.to_vec() }
+        }
+
 
         #[test]
         fn powershell_quotes_unicode_special_paths_and_uses_uac() {
@@ -471,7 +540,16 @@ mod windows_platform {
             assert!(script.contains("-Verb RunAs -Wait -PassThru"));
             assert!(script.contains("exit $p.ExitCode"));
             assert!(!script.contains("PRIVATE KEY") && !script.contains("BingoRootCA.key"));
-            assert!(verification_script(path).contains("'Root','LocalMachine'"));
+            let verification = verification_script(path);
+            assert!(verification.contains("@('CurrentUser', 'LocalMachine')"));
+            assert!(verification.contains("::OpenExistingOnly"));
+            assert!(verification.contains("'Disallowed'"));
+            assert!(verification.contains("::ToBase64String($candidate.RawData) -eq $expected"));
+            assert!(verification.contains("1.3.6.1.5.5.7.3.1"));
+            assert!(verification.contains("$chain.Build($certificate)"));
+            assert!(verification.contains("::NoFlag"));
+            assert!(!verification.contains("CustomTrustStore") && !verification.contains("-addstore"));
+            assert!(verification.contains(&powershell_literal(path)));
         }
 
         #[test]
@@ -483,6 +561,51 @@ mod windows_platform {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || b"+/=".contains(&byte)));
         }
+
+        #[test]
+        fn windows_state_separates_absent_ordinary_store_trusted_and_disallowed_ca() {
+            let fingerprint = "pinned-public-fingerprint";
+            for (payload, installed, trusted, message) in [
+                (br#"{"installed":false,"trusted":false,"denied":false,"errors":[]}"#.as_slice(), false, false, "尚未找到"),
+                (br#"{"installed":true,"trusted":false,"denied":false,"errors":["UntrustedRoot"]}"#.as_slice(), true, false, "UntrustedRoot"),
+                (br#"{"installed":true,"trusted":true,"denied":false,"errors":[]}"#.as_slice(), true, true, "SSL 信任验证"),
+                (br#"{"installed":true,"trusted":false,"denied":true,"errors":[]}"#.as_slice(), true, false, "Disallowed"),
+            ] {
+                let output = status_output(0, payload, b"");
+                let status = parse_status_output(&output, fingerprint).unwrap();
+                assert_eq!(status.installed, installed);
+                assert_eq!(status.trusted, trusted);
+                assert_eq!(status.fingerprint, fingerprint);
+                assert!(status.message.contains(message), "{}", status.message);
+            }
+        }
+
+        #[test]
+        fn windows_query_failure_or_invalid_state_is_an_error_instead_of_not_installed() {
+            let denied = status_output(1, b"", b"Access denied opening LocalMachine certificate store");
+            let error = parse_status_output(&denied, "fingerprint").unwrap_err();
+            assert!(error.contains("Access denied"));
+            let failed_spawn = status_output(1, b"", b"");
+            assert!(parse_status_output(&failed_spawn, "fingerprint").unwrap_err().contains("退出状态"));
+            for payload in [
+                br#"{"installed":false,"trusted":true,"denied":false,"errors":[]}"#.as_slice(),
+                br#"{"installed":true,"trusted":true,"denied":true,"errors":[]}"#.as_slice(),
+                br#"{"installed":false,"trusted":false,"denied":true,"errors":[]}"#.as_slice(),
+                br#"{"installed":"false","trusted":false,"denied":false,"errors":[]}"#.as_slice(),
+                b"not a certificate-status response".as_slice(),
+            ] {
+                assert!(parse_status_output(&status_output(0, payload, b""), "fingerprint").is_err());
+            }
+        }
+
+        #[test]
+        fn pinned_self_signed_root_needs_no_remote_issuer_retrieval() {
+            let der = super::super::public_certificate_der().unwrap();
+            let (_, certificate) = x509_parser::parse_x509_certificate(&der).unwrap();
+            assert_eq!(certificate.subject(), certificate.issuer());
+            assert!(!certificate.extensions().iter().any(|extension|
+                extension.oid.to_id_string() == "1.3.6.1.5.5.7.1.1"));
+        }
     }
 }
 
@@ -492,6 +615,15 @@ use windows_platform as platform;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod platform {
     use std::path::Path;
+
+    pub fn status(_der: &[u8], fingerprint: &str) -> Result<super::Status, String> {
+        Ok(super::Status {
+            installed: false,
+            trusted: false,
+            fingerprint: fingerprint.to_owned(),
+            message: "此系统暂不支持自动检测 CA 信任，请下载证书后手动安装。".into(),
+        })
+    }
 
     pub fn install(_path: &Path, _der: &[u8]) -> Result<String, String> {
         Err("此系统暂不支持自动安装 CA。请下载公共 CA 证书并手动安装、设置信任。".into())

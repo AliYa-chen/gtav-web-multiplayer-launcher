@@ -13,62 +13,45 @@ const state = {
   message: '选择你的游戏资源，下一站就是洛圣都。', error: '', background: readBackground(storage, backgroundIds), settingsOpen: false,
   remote: null, remoteBusy: false, remoteError: '', platform: '',
   announcementIndex: 0, clientPage: 0, reading: null, readingPage: 0,
-  updateRequired: false, caInstallFailed: false, caInstallError: '', caTrusted: false,
+  updateRequired: false, caInstallFailed: false, caInstallError: '', caSystemStatus: null,
   lan: null, lanOpen: false, lanSettings: lanSettings(null),
 };
-let trustProbe = null, trustGeneration = 0;
-function synchronizeCaTrust() {
-  const url = state.lan?.running_url, fingerprint = state.lan?.ca_fingerprint;
-  const key = state.desktop && state.urls.length && url && fingerprint ? `${url}\n${fingerprint}` : '';
-  if (trustProbe?.key === key) return;
-  trustGeneration++;
-  if (trustProbe) {
-    clearTimeout(trustProbe.retryTimer);
-    clearTimeout(trustProbe.timeoutTimer);
-    trustProbe.controller?.abort();
-  }
-  trustProbe = null;
-  if (!key) return;
-  state.caTrusted = false;
-  trustProbe = { key, url, fingerprint, generation: trustGeneration, pending: false };
-  trustProbe.promise = checkCaTrust(trustProbe);
+let caSystemRequest = null, caSystemRetryTimer = null;
+function systemCaTrusted(status = state.caSystemStatus) {
+  return status?.installed === true && status?.trusted === true;
 }
-async function checkCaTrust(probe) {
-  if (trustProbe !== probe || probe.pending || state.caTrusted) return;
-  probe.pending = true;
-  const controller = new AbortController();
-  probe.controller = controller;
-  try {
-    const result = await Promise.race([
-      (async () => {
-        const response = await fetch(new URL('api/lan/ready', probe.url).href, {
-          method: 'GET', mode: 'cors', credentials: 'omit', cache: 'no-store',
-          redirect: 'error', signal: controller.signal,
-        });
-        if (!response.ok || response.type === 'opaque') throw new Error('not-ready');
-        return response.json();
-      })(),
-      new Promise((_, reject) => {
-        probe.timeoutTimer = setTimeout(() => { controller.abort(); reject(new Error('timeout')); }, 6000);
-      }),
-    ]);
-    if (trustProbe !== probe || probe.generation !== trustGeneration || result?.ready !== true || result.fingerprint !== probe.fingerprint) return;
-    state.caTrusted = true;
-    if (state.error === state.caInstallError) state.error = '';
-    state.caInstallFailed = false;
-    state.caInstallError = '';
-    // 后台检测不能替换用户正在编辑的设置字段，操作完成时会正常呈现新状态。
-    if (!state.busy && !state.lanOpen) render();
-  } catch {
-    // TLS 尚未信任时继续等待系统或用户手动安装；不把它当作游戏启动错误。
-  } finally {
-    clearTimeout(probe.timeoutTimer);
-    controller.abort();
-    probe.pending = false;
-    if (trustProbe === probe && probe.generation === trustGeneration && !state.caTrusted) {
-      probe.retryTimer = setTimeout(() => { probe.promise = checkCaTrust(probe); }, 4000);
-    }
+function systemCaNeedsRetry(status) {
+  return !systemCaTrusted(status);
+}
+function scheduleCaSystemCheck() {
+  clearTimeout(caSystemRetryTimer);
+  caSystemRetryTimer = null;
+  if (!state.desktop || !systemCaNeedsRetry(state.caSystemStatus)) return;
+  caSystemRetryTimer = setTimeout(() => { caSystemRetryTimer = null; void refreshCaSystemStatus(); }, 4000);
+}
+async function refreshCaSystemStatus(fresh = false) {
+  if (!state.desktop) return;
+  if (caSystemRequest) {
+    if (!fresh) return caSystemRequest;
+    await caSystemRequest;
   }
+  caSystemRequest = invoke('check_lan_ca_status').then((value) => {
+    state.caSystemStatus = value && typeof value === 'object' ? value : { installed: false, trusted: false, message: '' };
+    if (state.caSystemStatus.installed === true && state.caSystemStatus.trusted === true) {
+      if (state.error === state.caInstallError) state.error = '';
+      state.caInstallFailed = false;
+      state.caInstallError = '';
+    }
+    scheduleCaSystemCheck();
+    if (!state.busy && !state.lanOpen) render();
+    return state.caSystemStatus;
+  }).catch((error) => {
+    state.caSystemStatus = { installed: false, trusted: false, message: '系统证书状态暂不可用，可手动安装或下载 CA。', error: String(error) };
+    scheduleCaSystemCheck();
+    if (!state.busy && !state.lanOpen) render();
+    return state.caSystemStatus;
+  }).finally(() => { caSystemRequest = null; });
+  return caSystemRequest;
 }
 const icons = {
   folder: '<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3z"/><path d="M3 10h18"/></svg>',
@@ -95,7 +78,6 @@ function updateStatus(value) {
   // 操作返回的状态可能早于刚收到的更新事件，不能用它解除已经确认的更新要求。
   if (value.remote_configuration && !state.updateRequired) applyRemote(value.remote_configuration);
   if (value.update_required === true) state.updateRequired = true;
-  synchronizeCaTrust();
 }
 function resetLanSettings() {
   state.lanSettings = lanSettings(state.lan);
@@ -117,6 +99,7 @@ function render() {
   const lanAddress = state.lan?.host_address || state.lan?.addresses?.[0] || '';
   const lanAddresses = [...new Set([...(state.lan?.addresses || []), ...(lanAddress ? [lanAddress] : [])])];
   const sharing = lanActions(state), caEnabled = state.desktop && !state.busy && !state.updateRequired;
+  const caSystemTrusted = systemCaTrusted();
   const actions = launcherActions(state, state.remoteBusy), remote = remotePresentation(state.remote, state.version, state.platform);
   const background = backgrounds.find((item) => item.id === state.background) || backgrounds[0];
   state.announcementIndex = Math.min(state.announcementIndex, Math.max(0, remote.announcements.length - 1));
@@ -131,23 +114,23 @@ function render() {
       <div class="settings"><button id="settings-toggle" class="settings-toggle ${state.settingsOpen ? 'is-open' : ''}" aria-expanded="${state.settingsOpen}" aria-controls="background-picker">${icons.settings} 设置 ${icons.chevron}</button>
         ${state.settingsOpen ? `<button class="picker-backdrop" id="picker-dismiss" aria-label="关闭背景设置"></button><section id="background-picker" class="background-picker" role="dialog" aria-modal="true" aria-labelledby="picker-title"><div class="picker-heading"><div><p class="eyebrow">YOUR LOS SANTOS</p><h2 id="picker-title">换一处风景</h2><span>12 个场景 · 主图完整展示</span></div><button id="picker-close" class="icon-button" aria-label="关闭背景设置">${icons.close}</button></div><div class="background-grid">${backgrounds.map((item) => `<button class="background-option ${item.id === state.background ? 'selected' : ''}" data-background="${item.id}" aria-pressed="${item.id === state.background}" aria-label="选择背景：${html(item.label)}"><img src="${item.image}" alt="${html(item.label)}" loading="lazy"><span>${html(item.label)}${item.id === state.background ? icons.check : ''}</span></button>`).join('')}</div></section>` : ''}
       </div></div></header>
-      <section class="hero"><div class="hero__copy"><p class="eyebrow"><span class="status-dot live"></span> 你的世界，共同的战局</p><h1>下一站，<em>洛圣都。</em></h1><p class="hero__description">带上你的游戏资源，从单人探索到公共战局。</p></div><span class="scene-label">${html(background.label)}</span></section>
+      <section class="hero"><div class="hero__copy"><h1>下一站，<em>洛圣都。</em></h1><p class="hero__description">选择资源，开启共享战局。</p></div><span class="scene-label">${html(background.label)}</span></section>
       <div class="dashboard"><div class="game-column"><section class="glass setup-card"><div class="section-heading"><span class="step-number">01</span><div><h2>选择游戏资源</h2><p>选择资源文件夹，或其中的 b / data 目录。</p></div><span class="resource-badge ${ready ? 'verified' : ''}">${ready ? `${icons.check} 已通过校验` : '首次设置'}</span></div>
         <button class="directory" id="choose" ${actions.choose ? '' : 'disabled'}><span class="folder-icon">${icons.folder}</span><span class="directory__text"><small>${state.selected ? '所选目录' : '游戏资源目录'}</small><span title="${html(state.selected)}">${html(displayDirectory(state.selected))}</span></span><span class="browse">${state.selected ? '更换' : '选择'} ↗</span></button>
-        ${ready ? `<div class="resource-detail"><span>${icons.check} ${Number(state.resources.manifest_file_count || 0).toLocaleString()} 项资源</span><span>资源只读，不修改游戏数据</span></div>` : '<p class="directory-note">支持原始资源包；自动识别目录，使用启动器内置游戏页面。</p>'}
-        <div class="resource-help">${state.desktop ? '<button id="get-game-resources" type="button" class="text-button">没有游戏本体？ ↗</button>' : '<a class="text-button" href="https://archive.org/download/gta5-wasm/" target="_blank" rel="noopener noreferrer">没有游戏本体？ ↗</a>'}</div>
+        <div class="resource-footer">${ready ? `<div class="resource-detail"><span>${icons.check} ${Number(state.resources.manifest_file_count || 0).toLocaleString()} 项资源</span><span>资源只读，不修改游戏数据</span></div>` : '<p class="directory-note">自动识别资源目录，使用内置游戏页面。</p>'}
+        <div class="resource-help">${state.desktop ? '<button id="get-game-resources" type="button" class="text-button">没有游戏本体？ ↗</button>' : '<a class="text-button" href="https://archive.org/download/gta5-wasm/" target="_blank" rel="noopener noreferrer">没有游戏本体？ ↗</a>'}</div></div>
       </section>
-      <section class="glass launch-card"><div class="launch-main"><div class="launch-copy"><div class="section-heading"><span class="step-number">02</span><div><h2>${running ? '游戏已准备就绪' : '启动你的游戏'}</h2><p>${running ? '另开一个客户端，把独立邀请地址发给朋友。' : '启动后自动开启局域网共享，并在本机浏览器打开游戏。'}</p></div></div>
-          <div class="progress-status ${state.error ? 'has-error' : ''}" role="status" aria-live="polite"><span class="${state.busy ? 'spinner' : 'status-dot'}"></span><span class="status-copy" title="${html(state.error || state.message)}">${html(state.error || state.message)}</span>${state.error ? '<button class="text-button" data-read="error">详情</button>' : ''}</div>
-          ${state.busy ? `<div class="progress-track"><span style="width:${progressValue(state.phase)}%"></span></div>` : ''}</div>
+      <section class="glass launch-card"><div class="launch-main"><div class="launch-heading"><div class="section-heading"><span class="step-number">02</span><div><h2>${running ? '游戏已准备就绪' : '启动你的游戏'}</h2></div></div>${running ? `<button id="stop" class="text-button launch-stop" title="停止所有客户端与局域网共享" ${actions.stop ? '' : 'disabled'}>停止全部</button>` : ''}</div>
+        <div class="progress-status ${state.error ? 'has-error' : ''}" role="status" aria-live="polite"><span class="${state.busy ? 'spinner' : 'status-dot'}"></span><span class="status-copy" title="${html(state.error || state.message)}">${html(state.error || state.message)}</span>${state.error ? '<button class="text-button" data-read="error">详情</button>' : ''}</div>
+        ${state.busy ? `<div class="progress-track"><span style="width:${progressValue(state.phase)}%"></span></div>` : ''}</div>
         <div class="launch-actions"><button id="launch" class="primary" ${actions.launch ? '' : 'disabled'}>${running ? '打开游戏' : state.busy ? '正在准备…' : '启动游戏'}${icons.arrow}</button>
-          ${running ? `<button id="additional" class="secondary" ${actions.additional ? '' : 'disabled'}>另开一个客户端</button><button id="stop" class="text-button" ${actions.stop ? '' : 'disabled'}>停止游戏与共享</button>` : `<button id="verify" class="text-button" ${actions.launch ? '' : 'disabled'}>检查资源</button>`}
-          ${state.desktop ? `<button id="lan-setup" class="secondary" ${sharing.configure ? '' : 'disabled'}>局域网共享设置</button>` : ''}</div></div>
-      ${state.caTrusted ? '' : `<div class="ca-trust-actions"><div><span>本机浏览器证书信任</span><small>BinGo Root CA · 只需安装一次${running ? ' · 正在检测 HTTPS' : ''}</small></div><div class="ca-trust-actions__buttons"><button id="ca-install" class="secondary" ${caEnabled ? '' : 'disabled'}>安装并信任 CA</button><button id="ca-save" class="text-button" ${caEnabled ? '' : 'disabled'}>下载 CA 证书</button></div>${state.caInstallFailed ? '<p class="ca-trust-fallback" role="status">自动安装未完成。可点击“下载 CA 证书”，按系统说明手动安装并信任；浏览器安装指引见邀请地址。HTTPS 验证成功后会自动隐藏此提示。</p>' : ''}</div>`}
-      ${running ? `<div class="addresses">${visibleClients.map((url, offset) => {
-        const index = state.clientPage * 4 + offset, invitation = state.invitationUrls[index] || (index === 0 ? state.lan?.guide_url : '');
-        return `<div class="client-address"><div class="client-address__heading"><span><span class="status-dot live"></span>客户端 ${index + 1}${index === 0 ? ' · 本机' : ' · 朋友'}</span><button data-open="${index}" class="text-button" ${state.busy || state.updateRequired ? 'disabled' : ''}>在本机打开 ↗</button></div><code>${html(invitation || url)}</code><button data-copy-client="${index}" class="text-button" ${state.busy || !invitation ? 'disabled' : ''}>复制邀请地址</button></div>`;
-      }).join('')}${state.urls.length > 4 ? `<button id="clients-next" class="client-page" aria-label="显示下一组客户端">${state.clientPage + 1} / ${Math.ceil(state.urls.length / 4)} ${icons.arrow}</button>` : ''}</div>` : ''}</section></div>
+          ${running ? `<button id="additional" class="secondary" ${actions.additional ? '' : 'disabled'}>另开一个客户端</button>` : `<button id="verify" class="text-button" ${actions.launch ? '' : 'disabled'}>检查资源</button>`}
+          ${state.desktop ? `<button id="lan-setup" class="secondary" ${sharing.configure ? '' : 'disabled'}>共享设置</button>` : ''}</div>
+        <div class="launch-details">${caSystemTrusted ? '' : `<div class="ca-trust-actions"><div><span>本机浏览器证书信任</span><small title="${html(state.caSystemStatus?.message || state.caSystemStatus?.error || '')}">${html(state.caSystemStatus?.installed === true ? '系统已安装但未信任，请完成系统信任' : state.caSystemStatus?.message || 'BinGo Root CA · 只需安装一次')}</small></div><div class="ca-trust-actions__buttons"><button id="ca-install" class="secondary" ${caEnabled ? '' : 'disabled'}>安装并信任 CA</button><button id="ca-save" class="text-button" ${caEnabled ? '' : 'disabled'}>下载 CA 证书</button></div>${state.caInstallFailed ? '<p class="ca-trust-fallback" role="status">自动安装未完成，可下载证书手动信任。系统确认信任后会自动隐藏此提示。</p>' : ''}</div>`}
+        ${running ? `<div class="client-list"><div class="client-list__heading"><span>客户端邀请地址</span>${state.urls.length > 4 ? `<button id="clients-next" class="text-button client-page" aria-label="显示下一组客户端">${state.clientPage + 1} / ${Math.ceil(state.urls.length / 4)} ${icons.arrow}</button>` : '<small>复制后发给朋友</small>'}</div><div class="addresses">${visibleClients.map((url, offset) => {
+          const index = state.clientPage * 4 + offset, invitation = state.invitationUrls[index] || (index === 0 ? state.lan?.guide_url : '');
+          return `<div class="client-address"><div class="client-address__heading"><span><span class="status-dot live"></span>客户端 ${index + 1}${index === 0 ? ' · 本机' : ' · 朋友'}</span>${index > 0 ? `<button data-open="${index}" class="text-button" ${state.busy || state.updateRequired ? 'disabled' : ''}>本机打开 ↗</button>` : ''}</div><button data-copy-client="${index}" class="secondary client-copy" ${state.busy || !invitation ? 'disabled' : ''}>复制邀请地址</button><code title="${html(invitation || url)}">${html(invitation || url)}</code></div>`;
+        }).join('')}</div></div>` : ''}</div></section></div>
       <aside class="community-column"><section class="glass announcement-card"><div class="card-heading"><h2>${icons.bell} 战局公告</h2><span class="config-source">${html(remote.sourceText)}</span></div>
         ${announcement ? `<div class="announcements"><article><div class="announcement-heading"><h3 title="${html(announcement.title)}">${html(announcement.title)}</h3>${announcement.date ? `<time>${html(announcement.date)}</time>` : ''}</div><p>${html(announcement.body)}</p></article><div class="announcement-actions"><button class="text-button" data-read="announcement">查看详情 ↗</button>${remote.announcements.length > 1 ? `<div class="pager"><button id="announcement-prev" aria-label="上一条公告" ${state.announcementIndex ? '' : 'disabled'}>‹</button><span>${state.announcementIndex + 1} / ${remote.announcements.length}</span><button id="announcement-next" aria-label="下一条公告" ${state.announcementIndex < remote.announcements.length - 1 ? '' : 'disabled'}>›</button></div>` : ''}</div></div>` : '<p class="empty-note">-</p>'}
         <div class="server-info"><span>在线模式服务器状态</span><strong>${html(remote.title)}</strong>${remote.websiteAvailable && state.desktop ? '<button id="website" class="text-button">查看服务器状态 ↗</button>' : ''}${remote.servers.length ? `<ul class="server-routes">${remote.servers.map((item) => `<li><span>${html(item.name)}${item.role ? ` · ${html(item.role)}` : ''}</span><code>${html(item.address)}</code></li>`).join('')}</ul>` : ''}</div>
@@ -209,26 +192,26 @@ app.addEventListener('click', async (event) => {
   } else if (target.id === 'picker-close' || target.id === 'picker-dismiss') {
     state.settingsOpen = false; render(); document.querySelector('#settings-toggle')?.focus();
   } else if (target.id === 'ca-install') {
-    if (state.caTrusted) return;
+    if (systemCaTrusted()) return;
     await operation(async () => {
       state.caInstallFailed = false; state.caInstallError = ''; state.phase = ''; state.message = '正在请求安装并信任 CA，请完成系统授权…'; render();
+      let installError;
       try { state.message = await invoke('install_lan_ca'); }
       catch (error) {
-        if (!state.caTrusted) {
-          state.caInstallFailed = true;
-          state.caInstallError = typeof error === 'string' ? error : error.message || String(error);
-          throw error;
-        }
+        installError = error;
       }
       finally {
-        if (trustProbe && !trustProbe.pending && !state.caTrusted) {
-          clearTimeout(trustProbe.retryTimer);
-          trustProbe.promise = checkCaTrust(trustProbe);
-        }
+        await refreshCaSystemStatus(true);
       }
+      if (installError && !systemCaTrusted()) {
+        state.caInstallFailed = true;
+        state.caInstallError = typeof installError === 'string' ? installError : installError.message || String(installError);
+        throw installError;
+      }
+      if (installError) state.message = state.caSystemStatus.message || 'CA 已安装并受系统信任。';
     });
   } else if (target.id === 'ca-save') {
-    if (state.caTrusted) return;
+    if (systemCaTrusted()) return;
     await operation(async () => {
       state.phase = ''; state.message = '请选择 CA 证书保存位置…'; render();
       const saved = await invoke('save_lan_ca_certificate');
@@ -293,11 +276,13 @@ app.addEventListener('click', async (event) => {
   else if (target.id === 'launch') await operation(async () => {
     if (!state.urls.length) {
       if (!state.resources) await prepare();
-      requireCurrentVersion(); updateStatus(await invoke('start_game', { additional: false }));
-      await trustProbe?.promise;
+      requireCurrentVersion();
+      const caStatus = refreshCaSystemStatus(true);
+      updateStatus(await invoke('start_game', { additional: false }));
+      await caStatus;
     }
     requireCurrentVersion();
-    await invoke('open_game', { index: 0, trusted: state.caTrusted }); state.message = state.caTrusted ? '游戏已在浏览器打开，局域网共享已开启。' : '局域网共享已开启，浏览器验证证书后会自动进入游戏。';
+    await invoke('open_game', { index: 0, trusted: systemCaTrusted() }); state.message = systemCaTrusted() ? '游戏已在浏览器打开，局域网共享已开启。' : '局域网共享已开启，浏览器验证证书后会自动进入游戏。';
   });
   else if (target.id === 'additional') await operation(async () => {
     requireCurrentVersion(); updateStatus(await invoke('start_game', { additional: true }));
@@ -305,7 +290,7 @@ app.addEventListener('click', async (event) => {
     state.message = '朋友客户端已准备就绪，复制它的邀请地址发给朋友。';
   });
   else if (target.id === 'stop') await operation(async () => { updateStatus(await invoke('stop_game')); state.message = '游戏与局域网共享已停止。'; });
-  else if (target.dataset.open !== undefined) await operation(() => invoke('open_game', { index: Number(target.dataset.open), trusted: state.caTrusted }));
+  else if (target.dataset.open !== undefined) await operation(() => invoke('open_game', { index: Number(target.dataset.open), trusted: systemCaTrusted() }));
 });
 app.addEventListener('input', (event) => {
   const field = event.target?.dataset?.lanField;
@@ -360,6 +345,7 @@ render();
 if (state.desktop) {
   listen('launcher-progress', ({ payload }) => { state.phase = payload.phase; state.message = payload.text; render(); });
   listen('launcher-remote-config', ({ payload }) => { applyRemote(payload); render(); });
+  void refreshCaSystemStatus();
   invoke('launcher_status').then(updateStatus).then(render).catch((error) => { state.error = String(error); render(); }).finally(() => refreshRemote(false));
   setInterval(() => refreshRemote(true), 5 * 60 * 1000);
 } else { state.message = '界面预览：通过桌面启动器选择资源并开始游戏。'; render(); }

@@ -255,6 +255,13 @@ fn save_lan_settings(app: tauri::AppHandle, state: State<'_, LauncherState>, por
 }
 
 #[tauri::command]
+async fn check_lan_ca_status() -> Result<ca_trust::Status, String> {
+    // 只读查询可在游戏启动前进行，不占用资源准备或安装操作的忙锁。
+    tauri::async_runtime::spawn_blocking(ca_trust::check_status)
+        .await.map_err(|_| "系统证书检测任务异常，请稍后重试。".to_string())?
+}
+
+#[tauri::command]
 async fn install_lan_ca(app: tauri::AppHandle, state: State<'_, LauncherState>) -> Result<String, String> {
     ensure_current_launcher(&state)?;
     let _guard = acquire(&state)?;
@@ -397,7 +404,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![launcher_status, choose_game_directory, prepare_game, start_game, stop_game, open_game,
             remote_configuration, open_update_download, open_project_website, open_game_resource_page,
-            save_lan_settings, install_lan_ca, save_lan_ca_certificate])
+            save_lan_settings, check_lan_ca_status, install_lan_ca, save_lan_ca_certificate])
         .build(tauri::generate_context!()).expect("启动桌面界面失败")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {

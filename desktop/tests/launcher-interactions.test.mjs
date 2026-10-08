@@ -6,11 +6,13 @@ import * as presentation from '../src/view-state.js';
 
 const source = (await readFile(new URL('../src/main.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '');
 const tick = () => new Promise((resolve) => setImmediate(resolve));
+const caFingerprint = 'AB:'.repeat(31) + 'CD';
 async function launcher(desktop = true, options = {}) {
   const calls = [], values = new Map(), events = new Map(), intervals = [], held = new Map(), failures = new Set(), copied = [], requests = [], timers = new Map();
-  let timerId = 0, fetchHandler = options.fetch || (async () => { throw new TypeError('TLS not trusted'); });
+  let timerId = 0;
   let urls = options.urls || [], invitationUrls = options.invitationUrls || [];
   let lan = { settings: { port: 8443, http_port: 8442 }, addresses: ['192.168.31.225'], running_url: null, guide_url: null, host_address: null, ca_fingerprint: null, ...options.lan };
+  let caSystemStatus = options.caSystemStatus || { installed: false, trusted: false, fingerprint: null, message: '' };
   let remoteFailure = false;
   let resources = options.resources === undefined ? { manifest_file_count: 5814 } : options.resources;
   let remote = { config: { oltitle: 'https://gtav.2t.hk', latest_version: '0.2.5', downloads: { windows_x64: { url: 'https://oss.2t.hk/launcher.exe', sha256: 'a'.repeat(64) } }, announcements: [{ title: '<img>', body: '<script>unsafe</script>' }] }, source: 'remote' };
@@ -48,6 +50,7 @@ async function launcher(desktop = true, options = {}) {
       if (failures.has(command)) throw new Error(`${command} failed`);
       if (held.has(command)) return await held.get(command).promise;
       if (command === 'install_lan_ca') return 'BinGo Root CA 已安装并信任，请重启浏览器后访问 HTTPS 游戏。';
+      if (command === 'check_lan_ca_status') return caSystemStatus;
       if (command === 'save_lan_ca_certificate') return options.caSaveResult === undefined ? '/证书/BinGo Root CA.crt' : options.caSaveResult;
       if (command === 'choose_game_directory') return '/新资源';
       if (command === 'prepare_game') resources = { manifest_file_count: 5814 };
@@ -62,7 +65,7 @@ async function launcher(desktop = true, options = {}) {
       if (command === 'remote_configuration') { if (remoteFailure) throw new Error('failed request'); return remote; }
       return status();
     },
-    AbortController, URL, fetch: (...args) => { requests.push(args); return fetchHandler(...args); },
+    fetch: (...args) => { requests.push(args); throw new Error('The launcher must use native CA status'); },
     setTimeout: (callback, delay) => { const id = ++timerId; timers.set(id, { callback, delay }); return id; }, clearTimeout: (id) => timers.delete(id),
     setInterval: (callback, delay) => { intervals.push({ callback, delay }); return intervals.length; },
   });
@@ -70,8 +73,8 @@ async function launcher(desktop = true, options = {}) {
   await tick();
   return { calls, app, values, events, intervals, document, status, copied, requests, timers,
     renderCount: () => renderCount,
-    setFetch(handler) { fetchHandler = handler; },
-    async runTimer(delay) { const entry = [...timers].find(([, timer]) => timer.delay === delay); assert.ok(entry, `missing ${delay}ms timer`); timers.delete(entry[0]); entry[1].callback(); await tick(); },
+    setCaSystemStatus(value) { caSystemStatus = value; },
+    async runTimer(delay) { const entries = [...timers].filter(([, timer]) => timer.delay === delay); const entry = entries.at(-1); assert.ok(entry, `missing ${delay}ms timer`); timers.delete(entry[0]); entry[1].callback(); await tick(); },
     setRemote(value) { remote = value; remoteFailure = false; }, failRemote() { remoteFailure = true; },
     failCommand(command, failed = true) { failed ? failures.add(command) : failures.delete(command); },
     hold(command) { let resolve; const promise = new Promise((accept) => { resolve = accept; }); held.set(command, { promise }); return (value = status()) => { held.delete(command); resolve(value); }; },
@@ -373,7 +376,7 @@ test('新增客户端自动展示邀请地址，分页保留全局编号并打�
   const ui = await launcher();
   await ui.click('launch');
   for (let count = 1; count < 5; count++) await ui.click('additional');
-  const clientIndices = () => [...ui.app.innerHTML.matchAll(/data-open="(\d+)"/g)].map((match) => Number(match[1]));
+  const clientIndices = () => [...ui.app.innerHTML.matchAll(/data-copy-client="(\d+)"/g)].map((match) => Number(match[1]));
   assert.deepEqual(clientIndices(), [4]);
   assert.match(ui.app.innerHTML, /客户端 5 · 朋友/);
   assert.match(ui.app.innerHTML, /http:\/\/192\.168\.31\.225:8450\//);
@@ -383,6 +386,7 @@ test('新增客户端自动展示邀请地址，分页保留全局编号并打�
   await ui.click('', { copyClient: '4' }); assert.equal(ui.copied.at(-1), 'http://192.168.31.225:8450/');
   await ui.click('clients-next');
   assert.deepEqual(clientIndices(), [0, 1, 2, 3]);
+  assert.doesNotMatch(ui.app.innerHTML, /data-open="0"/);
 });
 
 test('共享设置默认自动检测 IP，仅保存设置，没有独立开启或停止共享入口', async () => {
@@ -423,7 +427,7 @@ test('设置只提交 IP 和双端口，启动默认共享，朋友客户端不�
   await ui.click('stop');
   assert.equal(ui.calls.at(-1).command, 'stop_game');
   assert.doesNotMatch(ui.app.innerHTML, /class="client-address"/);
-  assert.equal(ui.timers.size, 0);
+  assert.equal([...ui.timers.values()].filter(timer => timer.delay === 6000 || timer.delay === 4000).length, 1);
 });
 
 test('保存失败保持输入以便修复重试，剪贴板失败不误报成功', async () => {
@@ -480,7 +484,7 @@ test('本机 CA 安装独立于游戏目录，调用系统授权命令并显示�
   assert.match(ui.app.innerHTML, /id="ca-save" class="text-button" >下载 CA 证书/);
   const before = ui.calls.length;
   await ui.click('ca-install');
-  assert.deepEqual(ui.calls.slice(before).map((call) => call.command), ['install_lan_ca']);
+  assert.deepEqual(ui.calls.slice(before).map((call) => call.command), ['install_lan_ca', 'check_lan_ca_status']);
   assert.match(ui.app.innerHTML, /BinGo Root CA 已安装并信任，请重启浏览器后访问 HTTPS 游戏/);
   assert.doesNotMatch(ui.app.innerHTML, /ca-trust-fallback/);
 });
@@ -522,111 +526,92 @@ test('CA 操作禁止忙时重入、网页预览与强制更新时的原生命�
   await preview.click('ca-install'); await preview.click('ca-save'); assert.equal(preview.calls.length, 0);
 });
 
-const caFingerprint = 'AB:'.repeat(31) + 'CD';
-const readyResponse = (body = { ready: true, fingerprint: caFingerprint }, properties = {}) => ({ ok: true, type: 'cors', json: async () => body, ...properties });
+test('启动器启动前后台识别系统 CA，已安装但未信任时保留手动入口并明确状态', async () => {
+  const ui = await launcher(true, { caSystemStatus: { installed: true, trusted: false, fingerprint: caFingerprint, message: '' } });
+  assert.ok(ui.calls.some((call) => call.command === 'check_lan_ca_status'));
+  assert.match(ui.app.innerHTML, /系统已安装但未信任，请完成系统信任/);
+  assert.match(ui.app.innerHTML, /id="ca-install"|id="ca-save"/);
+});
 
-test('本机证书通过实际主客户端 HTTPS 与 CA 指纹验证，首次启动直接打开 HTTPS 并隐藏 CA 入口', async () => {
-  const ui = await launcher(true, { fetch: async () => readyResponse() });
+test('系统查询失败只显示短状态，不阻止启动，且网页预览不调用系统查询', async () => {
+  const ui = await launcher(); ui.failCommand('check_lan_ca_status');
+  // Initial query already completed before the failure flag; the next retry exercises the error path.
+  await ui.runTimer(4000);
+  assert.match(ui.app.innerHTML, /系统证书状态暂不可用，可手动安装或下载 CA/);
+  assert.match(ui.app.innerHTML, /id="ca-install"|id="ca-save"/);
+  await ui.click('launch'); assert.equal(ui.calls.at(-1).command, 'open_game');
+  assert.equal(ui.calls.at(-1).args.trusted, false);
+  const preview = await launcher(false); assert.equal(preview.calls.length, 0);
+});
+
+test('系统确认安装并信任后隐藏整个 CA 区，本机所有客户端直接打开 HTTPS，无网络探测', async () => {
+  const ui = await launcher(true, { caSystemStatus: { installed: true, trusted: true, fingerprint: caFingerprint } });
+  assert.doesNotMatch(ui.app.innerHTML, /id="ca-install"|id="ca-save"/);
+  assert.doesNotMatch(ui.app.innerHTML, /ca-trust-actions|ca-system-status/);
   await ui.click('launch');
-  assert.equal(ui.requests.length, 1);
-  assert.equal(ui.requests[0][0], 'https://192.168.31.225:8443/api/lan/ready');
-  for (const [key, value] of [['mode', 'cors'], ['credentials', 'omit'], ['cache', 'no-store'], ['redirect', 'error']]) assert.equal(ui.requests[0][1][key], value);
   assert.equal(ui.calls.at(-1).command, 'open_game');
   assert.equal(ui.calls.at(-1).args.trusted, true);
-  assert.doesNotMatch(ui.app.innerHTML, /id="ca-install"|id="ca-save"|ca-trust-fallback/);
-  assert.equal(ui.timers.size, 0);
-  await ui.click('additional');
-  assert.equal(ui.requests.length, 1);
-  await ui.click('launch'); assert.equal(ui.calls.at(-1).args.trusted, true);
-  await ui.click('stop'); assert.doesNotMatch(ui.app.innerHTML, /id="ca-install"|id="ca-save"/);
+  await ui.click('additional'); await ui.click('', { open: '1' });
+  assert.equal(ui.calls.at(-1).args.trusted, true);
+  assert.equal(ui.requests.length, 0);
 });
 
-test('系统安装返回成功不会代替 HTTPS 检测，每四秒重试并在信任生效后隐藏失败说明', async () => {
-  const ui = await launcher(); await ui.click('launch');
-  assert.equal(ui.calls.at(-1).args.trusted, false);
-  assert.match(ui.app.innerHTML, /id="ca-install"|id="ca-save"/);
-  await ui.click('ca-install'); await tick();
-  assert.equal(ui.requests.length, 2);
-  assert.match(ui.app.innerHTML, /id="ca-install"/);
-  ui.failCommand('install_lan_ca'); await ui.click('ca-install'); await tick();
-  assert.match(ui.app.innerHTML, /自动安装未完成/);
-  ui.setFetch(async () => readyResponse()); await ui.runTimer(4000);
-  assert.doesNotMatch(ui.app.innerHTML, /id="ca-install"|id="ca-save"|自动安装未完成|install_lan_ca failed/);
+test('安装后重新查询系统状态，确认已信任后立即隐藏安装下载区域并停止轮询', async () => {
+  const ui = await launcher(true, { caSystemStatus: { installed: false, trusted: false, fingerprint: null } });
+  ui.setCaSystemStatus({ installed: true, trusted: true, fingerprint: caFingerprint, message: '系统已信任' });
+  await ui.click('ca-install');
+  assert.ok(ui.calls.filter((call) => call.command === 'check_lan_ca_status').length >= 2);
+  assert.doesNotMatch(ui.app.innerHTML, /ca-trust-actions|ca-system-status|id="ca-install"|id="ca-save"/);
   assert.equal(ui.timers.size, 0);
 });
 
-test('不匹配指纹、未就绪、不透明响应、HTTP 错误和无效 JSON 都保留 CA 入口并重试', async () => {
-  for (const reply of [
-    readyResponse({ ready: true, fingerprint: 'OTHER' }),
-    readyResponse({ ready: false, fingerprint: caFingerprint }),
-    readyResponse(undefined, { type: 'opaque' }),
-    readyResponse(undefined, { ok: false }),
-    readyResponse(undefined, { json: async () => { throw new Error('invalid JSON'); } }),
-  ]) {
-    const ui = await launcher(true, { fetch: async () => reply }); await ui.click('launch');
-    assert.equal(ui.calls.at(-1).args.trusted, false);
-    assert.match(ui.app.innerHTML, /id="ca-install"|id="ca-save"/);
-    assert.equal([...ui.timers.values()].filter(timer => timer.delay === 4000).length, 1);
-  }
-});
-
-test('HTTPS 探测及 JSON 解析共用六秒超时，一次只发一个请求，超时可重新检测', async () => {
-  let finish;
-  const ui = await launcher(true, { fetch: async () => readyResponse(undefined, { json: () => new Promise(resolve => { finish = resolve; }) }) });
+test('首次启动等待新的原生状态查询，系统诊断只作为文本显示', async () => {
+  const ui = await launcher(true, { caSystemStatus: { installed: false, trusted: false, message: '<img src=x onerror=alert(1)>' } });
+  assert.match(ui.app.innerHTML, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.doesNotMatch(ui.app.innerHTML, /<img src=x/);
+  const finish = ui.hold('check_lan_ca_status');
   const launching = ui.click('launch'); await tick();
-  assert.equal(ui.requests.length, 1);
-  const count = ui.calls.length; await ui.click('launch'); await ui.click('ca-install'); assert.equal(ui.calls.length, count);
-  await ui.runTimer(6000); await launching;
-  assert.equal(ui.requests[0][1].signal.aborted, true);
-  assert.equal(ui.calls.at(-1).args.trusted, false);
-  finish({ ready: true, fingerprint: caFingerprint }); await tick();
-  assert.match(ui.app.innerHTML, /id="ca-install"/);
-  ui.setFetch(async () => readyResponse()); await ui.runTimer(4000);
-  assert.equal(ui.requests.length, 2);
-  assert.doesNotMatch(ui.app.innerHTML, /id="ca-install"|id="ca-save"/);
+  assert.equal(ui.calls.some(call => call.command === 'open_game'), false);
+  finish({ installed: true, trusted: true }); await launching;
+  assert.equal(ui.calls.at(-1).command, 'open_game');
+  assert.equal(ui.calls.at(-1).args.trusted, true);
 });
 
-test('停止会取消探测与重试，旧请求即使迟到成功也不能标记为已信任', async () => {
-  let finish;
-  const ui = await launcher(); await ui.click('launch');
-  ui.setFetch(() => new Promise(resolve => { finish = resolve; })); await ui.runTimer(4000);
-  const pending = ui.requests.at(-1)[1].signal;
-  await ui.click('stop'); assert.equal(pending.aborted, true); assert.equal(ui.timers.size, 0);
-  finish(readyResponse()); await tick();
+test('系统信任生效清理安装错误，同时保留后来的其他错误', async () => {
+  const ui = await launcher(true, { clipboard: false });
+  ui.failCommand('install_lan_ca'); await ui.click('ca-install');
+  ui.setCaSystemStatus({ installed: true, trusted: true, fingerprint: caFingerprint });
+  await ui.runTimer(4000);
+  assert.doesNotMatch(ui.app.innerHTML, /install_lan_ca failed|自动安装未完成/);
+  const other = await launcher(true, { clipboard: false });
+  other.failCommand('install_lan_ca'); await other.click('ca-install');
+  await other.click('launch'); await other.click('', { copyClient: '0' });
+  other.setCaSystemStatus({ installed: true, trusted: true, fingerprint: caFingerprint });
+  await other.runTimer(4000);
+  assert.match(other.app.innerHTML, /无法访问剪贴板，请手动复制/);
+});
+
+
+test('后台原生信任查询不会重绘共享设置，安装字符串成功仍必须确认系统信任', async () => {
+  const ui = await launcher(); await ui.click('ca-install');
   assert.match(ui.app.innerHTML, /id="ca-install"|id="ca-save"/);
-  assert.equal(ui.timers.size, 0);
-});
-
-test('更换运行 IP 重新验证，旧会话响应不能覆盖新会话证书状态', async () => {
-  let finish;
-  const ui = await launcher(); await ui.click('launch');
-  ui.setFetch(() => new Promise(resolve => { finish = resolve; })); await ui.runTimer(4000);
-  await ui.click('stop');
-  await ui.click('lan-setup'); ui.input('address', '10.0.0.7'); await ui.click('lan-save');
-  ui.setFetch(async () => { throw new TypeError('not trusted'); }); await ui.click('launch');
-  assert.equal(ui.requests.at(-1)[0], 'https://10.0.0.7:8443/api/lan/ready');
-  finish(readyResponse()); await tick();
-  assert.match(ui.app.innerHTML, /id="ca-install"/);
-  assert.equal(ui.calls.at(-1).args.trusted, false);
-  ui.setFetch(async () => readyResponse()); await ui.runTimer(4000);
-  assert.doesNotMatch(ui.app.innerHTML, /id="ca-install"/);
-});
-
-test('探测成功不重绘正在打开的设置面板，关闭后隐藏 CA 入口', async () => {
-  const ui = await launcher(); await ui.click('launch'); await ui.click('lan-setup');
+  await ui.click('lan-setup'); ui.input('address', '10.0.0.7');
   const before = ui.renderCount();
-  ui.setFetch(async () => readyResponse()); await ui.runTimer(4000);
+  ui.setCaSystemStatus({ installed: true, trusted: true, fingerprint: caFingerprint });
+  await ui.runTimer(4000);
   assert.equal(ui.renderCount(), before);
-  assert.match(ui.app.innerHTML, /class="lan-overlay"/);
   await ui.click('lan-close');
-  assert.doesNotMatch(ui.app.innerHTML, /id="ca-install"|id="ca-save"/);
+  assert.doesNotMatch(ui.app.innerHTML, /ca-trust-actions|id="ca-install"|id="ca-save"/);
 });
 
-test('信任成功只清理 CA 安装错误，保留后来出现的剪贴板错误', async () => {
-  const ui = await launcher(true, { clipboard: false }); await ui.click('launch');
-  ui.failCommand('install_lan_ca'); await ui.click('ca-install'); await tick();
-  await ui.click('', { copyClient: '0' });
-  ui.setFetch(async () => readyResponse()); await ui.runTimer(4000);
-  assert.match(ui.app.innerHTML, /无法访问剪贴板，请手动复制/);
-  assert.doesNotMatch(ui.app.innerHTML, /id="ca-install"|id="ca-save"|自动安装未完成/);
+test('安装后等待旧查询完成再重新检查，系统已信任不保留旧安装失败提示', async () => {
+  const ui = await launcher();
+  const finish = ui.hold('check_lan_ca_status'); await ui.runTimer(4000);
+  const queries = ui.calls.filter(call => call.command === 'check_lan_ca_status').length;
+  ui.failCommand('install_lan_ca');
+  const installing = ui.click('ca-install'); await tick();
+  ui.setCaSystemStatus({ installed: true, trusted: true, fingerprint: caFingerprint });
+  finish({ installed: false, trusted: false }); await installing;
+  assert.equal(ui.calls.filter(call => call.command === 'check_lan_ca_status').length, queries + 1);
+  assert.doesNotMatch(ui.app.innerHTML, /ca-trust-actions|id="ca-install"|id="ca-save"|install_lan_ca failed|自动安装未完成/);
 });
