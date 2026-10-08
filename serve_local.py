@@ -1,5 +1,5 @@
 """本地游戏服务器：提供跨域隔离响应头、范围读取和引擎批量读取。"""
-import argparse, errno, gzip, io, json, mimetypes, posixpath, re, shutil, socket, subprocess, threading, time, webbrowser
+import argparse, errno, gzip, hashlib, io, json, mimetypes, posixpath, re, shutil, socket, subprocess, threading, time, webbrowser
 from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -8,22 +8,105 @@ from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parent / 'gta5data'
 CLIENT = Path(__file__).resolve().parent / 'client'
+RUNTIME_ROOT = CLIENT / 'runtime'
+BUILD_ID = '8b0b5899ed'
+ORIGINAL_WASM_SHA256 = '11ca8d2c04c5e843d18ff4aea4899d72c86973c6b031df334e67c446b2ae83e0'
 DEFAULT_ROOM_SERVER = '183.66.27.21:47485'
 LOG_FILE = Path(__file__).resolve().parent / 'docs' / 'snapshot' / 'browser-local.log'
 LOG_LOCK = threading.Lock()
 mimetypes.add_type('application/wasm', '.wasm')
 mimetypes.add_type('text/javascript', '.js')
 
-def resource_path(url_path):
+def resolve_game_directory(value):
+    """接受资源总目录或其 data 子目录，只定位，不创建、移动或修改资源。"""
+    path = Path(value).expanduser().resolve()
+    if (path / 'manifest.json').is_file() and path.name == 'data':
+        path = path.parent
+    return path
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def inspect_game_resources(game_dir=ROOT, runtime_dir=RUNTIME_ROOT, *, require_runtime=False):
+    """启动前只读检查已提供资源，绝不下载游戏或写入原资源目录。"""
+    root = resolve_game_directory(game_dir)
+    runtime = Path(runtime_dir).expanduser().resolve()
+    if runtime.is_relative_to(root):
+        raise ValueError('多人运行副本目录不能位于游戏资源目录内，请选择启动器 client/runtime 或其它外部目录。')
+    manifest_path = root / 'data/manifest.json'
+    required = [manifest_path, *[root / ('b/' + BUILD_ID + '/' + name)
+        for name in ('game.wasm', 'game.js', 'io_worker.js', 'wgpu_worker.js')]]
+    missing = [str(path.relative_to(root)) for path in required if not path.is_file()]
+    if missing:
+        raise ValueError('游戏资源不完整，缺少：' + '、'.join(missing) + '。请用 --game-dir 指定自己准备的完整资源目录；启动器不会下载游戏。')
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as error:
+        raise ValueError('无法读取游戏资源清单 data/manifest.json：' + str(error)) from error
+    if (not isinstance(manifest, dict) or manifest.get('mount') != '/game/' or not isinstance(manifest.get('files'), list)
+            or not all(isinstance(item, list) and len(item) >= 2 and isinstance(item[0], str)
+                       and isinstance(item[1], int) and item[1] >= 0 for item in manifest['files'])):
+        raise ValueError('游戏资源清单格式不兼容，需要 mount=/game/ 与有效 files 列表。')
+    missing_assets = []
+    data_root = root / 'data'
+    for item in manifest['files']:
+        name = item[0]
+        source = data_root / name
+        if '\\' in name or name.startswith('/') or '..' in name.split('/') or not source.resolve().is_relative_to(data_root):
+            raise ValueError('游戏资源清单包含目录外路径，无法只读挂载：' + name)
+        if not source.is_file():
+            missing_assets.append(name)
+    if missing_assets:
+        raise ValueError('资源清单登记的文件缺失，共 %d 项：%s%s。请自行补齐匹配的游戏本体；启动器不会下载。' % (
+            len(missing_assets), '、'.join(missing_assets[:8]), ' 等' if len(missing_assets) > 8 else ''))
+    original = root / ('b/' + BUILD_ID + '/game.wasm')
+    digest = file_sha256(original)
+    if digest != ORIGINAL_WASM_SHA256:
+        raise ValueError('原游戏引擎版本不兼容，不能使用此版本的多人适配器。请提供已支持的原 game.wasm；原文件未修改。')
+    fork = runtime / 'game-multiplayer.wasm'
+    evidence_path = runtime / 'game-multiplayer.json'
+    runtime_ready = fork.is_file() and evidence_path.is_file()
+    if runtime_ready:
+        try:
+            evidence = json.loads(evidence_path.read_text(encoding='utf-8'))
+            if (evidence.get('original', {}).get('sha256') != digest
+                    or evidence.get('prototype', {}).get('sha256') != file_sha256(fork)):
+                raise ValueError('多人适配器校验记录与原引擎或生成副本不一致')
+        except (OSError, ValueError) as error:
+            raise ValueError('多人适配器校验失败：' + str(error) + '。请重新构建隔离的运行副本；游戏资源未修改。') from error
+    elif require_runtime:
+        raise ValueError('缺少隔离的多人运行副本，请先运行 python3 tools/build_multiplayer_client.py --game-dir "'
+                         + str(root) + '" --runtime-dir "' + str(runtime) + '"。生成物只放在启动器目录。')
+    return {'root': root, 'data_root': root / 'data', 'runtime_root': runtime,
+            'manifest_version': manifest.get('version', ''), 'original_sha256': digest, 'multiplayer_ready': runtime_ready}
+
+
+def resource_path(url_path, game_root=None, runtime_root=None):
     """源码与资源分目录存放，对外仍使用原有浏览器 URL。"""
-    path = posixpath.normpath(unquote(urlsplit(url_path).path)).lstrip('/')
+    root = Path(game_root) if game_root is not None else ROOT
+    runtime = Path(runtime_root) if runtime_root is not None else RUNTIME_ROOT
+    raw = unquote(urlsplit(url_path).path)
+    if '\\' in raw or '..' in raw.split('/'):
+        raise ValueError('资源路径不能越过已选择目录')
+    path = posixpath.normpath(raw).lstrip('/')
     if path in ('', '.', 'index.html', 'play'):
         return CLIENT / 'index.html'
     if path == 'b/8b0b5899ed/loader.js':
         return CLIENT / 'loader.js'
+    if path == 'b/8b0b5899ed/game-multiplayer.wasm':
+        return runtime / 'game-multiplayer.wasm'
     if path == 'multiplayer' or path.startswith('multiplayer/'):
         return CLIENT / path
-    return ROOT / path
+    selected = root / path
+    if not selected.resolve().is_relative_to(root.resolve()):
+        raise ValueError('资源链接不能越过已选择目录')
+    return selected
 
 class ChineseHelpFormatter(argparse.HelpFormatter):
     def add_usage(self, usage, actions, groups, prefix=None):
@@ -34,10 +117,17 @@ class LocalServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, address, *, multiplayer_server=DEFAULT_ROOM_SERVER,
-                 instance_name='玩家1', log_file=LOG_FILE):
+                 instance_name='玩家1', log_file=LOG_FILE, game_root=ROOT, runtime_root=RUNTIME_ROOT,
+                 resource_status=None):
         self.multiplayer_server = multiplayer_server
         self.instance_name = instance_name
         self.log_file = Path(log_file)
+        self.game_root = resolve_game_directory(game_root)
+        self.data_root = self.game_root / 'data'
+        self.runtime_root = Path(runtime_root).expanduser().resolve()
+        self.resource_status = resource_status or {}
+        if self.log_file.resolve().is_relative_to(self.game_root):
+            raise ValueError('诊断日志不能写入游戏资源目录，请选择启动器外部日志路径。')
         super().__init__(address, Handler)
 
 class Handler(SimpleHTTPRequestHandler):
@@ -61,7 +151,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def __init__(self, *args, **kwargs):
         self.byte_range = None
-        super().__init__(*args, directory=str(ROOT), **kwargs)
+        super().__init__(*args, directory=str(getattr(args[2], 'game_root', ROOT)), **kwargs)
 
     def end_headers(self):
         self.send_header('Cross-Origin-Opener-Policy', 'same-origin')
@@ -74,11 +164,16 @@ class Handler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def translate_path(self, path):
-        return str(resource_path(path))
+        return str(resource_path(path, self.server.game_root, self.server.runtime_root))
 
     def send_head(self):
         self.byte_range = None
         route = urlsplit(self.path)
+        try:
+            resource_path(self.path, self.server.game_root, self.server.runtime_root)
+        except ValueError as error:
+            self.send_error(403, explain=str(error))
+            return None
         if route.path in ('/multiplayer', '/multiplayer/'):
             query = parse_qs(route.query)
             params = {'online': '1'}
@@ -104,6 +199,9 @@ class Handler(SimpleHTTPRequestHandler):
                 'instance_name': getattr(self.server, 'instance_name', '玩家1'),
                 'game_path': '/play/', 'mode': 'sandbox', 'map': 'gta5',
                 'debug': False,
+                'resources_ready': bool(self.server.resource_status),
+                'multiplayer_ready': self.server.resource_status.get('multiplayer_ready', False),
+                'resource_version': self.server.resource_status.get('manifest_version', ''),
             }, ensure_ascii=False).encode('utf-8')
             self.send_response(200)
             self.send_header('Content-Type', 'application/json; charset=utf-8')
@@ -196,7 +294,7 @@ class Handler(SimpleHTTPRequestHandler):
             if not isinstance(runs, list) or len(runs) > 1000:
                 raise ValueError('批量请求格式无效')
             selected = []
-            data_root = (ROOT / 'data').resolve()
+            data_root = self.server.data_root.resolve()
             for name, start, end in runs:
                 file = (data_root / name).resolve()
                 if not file.is_relative_to(data_root) or start < 0 or end < start:
@@ -232,7 +330,8 @@ class Handler(SimpleHTTPRequestHandler):
         super().log_request(code, size)
 
 def create_local_servers(port=8000, instances=1, multiplayer_server=DEFAULT_ROOM_SERVER,
-                         log_file=LOG_FILE, host='127.0.0.1'):
+                         log_file=LOG_FILE, host='127.0.0.1', game_root=ROOT, runtime_root=RUNTIME_ROOT,
+                         resource_status=None):
     """创建若干独立本地实例；端口占用时寻找下一个可用端口。"""
     if not 0 <= port <= 65535 or not 1 <= instances <= 8:
         raise ValueError('端口须在 0～65535 之间，实例数量须在 1～8 之间')
@@ -246,7 +345,8 @@ def create_local_servers(port=8000, instances=1, multiplayer_server=DEFAULT_ROOM
                 try:
                     server = LocalServer((host, candidate),
                                          multiplayer_server=multiplayer_server,
-                                         instance_name='玩家%d' % (i + 1), log_file=log_file)
+                                         instance_name='玩家%d' % (i + 1), log_file=log_file,
+                                         game_root=game_root, runtime_root=runtime_root, resource_status=resource_status)
                     break
                 except OSError as exc:
                     if exc.errno != errno.EADDRINUSE or candidate == 0 or attempt == 99:
@@ -345,6 +445,8 @@ def main(argv=None):
     args.add_argument('--port', type=int, default=8000, help='起始端口，默认 8000；占用时自动顺延，0 表示随机端口')
     args.add_argument('--host', default='0.0.0.0', help='监听地址，默认 0.0.0.0，允许局域网访问；127.0.0.1 仅本机')
     args.add_argument('--instances', type=int, default=1, help='同时启动 1～8 个本地实例，使用不同端口模拟用户')
+    args.add_argument('--game-dir', type=Path, default=ROOT, help='玩家自行准备的资源总目录（含 data 与 b），也可选其 data 子目录；只读使用')
+    args.add_argument('--runtime-dir', type=Path, default=RUNTIME_ROOT, help='启动器生成的隔离多人适配器目录，默认 client/runtime；不读取游戏目录内旧适配器')
     args.add_argument('--multiplayer', action='store_true', help='打开轻量多人大厅；多实例时自动启用')
     args.add_argument('--room-server', default=DEFAULT_ROOM_SERVER,
                       help='远程公共战局 IP:端口，默认 ' + DEFAULT_ROOM_SERVER + '；客户端无需本地 WebSocket 服务')
@@ -356,16 +458,22 @@ def main(argv=None):
     options = args.parse_args(argv)
     room_process = None
     try:
+        resources = inspect_game_resources(options.game_dir, options.runtime_dir,
+                                          require_runtime=options.multiplayer or options.start_room_server or options.instances > 1)
         if options.start_room_server:
             room_process = start_room_server('127.0.0.1:8787' if options.room_server == 'auto' else options.room_server,
                                              options.java, '127.0.0.1' if options.host == '127.0.0.1' else '0.0.0.0')
         servers = create_local_servers(options.port, options.instances, options.room_server,
-                                       options.log_file.expanduser().resolve(), options.host)
+                                       options.log_file.expanduser().resolve(), options.host,
+                                       resources['root'], resources['runtime_root'], resources)
     except (OSError, ValueError) as exc:
         stop_room_server(room_process)
         args.error('无法启动本地实例：%s' % exc)
     threads = []
     try:
+        print('只读游戏资源：%s' % resources['root'], flush=True)
+        if not resources['multiplayer_ready']:
+            print('多人运行副本尚未构建；进入战局前请运行 tools/build_multiplayer_client.py。', flush=True)
         for server in servers:
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()

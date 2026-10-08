@@ -4,6 +4,8 @@ export const PUBLIC_SERVER = '183.66.27.21:47485';
 export const SESSION_KEY = 'gta5.public.session';
 export const PREFERENCES_KEY = 'gta5.public.preferences';
 const FRESH_JOIN_KEY = 'gta5.public.pending-join';
+const RESOURCE_CHECK_PENDING = '正在检查多人运行副本，请稍候…';
+const RESOURCE_CHECK_MISSING = '多人运行副本尚未就绪。请先运行 python3 tools/build_multiplayer_client.py（自定义资源目录需附加对应的 --game-dir 和 --runtime-dir），再重启 serve_local.py 并刷新页面。';
 export const ROLE_PRESETS = Object.freeze(['npc_male', 'npc_female', 'freemode_male', 'freemode_female']);
 
 export function readPublicPreferences(storage, pageUrl = globalThis.location?.href) {
@@ -78,6 +80,9 @@ export function installJoinModal({ onJoin } = {}) {
   const server = form.elements.namedItem('server');
   const preset = form.elements.namedItem('preset');
   const message = overlay.querySelector('.online-join__message');
+  const submitButton = overlay.querySelector('.online-join__submit');
+  let resourceCheck = 'pending';
+  submitButton.disabled = true;
   const query = new URLSearchParams(location.search);
   const stored = readPublicPreferences();
   const panel = readPanelPreferences();
@@ -115,6 +120,8 @@ export function installJoinModal({ onJoin } = {}) {
     if (!overlay.hidden) return;
     previousFocus = document.activeElement;
     overlay.hidden = false;
+    if (resourceCheck === 'pending') setMessage(RESOURCE_CHECK_PENDING);
+    else if (resourceCheck === 'missing') setMessage(RESOURCE_CHECK_MISSING);
     document.exitPointerLock?.();
     overlay.dispatchEvent(new Event('online-modal-open', { bubbles: true }));
     nickname.focus();
@@ -136,6 +143,9 @@ export function installJoinModal({ onJoin } = {}) {
   });
   form.addEventListener('submit', (event) => {
     event.preventDefault();
+    // 同时守住表单提交和按钮点击，避免配置尚未返回时先请求不存在的 WASM。
+    if (resourceCheck === 'pending') { setMessage(RESOURCE_CHECK_PENDING); return; }
+    if (resourceCheck === 'missing') { setMessage(RESOURCE_CHECK_MISSING); return; }
     const name = nickname.value.trim();
     if (!name || Array.from(name).length > 24) { setMessage('请输入 1 至 24 个字符的昵称。'); nickname.focus(); return; }
     let address;
@@ -161,6 +171,8 @@ export function installJoinModal({ onJoin } = {}) {
     .then((response) => response.ok ? response.json() : null)
     .then((config) => {
       if (!config) return;
+      // 只有启动器明确报告缺少适配器时才阻止加入；旧服务与静态部署可以没有此接口。
+      if (config.multiplayer_ready === false) resourceCheck = 'missing';
       if (!query.has('name') && !panel && !stored && !editedName && typeof config.instance_name === 'string') nickname.value = config.instance_name;
       if (!query.has('server') && !panel && !stored && !editedServer && typeof config.multiplayer_server === 'string'
         && !/^(?:wss?:\/\/)?(?:localhost|0\.0\.0\.0|127\.0\.0\.1|\[::1\])(?::8787)?(?:\/ws)?\/?$/i.test(config.multiplayer_server)) {
@@ -169,6 +181,12 @@ export function installJoinModal({ onJoin } = {}) {
           server.value = displayServerAddress(connectionAddress, location.href);
         } catch { /* 无效启动配置不覆盖正常公网地址。 */ }
       }
-    }).catch(() => {}).finally(() => clearTimeout(timer));
+    }).catch(() => {}).finally(() => {
+      clearTimeout(timer);
+      if (resourceCheck === 'pending') resourceCheck = 'ready';
+      submitButton.disabled = resourceCheck === 'missing';
+      if (resourceCheck === 'missing') setMessage(RESOURCE_CHECK_MISSING);
+      else if (message.textContent === RESOURCE_CHECK_PENDING) setMessage('');
+    });
   return { open, close, setMessage, get isOpen() { return !overlay.hidden; } };
 }

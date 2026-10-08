@@ -4,7 +4,7 @@ import sys
 from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
-DENIED_PREFIXES = ('gta5data/', 'mirror/', 'runtime/', 'archive/', 'docs/snapshot/')
+DENIED_PREFIXES = ('gta5data/', 'mirror/', 'runtime/', 'client/runtime/', 'archive/', 'docs/snapshot/')
 DENIED_SUFFIXES = {
     '.wasm', '.rpf', '.gfx', '.ytd', '.ydd', '.yft', '.ymt', '.fxc', '.bik', '.bk2',
     '.ttf', '.otf', '.woff', '.woff2', '.jar', '.class', '.zip', '.pyc', '.pyo',

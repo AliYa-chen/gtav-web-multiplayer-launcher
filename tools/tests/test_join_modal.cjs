@@ -49,7 +49,8 @@ async function harness(options = {}) {
   const form = new Element(), message = new Element(), close = new Element(), submit = new Element();
   form.elements = { namedItem: (name) => fields[name] };
   const overlay = new Element();
-  overlay.querySelector = (selector) => ({ form, '.online-join__message': message, '.online-join__close': close })[selector];
+  overlay.querySelector = (selector) => ({ form, '.online-join__message': message, '.online-join__close': close,
+    '.online-join__submit': submit })[selector];
   overlay.querySelectorAll = () => [close, fields.nickname, fields.server, fields.preset, submit];
   const document = { activeElement: null, body: { append: (element) => assert.equal(element, overlay) },
     createElement: () => overlay, exitPointerLock: () => {} };
@@ -59,7 +60,7 @@ async function harness(options = {}) {
     crypto: { getRandomValues: (array) => { array[0] = 123456; return array; } }, Uint32Array,
     setTimeout: (callback, delay) => { timers.set(++timerId, { callback, delay }); return timerId; },
     clearTimeout: (id) => timers.delete(id),
-    fetch: async () => ({ ok: true, json: async () => options.config || null }),
+    fetch: options.fetch || (async () => ({ ok: true, json: async () => options.config || null })),
   });
   if (options.localStorageDenied) {
     vm.runInContext("Object.defineProperty(globalThis, 'localStorage', { get() { throw new Error('SecurityError'); } });", context);
@@ -70,11 +71,68 @@ async function harness(options = {}) {
   const modal = options.install === false ? null : api.installJoinModal({ onJoin: (value) => joined.push(copy(value)) });
   async function settle() { for (let index = 0; index < 8; index++) await Promise.resolve(); }
   await settle();
-  return { api, context, modal, overlay, fields, form, message, localStorage, sessionStorage, joined, settle,
+  return { api, context, modal, overlay, fields, form, message, submitButton: submit, localStorage, sessionStorage, joined, settle,
     input: (name, value) => { fields[name].value = value; fields[name].dispatchEvent(new Event(name === 'preset' ? 'change' : 'input')); },
     blur: () => fields.server.dispatchEvent(new Event('blur')),
     submit: () => form.dispatchEvent(new Event('submit')) };
 }
+
+test('启动器明确报告缺少多人副本时阻止加入并给出构建及重启说明', async () => {
+  const page = await harness({ config: { multiplayer_ready: false, multiplayer_server: '183.66.27.21:47485' } });
+  assert.equal(page.submitButton.disabled, true);
+  page.modal.open();
+  page.submit();
+  assert.equal(page.joined.length, 0);
+  assert.equal(page.sessionStorage.values.size, 0, '不可为缺少运行副本的加入写入会话与新加入标记');
+  assert.match(page.message.textContent, /build_multiplayer_client\.py/);
+  assert.match(page.message.textContent, /重启 serve_local\.py/);
+});
+
+test('配置请求尚未完成时阻止提交，确认副本可用后才允许加入', async () => {
+  let resolveConfig;
+  const response = new Promise((resolve) => { resolveConfig = resolve; });
+  const page = await harness({ fetch: () => response });
+  assert.equal(page.submitButton.disabled, true);
+  page.modal.open();
+  page.submit();
+  assert.equal(page.joined.length, 0);
+  assert.equal(page.sessionStorage.values.size, 0);
+  assert.match(page.message.textContent, /正在检查/);
+  resolveConfig({ ok: true, json: async () => ({ multiplayer_ready: true }) });
+  await page.settle();
+  assert.equal(page.submitButton.disabled, false);
+  assert.equal(page.message.textContent, '');
+  assert.equal(page.joined.length, 0, '检查完成不能自动消费检查期间的提交');
+  page.submit();
+  assert.equal(page.joined.length, 1);
+});
+
+test('延迟配置报告缺少副本时始终拒绝加入，不因请求完成解除限制', async () => {
+  let resolveConfig;
+  const response = new Promise((resolve) => { resolveConfig = resolve; });
+  const page = await harness({ fetch: () => response });
+  page.submit();
+  resolveConfig({ ok: true, json: async () => ({ multiplayer_ready: false }) });
+  await page.settle();
+  page.submit();
+  assert.equal(page.submitButton.disabled, true);
+  assert.equal(page.joined.length, 0);
+  assert.equal(page.sessionStorage.values.size, 0);
+  assert.match(page.message.textContent, /多人运行副本尚未就绪/);
+});
+
+test('没有 local-config 接口或旧配置未提供 readiness 时仍允许已有部署加入', async () => {
+  for (const options of [
+    { fetch: async () => ({ ok: false, json: async () => { throw new Error('404 不应读取 JSON'); } }) },
+    { fetch: async () => { throw new Error('接口不可用'); } },
+    { config: { instance_name: '旧启动器玩家' } },
+  ]) {
+    const page = await harness(options);
+    assert.equal(page.submitButton.disabled, false);
+    page.submit();
+    assert.equal(page.joined.length, 1);
+  }
+});
 
 test('服务器地址只显示主机和有效端口，支持 IPv4、IPv6 和标准端口', async () => {
   const { normalizeServerAddress, displayServerAddress } = await addressPromise;

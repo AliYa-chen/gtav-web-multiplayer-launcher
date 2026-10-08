@@ -163,7 +163,7 @@ python3 -B tools/world_protocol_soak.py --jar server/multiplayer-world-experimen
 旧服务只共享玩家和基础战斗；实验版已将 NPC、交通、抢车、上下车、加入快照与断线移交接到同一实体模型。
 客户端仍参与受分配的 AI／物理模拟，环境报告只经过归属、版本、范围和下降候选校验。服务器没有地图碰撞、导航或独立 RAGE 仿真，不能把候选确认称为完全可信的服务器重算。
 
-单机仍使用原始 `game.wasm`；公共战局使用独立 `game-multiplayer.wasm` 副本，
+单机仍使用原始 `game.wasm`；公共战局使用启动器 `client/runtime/game-multiplayer.wasm` 独立副本，
 增加已核对的实体命令导出和有效脚本线程回调。原始游戏资源和 WASM 保留不变。
 原线上模式的主要数据包传输在此构建中为空实现，不能只替换私服 IP 恢复原 GTA Online。
 证据见 [原线上模式审计](docs/原线上模式审计.md) 与 [角色同步接口审计](docs/角色同步接口审计.md)。
@@ -186,7 +186,9 @@ node --test tools/tests/test_public_session.cjs tools/tests/test_join_modal.cjs
 node --test tools/tests/test_world_client.cjs tools/tests/test_world_engine.cjs
 ```
 
-服务器只需要 JAR；客户端的构建命令必须在已有完整游戏项目内执行。
+服务器只需要 JAR；客户端可用 `--game-dir` 指向玩家自己准备的完整浏览器游戏资源目录，
+构建输出与本地服务的 `--runtime-dir` 必须一致，默认均为 `client/runtime/`。
+使用说明见 [启动器资源隔离](docs/启动器资源隔离.md)。
 
 ## 目录说明
 
@@ -197,6 +199,7 @@ node --test tools/tests/test_world_client.cjs tools/tests/test_world_engine.cjs
 | `client/index.html` | 实际使用的中文网页入口 |
 | `client/multiplayer/` | 公共战局页面、共享快照桥和实体同步源码 |
 | `client/loader.js` | 引擎加载工作线程源码，通过服务器映射到原 URL |
+| `client/runtime/` | 本机生成的独立多人引擎及校验记录，不写入游戏目录 |
 | `gta5data/b/8b0b5899ed/` | 引擎、工作线程、着色器及标题画面资源 |
 | `gta5data/data/` | 游戏数据，本次整理没有改动 |
 | `runtime/` | Windows x64 Python 运行环境 |
@@ -210,7 +213,7 @@ node --test tools/tests/test_world_client.cjs tools/tests/test_world_engine.cjs
 | `archive/cache/` | 从根目录移走的系统元数据和 Python 缓存 |
 | `archive/packages/` | 打包工具的输出目录，首次打包时创建 |
 
-`gta5data/`、`runtime/`、`archive/`、`docs/snapshot/` 和 JAR/ZIP 等生成文件都被 Git 忽略。
+`gta5data/`、`runtime/`、`client/runtime/`、`archive/`、`docs/snapshot/` 和 JAR/ZIP 等生成文件都被 Git 忽略。
 仓库只提交源码、中文说明与测试。`tools/mirror_site.py` 和 `tools/public_discovery.py`
 运行时必须通过 `--origin` 或 `GTA5DATA_SOURCE_URL` 提供资源来源，源码不写死站点域名。
 提交前可运行 `python3 tools/check_git_contents.py`，检查暂存区没有游戏资源或超过 5 MiB 的文件。

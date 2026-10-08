@@ -2,11 +2,10 @@
 import gzip, hashlib, json, sys, threading
 from pathlib import Path
 from urllib.request import Request, urlopen
-from http.server import ThreadingHTTPServer
 BASE = Path(__file__).resolve().parents[1]
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(BASE))
-from serve_local import Handler, ROOT, resource_path
+from serve_local import LocalServer, ROOT, resource_path
 
 def main():
     inventory = json.loads((BASE / 'docs/snapshot/manifest-sha256.json').read_text(encoding='utf-8'))
@@ -76,7 +75,7 @@ def main():
         sample += [rec for rec in local_overrides['files'] if rec['path'] not in {r['path'] for r in sample}]
     for rec in sample:
         assert hashlib.sha256(resource_path(rec['path']).read_bytes()).hexdigest() == rec['sha256']
-    httpd = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    httpd = LocalServer(('127.0.0.1', 0))
     worker = threading.Thread(target=httpd.serve_forever, daemon=True)
     worker.start()
     origin = 'http://127.0.0.1:%d' % httpd.server_port
@@ -87,6 +86,10 @@ def main():
             assert response.read() == resource_path('/index.html').read_bytes()
         with urlopen(Request(origin + '/b/8b0b5899ed/game.wasm', headers={'Range': 'bytes=0-7'})) as response:
             assert response.status == 206 and response.read() == b'\x00asm\x01\x00\x00\x00'
+        with urlopen(Request(origin + '/b/8b0b5899ed/game-multiplayer.wasm?v=melee-intent-animation-8',
+                             headers={'Range': 'bytes=0-7'})) as response:
+            assert response.status == 206 and response.read() == b'\x00asm\x01\x00\x00\x00'
+            assert response.headers.get_content_type() == 'application/wasm'
         name = 'common/data/Clouds.xml'
         original = (ROOT / 'data' / name).read_bytes()
         body = json.dumps([[name, 0, 63], [name, 100, 131]]).encode()
@@ -105,7 +108,7 @@ def main():
         'data_manifest_files': len(manifest['files']), 'missing': missing, 'wrong_size': wrong_size,
         'uncovered_data_files': uncovered, 'source_size_discrepancies': discrepancies,
         'sample_sha256_passed': len(sample), 'wasm_signature': '通过',
-        'http_tests': ['跨域隔离响应头', '首页内容', 'WASM 范围读取', '普通批量读取', 'gzip 批量读取'],
+        'http_tests': ['跨域隔离响应头', '首页内容', 'WASM 范围读取', '独立多人 WASM 带版本参数读取', '普通批量读取', 'gzip 批量读取'],
         'hash_scope': '下载时已校验所有文件的哈希；此处重新校验部分小文件。',
         'browser_game_execution': '未验证'}
     if local_fix:
