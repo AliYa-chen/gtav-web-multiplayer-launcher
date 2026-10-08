@@ -105,3 +105,8 @@ test('运行中仅禁止更换目录，准备中禁用启动操作但不阻止�
   assert.deepEqual(launcherActions({ ...current, busy: true }, true), { choose: false, launch: false, additional: false, stop: false, refresh: false });
   assert.deepEqual(launcherActions({ ...current, desktop: false }), { choose: false, launch: false, additional: false, stop: false, refresh: false });
 });
+test('强制更新期间禁止准备和打开新客户端，仍保留停止服务和检查更新能力', () => {
+  const current = { selected: '/资源包', desktop: true, busy: false, urls: ['http://127.0.0.1:61120/'], updateRequired: true };
+  assert.deepEqual(launcherActions(current), { choose: false, launch: false, additional: false, stop: true, refresh: true });
+  assert.deepEqual(launcherActions({ ...current, urls: [] }, true), { choose: false, launch: false, additional: false, stop: false, refresh: false });
+});

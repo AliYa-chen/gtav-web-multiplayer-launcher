@@ -6,19 +6,37 @@ import * as presentation from '../src/view-state.js';
 
 const source = (await readFile(new URL('../src/main.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '');
 const tick = () => new Promise((resolve) => setImmediate(resolve));
-async function launcher(desktop = true) {
-  const calls = [], values = new Map(), events = new Map(), intervals = [];
+async function launcher(desktop = true, options = {}) {
+  const calls = [], values = new Map(), events = new Map(), intervals = [], held = new Map(), failures = new Set();
   let urls = [];
   let remoteFailure = false;
-  let remote = { config: { oltitle: 'https://gtav.2t.hk', latest_version: '0.2.0', downloads: { windows_x64: { url: 'https://oss.2t.hk/launcher.exe', sha256: 'a'.repeat(64) } }, announcements: [{ title: '<img>', body: '<script>unsafe</script>' }] }, source: 'remote' };
-  const status = () => ({ selected_directory: '/游戏资源', resources: { manifest_file_count: 5814 }, running_urls: urls, version: '0.1.2', platform: 'windows_x64', remote_configuration: remote });
+  let resources = options.resources === undefined ? { manifest_file_count: 5814 } : options.resources;
+  let remote = { config: { oltitle: 'https://gtav.2t.hk', latest_version: '0.2.5', downloads: { windows_x64: { url: 'https://oss.2t.hk/launcher.exe', sha256: 'a'.repeat(64) } }, announcements: [{ title: '<img>', body: '<script>unsafe</script>' }] }, source: 'remote' };
+  const status = () => ({ selected_directory: '/游戏资源', resources, running_urls: urls, version: '0.2.5', platform: 'windows_x64', remote_configuration: remote });
   const app = { innerHTML: '', addEventListener(name, callback) { events.set(`app:${name}`, callback); } };
-  const document = { activeElement: null, documentElement: { style: { setProperty() {} } }, querySelector(selector) { return selector === '#app' ? app : null; }, addEventListener(name, callback) { events.set(`document:${name}`, callback); } };
+  const nodes = new Map();
+  const button = (id) => {
+    if (!nodes.has(id)) nodes.set(id, { id, focus() { document.activeElement = this; } });
+    return nodes.get(id);
+  };
+  const updateButtons = () => [...app.innerHTML.matchAll(/<button id="(mandatory-update-[^"]+)"[^>]*>/g)]
+    .filter((match) => !/\bdisabled\b/.test(match[0])).map((match) => button(match[1]));
+  const updateDialog = { focus() { document.activeElement = this; }, querySelectorAll: updateButtons, contains: (node) => node === updateDialog || updateButtons().includes(node) };
+  const document = { activeElement: null, documentElement: { style: { setProperty() {} } }, querySelector(selector) {
+    if (selector === '#app') return app;
+    if (!app.innerHTML.includes('class="mandatory-update"')) return null;
+    if (selector === '.mandatory-update') return updateDialog;
+    if (selector === '.mandatory-update button:not(:disabled)') return updateButtons()[0] || null;
+    const id = /^#(mandatory-update-[^:]+):not\(:disabled\)$/.exec(selector)?.[1];
+    return id ? updateButtons().find((node) => node.id === id) || null : null;
+  }, addEventListener(name, callback) { events.set(`document:${name}`, callback); } };
   const context = vm.createContext({
-    ...presentation, html: presentation.escapeHtml, metadata: { version: '0.1.2' }, backgrounds: [{ id: 'sunglasses', label: '海风', image: '/sunglasses.webp' }, { id: 'beach', label: '海滩', image: '/beach.webp' }],
+    ...presentation, html: presentation.escapeHtml, metadata: { version: '0.2.5' }, backgrounds: [{ id: 'sunglasses', label: '海风', image: '/sunglasses.webp' }, { id: 'beach', label: '海滩', image: '/beach.webp' }],
     document, localStorage: { getItem: (key) => values.get(key), setItem: (key, value) => values.set(key, value) }, isTauri: () => desktop,
     listen: async (name, callback) => { events.set(`tauri:${name}`, callback); return () => {}; }, invoke: async (command, args) => {
       calls.push({ command, args });
+      if (failures.has(command)) throw new Error(`${command} failed`);
+      if (held.has(command)) return await held.get(command).promise;
       if (command === 'choose_game_directory') return '/新资源';
       if (command === 'start_game') urls = [...urls, `http://127.0.0.1:${61000 + urls.length}/`];
       if (command === 'stop_game') urls = [];
@@ -29,8 +47,124 @@ async function launcher(desktop = true) {
   });
   vm.runInContext(source, context);
   await tick();
-  return { calls, app, values, events, intervals, setRemote(value) { remote = value; remoteFailure = false; }, failRemote() { remoteFailure = true; }, async click(id, dataset = {}) { const button = { id, dataset, disabled: false }; await events.get('app:click')({ target: { closest: () => button } }); } };
+  return { calls, app, values, events, intervals, document, status,
+    setRemote(value) { remote = value; remoteFailure = false; }, failRemote() { remoteFailure = true; },
+    failCommand(command, failed = true) { failed ? failures.add(command) : failures.delete(command); },
+    hold(command) { let resolve; const promise = new Promise((accept) => { resolve = accept; }); held.set(command, { promise }); return (value = status()) => { held.delete(command); resolve(value); }; },
+    async click(id, dataset = {}) { const button = { id, dataset, disabled: false }; await events.get('app:click')({ target: { closest: () => button } }); } };
 }
+
+function newerSnapshot(overrides = {}) {
+  return { source: 'remote', stale: false, config: { latest_version: '0.2.6', release_notes: '必须更新\n修复连接。',
+    downloads: { windows_x64: { url: 'https://oss.2t.hk/launcher-new.exe', sha256: 'b'.repeat(64) } }, ...overrides } };
+}
+function publish(ui, snapshot) {
+  ui.setRemote(snapshot);
+  ui.events.get('tauri:launcher-remote-config')({ payload: snapshot });
+}
+
+test('新版本强制全屏更新，阻止所有后台操作且 Esc 和点击遮罩无法关闭', async () => {
+  const ui = await launcher();
+  await ui.click('settings-toggle');
+  assert.match(ui.app.innerHTML, /id="background-picker"/);
+  publish(ui, newerSnapshot());
+  assert.match(ui.app.innerHTML, /class="shell" inert aria-hidden="true"/);
+  assert.match(ui.app.innerHTML, /class="mandatory-update" role="alertdialog" aria-modal="true"/);
+  assert.match(ui.app.innerHTML, /最新版本 <strong>0\.2\.6<\/strong>/);
+  assert.doesNotMatch(ui.app.innerHTML, /id="background-picker"|class="reader-overlay"|id="mandatory-update-(?:close|dismiss)"/);
+  const before = ui.calls.length;
+  for (const [id, dataset] of [['choose'], ['verify'], ['launch'], ['additional'], ['stop'], ['settings-toggle'], ['get-game-resources'], ['website'], ['update-download'], ['check-updates'], ['', { open: '0' }], ['', { read: 'release' }], ['', { background: 'beach' }], ['mandatory-update-dismiss']]) {
+    await ui.click(id, dataset);
+  }
+  let prevented = false, stopped = false;
+  ui.events.get('document:keydown')({ key: 'Escape', preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } });
+  ui.events.get('document:click')({ target: { closest: () => null } });
+  assert.equal(prevented, true); assert.equal(stopped, true);
+  assert.deepEqual(ui.calls.slice(before), []);
+  assert.equal(ui.values.get(presentation.backgroundPreferenceKey), undefined);
+  assert.match(ui.app.innerHTML, /class="mandatory-update"/);
+  const css = await readFile(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /\.mandatory-update\s*\{[^}]*position:\s*fixed;[^}]*inset:\s*0;/);
+});
+
+test('强制更新关闭已打开的详情，并把键盘焦点限制在更新操作内', async () => {
+  const ui = await launcher();
+  await ui.click('', { read: 'announcement' });
+  assert.match(ui.app.innerHTML, /class="reader-overlay"/);
+  publish(ui, newerSnapshot());
+  assert.doesNotMatch(ui.app.innerHTML, /class="reader-overlay"/);
+  assert.equal(ui.document.activeElement.id, 'mandatory-update-download');
+  let prevented = 0;
+  ui.events.get('document:keydown')({ key: 'Tab', shiftKey: true, preventDefault() { prevented++; } });
+  assert.equal(ui.document.activeElement.id, 'mandatory-update-check');
+  ui.events.get('document:keydown')({ key: 'Tab', shiftKey: false, preventDefault() { prevented++; } });
+  assert.equal(ui.document.activeElement.id, 'mandatory-update-download');
+  ui.document.activeElement = { id: 'launch' };
+  ui.events.get('document:keydown')({ key: 'Tab', preventDefault() { prevented++; } });
+  assert.equal(ui.document.activeElement.id, 'mandatory-update-download');
+  assert.equal(prevented, 3);
+});
+
+test('更新失败清空远程内容但保持强制锁，只有新鲜的相同或较旧版本能恢复', async () => {
+  for (const latest of ['0.2.5', '0.2.4']) {
+    const ui = await launcher();
+    publish(ui, newerSnapshot());
+    ui.failRemote(); await ui.click('mandatory-update-check');
+    assert.match(ui.app.innerHTML, /class="mandatory-update"/);
+    assert.match(ui.app.innerHTML, /最新版本 <strong>-<\/strong>/);
+    assert.doesNotMatch(ui.app.innerHTML, /修复连接|id="mandatory-update-download"/);
+    assert.match(ui.app.innerHTML, /远程配置暂时无法加载/);
+    const before = ui.calls.length;
+    await ui.click('launch'); assert.equal(ui.calls.length, before);
+    ui.setRemote({ source: 'remote', stale: false, config: { latest_version: latest } });
+    await ui.click('mandatory-update-check');
+    assert.doesNotMatch(ui.app.innerHTML, /class="mandatory-update"|class="shell" inert/);
+    await ui.click('launch');
+    assert.ok(ui.calls.slice(before).some((call) => call.command === 'start_game'));
+  }
+});
+
+test('缺少当前平台下载地址仍要求更新，下载错误允许重新下载和重新检查', async () => {
+  const ui = await launcher();
+  publish(ui, newerSnapshot({ downloads: { macos_arm64: { url: 'https://oss.2t.hk/mac.zip', sha256: 'c'.repeat(64) } } }));
+  assert.match(ui.app.innerHTML, /class="mandatory-update"/);
+  assert.match(ui.app.innerHTML, /当前系统的下载地址暂不可用/);
+  assert.doesNotMatch(ui.app.innerHTML, /id="mandatory-update-download"/);
+  publish(ui, newerSnapshot());
+  ui.failCommand('open_update_download'); await ui.click('mandatory-update-download');
+  assert.match(ui.app.innerHTML, /class="mandatory-update"/);
+  assert.match(ui.app.innerHTML, /暂时没有适用于当前系统的下载/);
+  ui.failCommand('open_update_download', false); await ui.click('mandatory-update-download');
+  assert.equal(ui.calls.filter((call) => call.command === 'open_update_download').length, 2);
+  assert.match(ui.app.innerHTML, /class="mandatory-update"/);
+  await ui.click('mandatory-update-check');
+  assert.equal(ui.calls.at(-1).command, 'remote_configuration');
+});
+
+test('资源准备过程中收到强制更新后，不继续启动或打开游戏', async () => {
+  const ui = await launcher(true, { resources: null });
+  const finish = ui.hold('prepare_game');
+  const preparing = ui.click('launch');
+  await tick();
+  assert.equal(ui.calls.at(-1).command, 'prepare_game');
+  publish(ui, newerSnapshot());
+  const result = ui.status(); delete result.remote_configuration;
+  finish(result); await preparing;
+  assert.match(ui.app.innerHTML, /class="mandatory-update"/);
+  assert.equal(ui.calls.some((call) => ['start_game', 'open_game'].includes(call.command)), false);
+});
+
+test('准备命令报告后端更新锁时，不使用此前已安装快照解除锁', async () => {
+  const ui = await launcher(true, { resources: null });
+  const finish = ui.hold('prepare_game');
+  const preparing = ui.click('launch');
+  await tick();
+  const result = { ...ui.status(), update_required: true };
+  publish(ui, newerSnapshot());
+  finish(result); await preparing;
+  assert.match(ui.app.innerHTML, /class="mandatory-update"/);
+  assert.equal(ui.calls.some((call) => ['start_game', 'open_game'].includes(call.command)), false);
+});
 
 test('实际启动界面仅通过后端读取远程配置，并从目录选择完成校验、启动、多开和停止', async () => {
   const ui = await launcher();
@@ -57,9 +191,12 @@ test('实际设置点击持久化背景，检查更新与下载始终交给受�
   await ui.click('check-updates');
   assert.equal(ui.calls.at(-1).command, 'remote_configuration');
   assert.equal(ui.calls.at(-1).args.forceRefresh, true);
-  await ui.click('update-download');
+  ui.setRemote(newerSnapshot()); await ui.click('check-updates');
+  await ui.click('mandatory-update-download');
   assert.equal(ui.calls.at(-1).command, 'open_update_download');
   assert.equal(ui.calls.at(-1).args, undefined);
+  ui.setRemote({ source: 'remote', config: { latest_version: '0.2.5', website: 'https://gtav.2t.hk' } });
+  await ui.click('mandatory-update-check');
   await ui.click('website');
   assert.equal(ui.calls.at(-1).command, 'open_project_website');
 });

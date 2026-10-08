@@ -89,11 +89,11 @@ export function remotePresentation(snapshot, version, platform = '') {
     sourceText: loaded ? '已更新' : '-',
   };
 }
-export function launcherActions({ selected, busy, desktop, urls }, remoteBusy = false) {
+export function launcherActions({ selected, busy, desktop, urls, updateRequired = false }, remoteBusy = false) {
   return {
-    choose: Boolean(desktop && !busy && !urls.length),
-    launch: canLaunch({ selected, busy, desktop }),
-    additional: Boolean(desktop && !busy && urls.length),
+    choose: Boolean(desktop && !busy && !urls.length && !updateRequired),
+    launch: !updateRequired && canLaunch({ selected, busy, desktop }),
+    additional: Boolean(desktop && !busy && urls.length && !updateRequired),
     stop: Boolean(desktop && !busy && urls.length),
     refresh: Boolean(desktop && !remoteBusy),
   };

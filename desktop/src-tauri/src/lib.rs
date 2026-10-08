@@ -16,11 +16,12 @@ struct Preferences { selected_directory: Option<String>, preferred_port: Option<
 struct Prepared { resources: resources::ResourceInfo, runtime: PathBuf, fonts: HashMap<String, PathBuf> }
 #[derive(Default)]
 struct Inner { selected: Option<String>, preferred_port: Option<u16>, prepared: Option<Prepared>, servers: Vec<http_server::ServerHandle> }
-struct LauncherState { inner: Mutex<Inner>, busy: Arc<AtomicBool>, remote_busy: Arc<AtomicBool>, remote: Arc<RwLock<serde_json::Value>> }
+struct LauncherState { inner: Mutex<Inner>, busy: Arc<AtomicBool>, remote_busy: Arc<AtomicBool>,
+    update_required: Arc<AtomicBool>, remote: Arc<RwLock<serde_json::Value>> }
 impl Default for LauncherState {
     fn default() -> Self {
         Self { inner: Mutex::new(Inner::default()), busy: Arc::new(AtomicBool::new(false)),
-            remote_busy: Arc::new(AtomicBool::new(false)), remote: Arc::new(RwLock::new(
+            remote_busy: Arc::new(AtomicBool::new(false)), update_required: Arc::new(AtomicBool::new(false)), remote: Arc::new(RwLock::new(
                 serde_json::to_value(remote_config::ConfigSnapshot::default()).unwrap_or_default())) }
     }
 }
@@ -34,17 +35,51 @@ fn acquire(state: &LauncherState) -> Result<BusyGuard, String> {
 
 #[derive(Serialize)]
 struct LauncherStatus { selected_directory: Option<String>, resources: Option<resources::ResourceInfo>, running_urls: Vec<String>,
-    version: &'static str, platform: &'static str, remote_configuration: serde_json::Value }
+    version: &'static str, platform: &'static str, update_required: bool, remote_configuration: serde_json::Value }
 fn platform_key() -> &'static str {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => "macos_arm64", ("macos", "x86_64") => "macos_x64",
         ("windows", "x86_64") => "windows_x64", ("windows", "aarch64") => "windows_arm64", _ => "unsupported",
     }
 }
-fn snapshot(inner: &Inner, remote: &Arc<RwLock<serde_json::Value>>) -> LauncherStatus {
+fn reconcile_update_requirement(required: &AtomicBool, value: &serde_json::Value) -> bool {
+    let previous = required.load(Ordering::Acquire);
+    let next = serde_json::from_value::<remote_config::ConfigSnapshot>(value.clone()).ok()
+        .map(|snapshot| remote_config::update_requirement(previous, &snapshot, env!("CARGO_PKG_VERSION")))
+        .unwrap_or(previous);
+    required.store(next, Ordering::Release);
+    next
+}
+
+fn publish_remote_snapshot(remote: &RwLock<serde_json::Value>, required: &AtomicBool,
+    snapshot: remote_config::ConfigSnapshot) -> Result<serde_json::Value, String> {
+    let value = serde_json::to_value(snapshot).map_err(|e| e.to_string())?;
+    let mut stored = remote.write().map_err(|e| e.to_string())?;
+    // Set the native gate before either the event or shared HTTP metadata can
+    // expose a newer release to the UI.
+    reconcile_update_requirement(required, &value);
+    *stored = value.clone();
+    Ok(value)
+}
+
+fn ensure_current_launcher(state: &LauncherState) -> Result<(), String> {
+    // The local HTTP proxy can refresh this same snapshot. Reconcile it while
+    // holding its read lock so command entry points also observe those updates.
+    let value = state.remote.read().map_err(|e| e.to_string())?;
+    if reconcile_update_requirement(&state.update_required, &value) {
+        return Err("请先更新启动器至最新版本。".into());
+    }
+    Ok(())
+}
+
+fn snapshot(inner: &Inner, state: &LauncherState) -> LauncherStatus {
+    let (remote_configuration, update_required) = state.remote.read().map(|value| {
+        let update_required = reconcile_update_requirement(&state.update_required, &value);
+        (value.clone(), update_required)
+    }).unwrap_or_else(|_| (serde_json::Value::Null, state.update_required.load(Ordering::Acquire)));
     LauncherStatus { selected_directory: inner.selected.clone(), resources: inner.prepared.as_ref().map(|p| p.resources.clone()),
         running_urls: inner.servers.iter().map(|s| s.url()).collect(), version: env!("CARGO_PKG_VERSION"), platform: platform_key(),
-        remote_configuration: remote.read().map(|v| v.clone()).unwrap_or_default() }
+        update_required, remote_configuration }
 }
 fn preferences_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     app.path().app_config_dir().map(|p| p.join("launcher.json")).map_err(|e| e.to_string())
@@ -70,7 +105,7 @@ fn embedded_client() -> HashMap<String, &'static [u8]> {
 #[tauri::command]
 fn launcher_status(state: State<'_, LauncherState>) -> Result<LauncherStatus, String> {
     let inner = state.inner.lock().map_err(|e| e.to_string())?;
-    Ok(snapshot(&inner, &state.remote))
+    Ok(snapshot(&inner, &state))
 }
 
 #[tauri::command]
@@ -85,6 +120,7 @@ fn progress(app: &tauri::AppHandle, phase: &str, text: &str) {
 
 #[tauri::command]
 async fn prepare_game(app: tauri::AppHandle, state: State<'_, LauncherState>, selected: String) -> Result<LauncherStatus, String> {
+    ensure_current_launcher(&state)?;
     let _guard = acquire(&state)?;
     if !state.inner.lock().map_err(|e| e.to_string())?.servers.is_empty() {
         return Err("请先停止正在运行的游戏服务，再更换资源目录。".into());
@@ -102,19 +138,21 @@ async fn prepare_game(app: tauri::AppHandle, state: State<'_, LauncherState>, se
         let fonts = fonts::prepare(&resources.root, &resources.original_wasm, &cache.join("fonts"))?;
         Ok::<_, String>(Prepared { resources, runtime, fonts })
     }).await.map_err(|e| format!("资源准备任务异常：{e}"))??;
+    ensure_current_launcher(&state)?;
     let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
     inner.selected = Some(prepared.resources.root.to_string_lossy().into_owned());
     inner.prepared = Some(prepared);
     save_preferences(&app, &inner)?;
     progress(&app, "ready", "资源已就绪，可以启动游戏。");
-    Ok(snapshot(&inner, &state.remote))
+    Ok(snapshot(&inner, &state))
 }
 
 #[tauri::command]
 fn start_game(app: tauri::AppHandle, state: State<'_, LauncherState>, additional: bool) -> Result<LauncherStatus, String> {
+    ensure_current_launcher(&state)?;
     let _guard = acquire(&state)?;
     let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
-    if !additional && !inner.servers.is_empty() { return Ok(snapshot(&inner, &state.remote)); }
+    if !additional && !inner.servers.is_empty() { return Ok(snapshot(&inner, &state)); }
     if inner.servers.len() >= 8 { return Err("最多同时开启 8 个测试客户端。".into()); }
     let prepared = inner.prepared.as_ref().ok_or("请先选择并校验游戏资源。")?;
     let index = inner.servers.len() + 1;
@@ -130,18 +168,19 @@ fn start_game(app: tauri::AppHandle, state: State<'_, LauncherState>, additional
     if index == 1 { inner.preferred_port = Some(server.port()); }
     inner.servers.push(server);
     save_preferences(&app, &inner)?;
-    Ok(snapshot(&inner, &state.remote))
+    Ok(snapshot(&inner, &state))
 }
 
 #[tauri::command]
 fn stop_game(state: State<'_, LauncherState>) -> Result<LauncherStatus, String> {
     let _guard = acquire(&state)?;
     let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
-    inner.servers.clear(); Ok(snapshot(&inner, &state.remote))
+    inner.servers.clear(); Ok(snapshot(&inner, &state))
 }
 
 #[tauri::command]
 fn open_game(state: State<'_, LauncherState>, index: usize) -> Result<(), String> {
+    ensure_current_launcher(&state)?;
     let url = state.inner.lock().map_err(|e| e.to_string())?.servers.get(index).ok_or("游戏服务尚未启动。")?.url();
     // 游戏在系统浏览器运行，避免依赖不同系统 WebView 的 WebGPU / WASM 线程支持。
     open::that(url).map_err(|e| format!("无法打开默认浏览器，请复制游戏地址手动打开：{e}"))
@@ -154,8 +193,7 @@ async fn remote_configuration(app: tauri::AppHandle, state: State<'_, LauncherSt
     }
     let _guard = BusyGuard(state.remote_busy.clone());
     let snapshot = tauri::async_runtime::spawn_blocking(remote_config::load).await.map_err(|e| e.to_string())?;
-    let value = serde_json::to_value(snapshot).map_err(|e| e.to_string())?;
-    *state.remote.write().map_err(|e| e.to_string())? = value.clone();
+    let value = publish_remote_snapshot(&state.remote, &state.update_required, snapshot)?;
     let _ = app.emit("launcher-remote-config", &value);
     Ok(value)
 }
@@ -187,6 +225,12 @@ fn open_project_website(state: State<'_, LauncherState>) -> Result<(), String> {
     open::that(url).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn open_game_resource_page() -> Result<(), String> {
+    open::that("https://archive.org/download/gta5-wasm/")
+        .map_err(|_| "无法打开游戏资源页面，请检查默认浏览器设置。".to_string())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(LauncherState::default())
@@ -198,18 +242,19 @@ pub fn run() {
             inner.selected = settings.selected_directory; inner.preferred_port = settings.preferred_port;
             drop(inner);
             let remote = state.remote.clone(); let busy = state.remote_busy.clone();
+            let update_required = state.update_required.clone();
             let handle = app.handle().clone();
             busy.store(true, Ordering::Release);
             tauri::async_runtime::spawn_blocking(move || {
                 let _guard = BusyGuard(busy);
-                let value = serde_json::to_value(remote_config::load()).unwrap_or_default();
-                if let Ok(mut snapshot) = remote.write() { *snapshot = value.clone(); }
-                let _ = handle.emit("launcher-remote-config", value);
+                if let Ok(value) = publish_remote_snapshot(&remote, &update_required, remote_config::load()) {
+                    let _ = handle.emit("launcher-remote-config", value);
+                }
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![launcher_status, choose_game_directory, prepare_game, start_game, stop_game, open_game,
-            remote_configuration, open_update_download, open_project_website])
+            remote_configuration, open_update_download, open_project_website, open_game_resource_page])
         .build(tauri::generate_context!()).expect("启动桌面界面失败")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
@@ -255,4 +300,46 @@ pub fn verify_resources(selected: &Path, cache: &Path) -> Result<serde_json::Val
         "remote_http_source": remote_http["source"], "remote_http_error": remote_http["error"],
         "remote_http_servers": remote_http["config"]["servers"],
         "remote_http_announcements": remote_http["config"]["announcements"].as_array().map(Vec::len) }))
+}
+
+#[cfg(test)]
+mod update_gate_tests {
+    use super::*;
+
+    fn fresh_release(version: &str) -> remote_config::ConfigSnapshot {
+        remote_config::ConfigSnapshot {
+            config: remote_config::parse_config(&serde_json::to_vec(&serde_json::json!({
+                "latest_version": version
+            })).unwrap()).unwrap(),
+            source: remote_config::ConfigSource::Remote, stale: false,
+            fetched_at: Some(123), checked_at: 123, error: None,
+        }
+    }
+
+    #[test]
+    fn publish_latches_before_status_and_failure_cannot_unlock_game_commands() {
+        let state = LauncherState::default();
+        assert!(ensure_current_launcher(&state).is_ok());
+        publish_remote_snapshot(&state.remote, &state.update_required, fresh_release("99.0.0")).unwrap();
+        assert!(state.update_required.load(Ordering::Acquire));
+        assert_eq!(ensure_current_launcher(&state).unwrap_err(), "请先更新启动器至最新版本。");
+        assert!(snapshot(&Inner::default(), &state).update_required);
+        publish_remote_snapshot(&state.remote, &state.update_required, remote_config::ConfigSnapshot::default()).unwrap();
+        assert!(ensure_current_launcher(&state).is_err());
+        publish_remote_snapshot(&state.remote, &state.update_required, fresh_release(env!("CARGO_PKG_VERSION"))).unwrap();
+        assert!(ensure_current_launcher(&state).is_ok());
+        assert!(!snapshot(&Inner::default(), &state).update_required);
+    }
+
+    #[test]
+    fn game_command_gate_observes_the_local_http_proxy_shared_snapshot() {
+        let state = LauncherState::default();
+        *state.remote.write().unwrap() = serde_json::to_value(fresh_release("99.0.0")).unwrap();
+        assert!(!state.update_required.load(Ordering::Acquire));
+        assert!(ensure_current_launcher(&state).is_err());
+        *state.remote.write().unwrap() = serde_json::to_value(remote_config::ConfigSnapshot::default()).unwrap();
+        assert!(ensure_current_launcher(&state).is_err());
+        *state.remote.write().unwrap() = serde_json::to_value(fresh_release(env!("CARGO_PKG_VERSION"))).unwrap();
+        assert!(ensure_current_launcher(&state).is_ok());
+    }
 }

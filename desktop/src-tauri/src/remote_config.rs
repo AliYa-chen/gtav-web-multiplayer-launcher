@@ -76,11 +76,11 @@ impl Default for RemoteConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ConfigSource { Remote, Unavailable }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConfigSnapshot {
     pub config: RemoteConfig,
     pub source: ConfigSource,
@@ -416,6 +416,16 @@ pub fn has_update(current: &str, latest: Option<&str>) -> bool {
     matches!((current, latest), (Ok(current), Some(latest)) if latest.cmp_precedence(&current).is_gt())
 }
 
+/// Runtime-only mandatory update policy. A failed request cannot undo an update
+/// already confirmed in this process; only a fresh validated reply can clear it.
+pub fn update_requirement(previous: bool, snapshot: &ConfigSnapshot, current: &str) -> bool {
+    if snapshot.source != ConfigSource::Remote || snapshot.stale ||
+        snapshot.fetched_at.is_none() || snapshot.error.is_some() {
+        return previous;
+    }
+    has_update(current, snapshot.config.latest_version.as_deref())
+}
+
 pub fn download_for_platform<'a>(config: &'a RemoteConfig, platform: &str) -> Option<&'a DownloadInfo> {
     config.downloads.get(platform)
 }
@@ -688,6 +698,46 @@ mod tests {
         assert!(!has_update("0.2.0", Some("0.1.2")));
         assert!(!has_update("0.2.0+build.1", Some("0.2.0+build.2")));
         assert!(!has_update("invalid", Some("0.2.0")));
+    }
+
+    fn release_snapshot(latest: Option<&str>) -> ConfigSnapshot {
+        let config = parse_config(&serde_json::to_vec(&serde_json::json!({
+            "latest_version": latest
+        })).unwrap()).unwrap();
+        snapshot(Ok(config), 123)
+    }
+
+    #[test]
+    fn higher_remote_release_requires_update_even_without_download_metadata() {
+        let remote = release_snapshot(Some("0.2.6"));
+        assert!(remote.config.downloads.is_empty());
+        assert!(update_requirement(false, &remote, "0.2.5"));
+    }
+
+    #[test]
+    fn network_failure_preserves_only_the_runtime_requirement() {
+        let failed = snapshot(Err("远程配置请求超时。".into()), 456);
+        assert!(!update_requirement(false, &failed, "0.2.5"));
+        assert!(update_requirement(true, &failed, "0.2.5"));
+        assert!(update_requirement(true, &ConfigSnapshot::default(), "0.2.5"));
+        let mut old = release_snapshot(Some("0.2.5"));
+        old.stale = true;
+        assert!(update_requirement(true, &old, "0.2.5"));
+    }
+
+    #[test]
+    fn fresh_equal_older_or_missing_version_clears_the_requirement() {
+        for latest in [Some("0.2.5"), Some("0.2.4"), None] {
+            assert!(!update_requirement(true, &release_snapshot(latest), "0.2.5"));
+        }
+    }
+
+    #[test]
+    fn mandatory_updates_follow_semver_prerelease_and_build_precedence() {
+        assert!(update_requirement(false, &release_snapshot(Some("0.2.6")), "0.2.6-beta.1"));
+        assert!(update_requirement(false, &release_snapshot(Some("0.2.6-beta.2")), "0.2.6-beta.1"));
+        assert!(!update_requirement(true, &release_snapshot(Some("0.2.6-beta.2")), "0.2.6"));
+        assert!(!update_requirement(true, &release_snapshot(Some("0.2.6+build.2")), "0.2.6+build.1"));
     }
 
     #[test]
