@@ -285,7 +285,30 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
               owner_epoch: entity.owner_epoch, health: observed });
           }
         }
-        if (active && health > 0 && !state.attachment && (!replica.active || replica.task !== 'wander')) {
+        const response = entity.law_response;
+        if (response && health > 0) {
+          ex.mpSetPedAsCop?.(replica.handle, 1);
+          const weapon = state.ped?.weapon;
+          if (weapon && ex.mpHasWeaponAsset?.(weapon | 0) && replica.lawWeapon !== weapon) {
+            ex.mpGiveWeapon?.(replica.handle, weapon | 0, 999, 0, 1); ex.mpSetCurrentWeapon?.(replica.handle, weapon | 0, 1); replica.lawWeapon = weapon;
+          } else if (weapon && !ex.mpHasWeaponAsset?.(weapon | 0)) ex.mpRequestWeaponAsset?.(weapon | 0, 31, 0);
+          const target = entities.get(response.target_entity_id);
+          const targetHandle = target?.player_id === packet.client_id ? localPed : target?.player_id ? playerReplica(target.player_id) : replicas.get(response.target_entity_id)?.handle;
+          if (active && response.phase === 'active' && target?.generation === response.target_generation
+              && target.components.combat?.alive !== false && targetHandle && ex.mpExists(targetHandle) && !state.attachment) {
+            if (replica.lawTarget !== targetHandle || now - (replica.lawTaskAt ?? -Infinity) >= 3000) {
+              ex.mpTaskCombatPed?.(replica.handle, targetHandle, 0, 16); replica.lawTarget = targetHandle; replica.lawTaskAt = now;
+            }
+            if (ex.mpIsShooting(replica.handle) && now - (replica.lawShotAt ?? -Infinity) >= 1500) {
+              replica.lawShotAt = now;
+              post({ type: 'simulation_result', kind: 'npc_shot', entity_id: entity.entity_id, owner_epoch: entity.owner_epoch,
+                generation: entity.generation, target_entity_id: target.entity_id, target_generation: target.generation });
+            }
+            replica.task = 'police_pursuit';
+          } else if ((!active || response.phase !== 'active') && replica.task !== 'law_frozen') {
+            replica.lawTarget = null; ex.mpClearTasksImmediately?.(replica.handle); replica.task = 'law_frozen';
+          }
+        } else if (active && health > 0 && !state.attachment && (!replica.active || replica.task !== 'wander')) {
           ex.mpTaskWander?.(replica.handle, 10, 0); replica.task = 'wander'; replica.driveStarted = false;
         }
       }
@@ -332,6 +355,25 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
       }
     }
     playWorldEvents(packet, entities, now);
+    const shotAcks = [];
+    for (const item of packet.world_shots || []) {
+      if (consumedWorldEvents.has('shot:' + item.id)) { shotAcks.push(item.id); continue; }
+      const event = item.event, attacker = entities.get(event?.attacker_entity_id), target = entities.get(event?.target_entity_id);
+      if (!attacker || !target || event.world_epoch !== world.world_epoch || attacker.generation !== event.attacker_generation || target.generation !== event.target_generation) {
+        consumedWorldEvents.add('shot:' + item.id); shotAcks.push(item.id); continue;
+      }
+      if (attacker.owner_id === packet.client_id) { consumedWorldEvents.add('shot:' + item.id); shotAcks.push(item.id); continue; }
+      const handle = replicas.get(attacker.entity_id)?.handle;
+      if (!handle || !ex.mpExists(handle) || !ex.mpHasWeaponAsset?.(event.weapon | 0)) {
+        ex.mpRequestWeaponAsset?.(event.weapon | 0, 31, 0); continue;
+      }
+      if (validPosition(event.origin) && validPosition(event.target) && ex.mpShootBullet) {
+        const origin = [event.origin[0], event.origin[1], event.origin[2] + 1.2], hit = [event.target[0], event.target[1], event.target[2] + 1];
+        ex.mpShootBullet(vector(0, origin), vector(24, hit), 0, 1, event.weapon | 0, handle, 1, 0, -1);
+      }
+      consumedWorldEvents.add('shot:' + item.id); shotAcks.push(item.id);
+    }
+    if (shotAcks.length) post({ type: 'world_shot_ack', ids: shotAcks });
     if (!local) return { active: true };
     if (localGeneration !== null && localGeneration !== local.generation) {
       // 服务器刚允许重生，本机实体尚在恢复事务中，不能把旧尸体再报告成新一轮死亡。

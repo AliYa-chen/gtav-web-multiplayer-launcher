@@ -3,8 +3,8 @@
   "purpose": "玩家提供原引擎；启动器仅在外部缓存生成离线和公共战局运行副本。",
   "original_sha256": "11ca8d2c04c5e843d18ff4aea4899d72c86973c6b031df334e67c446b2ae83e0",
   "original_bytes": 63201802,
-  "online_sha256": "fd3d41d48770af2ea3004a2189cd2c106076a1616237ffa3acc4826fe26ebef4",
-  "online_bytes": 63204883,
+  "online_sha256": "589f0c604a5a4e501b141ada1293e0b7257e6a184b814861d7e20274d72c9b26",
+  "online_bytes": 63205284,
   "imported_functions": 85,
   "callback_import": 11,
   "exports": [
@@ -59,6 +59,177 @@
       "function_index": 91002,
       "parameters": [
         "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetClockTime",
+      "function_index": 49437,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpPauseClock",
+      "function_index": 49443,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpWeatherPersist",
+      "function_index": 52794,
+      "parameters": [
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpWeatherOvertime",
+      "function_index": 52796,
+      "parameters": [
+        "i64",
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpClearOverrideWeather",
+      "function_index": 52803,
+      "parameters": [],
+      "results": []
+    },
+    {
+      "name": "mpRain",
+      "function_index": 52824,
+      "parameters": [
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpWind",
+      "function_index": 52820,
+      "parameters": [
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpDispatchService",
+      "function_index": 52957,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpRandomCops",
+      "function_index": 57371,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpRandomCopsNotScenarios",
+      "function_index": 57372,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpRandomCopsScenarios",
+      "function_index": 57373,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpWantedLevel",
+      "function_index": 58655,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpSetWantedLevel",
+      "function_index": 58638,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetWantedNow",
+      "function_index": 58640,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpClearWanted",
+      "function_index": 58646,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSuppressWitnesses",
+      "function_index": 58680,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpTaskCombatPed",
+      "function_index": 60593,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetPedAsCop",
+      "function_index": 57350,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpAIWeaponDamage",
+      "function_index": 57226,
+      "parameters": [
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpAIMeleeDamage",
+      "function_index": 57228,
+      "parameters": [
+        "f32"
       ],
       "results": []
     },

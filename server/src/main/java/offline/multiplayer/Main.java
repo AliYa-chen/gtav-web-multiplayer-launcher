@@ -35,8 +35,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** 独立公共战局服务：鉴权恢复、权威移动校验、伤害、死亡、重生及状态分发。 */
 public final class Main {
-    private static final String VERSION = "0.3.1-world-experimental";
-    private static final List<String> CAPABILITIES = List.of("public_session", "chat", "player_state", "shoot_events", "appearance", "combat", "resume", "heartbeat", "snapshot", "actions", "combat_feedback", "weapon_rules", "world_registry", "world_v2", "entity_batch", "melee_events");
+    private static final String VERSION = "0.3.2-world-experimental";
+    private static final List<String> CAPABILITIES = List.of("public_session", "chat", "player_state", "shoot_events", "appearance", "combat", "resume", "heartbeat", "snapshot", "actions", "combat_feedback", "weapon_rules", "world_registry", "world_v2", "entity_batch", "melee_events", "world_environment", "shared_law");
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final int MAX_MESSAGE_BYTES = 64 * 1024;
 
@@ -395,6 +395,7 @@ public final class Main {
                     "combat_authoritative", true, "transport", "websocket", "resume_ttl_seconds", 60,
                     "idle_timeout_seconds", idleTimeoutSeconds, "hello_timeout_seconds", helloTimeoutSeconds,
                     "world_epoch", view.get("world_epoch"), "world_revision", view.get("cut_revision"),
+                    "world_tick",view.get("world_tick"),"environment",view.get("environment"),"environment_authoritative",true,
                     "world_entities", ((List<?>) view.get("entities")).size(), "shared_population", view.get("shared_population"),
                     "melee_requests_received",world.meleeStats().get("melee_requests_received"),
                     "melee_events_approved",world.meleeStats().get("melee_events_approved"),"melee_hits",world.meleeStats().get("melee_hits"));
@@ -439,7 +440,7 @@ public final class Main {
                                 if (client.combatCapable) declared.add("combat");
                                 if (client.resumeCapable) declared.add("resume");
                                 if (client.combatFeedbackCapable) declared.add("combat_feedback");
-                                if (client.worldCapable) declared.add("world_v2");
+                                if (client.worldCapable) declared.addAll(List.of("world_v2","world_environment","shared_law"));
                                 if (client.meleeEventsCapable) declared.add("melee_events");
                                 hello(client, object("type", "hello", "name", client.name, "capabilities", declared));
                             } else {
@@ -509,13 +510,15 @@ public final class Main {
             boolean worldCapable = false;
             boolean meleeEventsCapable = false;
             if (message.containsKey("capabilities")) {
-                if (!(message.get("capabilities") instanceof List<?> values) || values.size() > 16
+                if (!(message.get("capabilities") instanceof List<?> values) || values.size() > 32
                         || values.stream().anyMatch(value -> !(value instanceof String text) || text.length() > 40))
                     throw problem("invalid_message", "客户端能力声明必须是文本数组");
                 combatCapable = values.contains("combat");
                 resumeCapable = values.contains("resume");
                 combatFeedbackCapable = values.contains("combat_feedback");
                 worldCapable = values.contains("world_v2");
+                if(worldCapable && (!values.contains("world_environment") || !values.contains("shared_law")))
+                    throw problem("client_world_rules_required", "此战局需要统一天气与警察规则，请更新启动器后重新加入");
                 meleeEventsCapable = values.contains("melee_events") && worldCapable;
             }
             boolean hasId = message.containsKey("client_id");
@@ -566,16 +569,25 @@ public final class Main {
             requireSession(client);if(!client.worldCapable)throw problem("capability_required","需要声明world_v2能力");
         }
         private void sendWorldSnapshot(Client client) {
-            for(Map<String,Object> message:world.snapshotMessages(client.id,client.scope,client.streamSequence))client.send(message);
-            client.worldRevision=((Number)world.snapshot().get("cut_revision")).longValue();client.worldInitialized=true;
+            List<Map<String,Object>> messages=world.snapshotMessages(client.id,client.scope,client.streamSequence);
+            Map<String,Object> end=messages.get(messages.size()-1);
+            for(Map<String,Object> message:messages)client.send(message);
+            client.worldRevision=((Number)end.get("cut_revision")).longValue();
+            client.environmentRevision=((Number)((Map<?,?>)end.get("environment")).get("revision")).longValue();
+            client.lawRevision=((Number)((Map<?,?>)end.get("law")).get("revision")).longValue();
+            client.worldInitialized=true;
         }
         private void publishWorld() {
             for(Session session:sessions.values()) {
                 Client client=session.client;if(!session.connected() || !client.worldCapable || !client.worldInitialized)continue;
                 try {
-                    Map<String,Object> delta=world.delta(session.id,client.scope,client.worldRevision,client.streamSequence+1);
-                    client.worldRevision=((Number)world.snapshot().get("cut_revision")).longValue();
-                    if(delta!=null){client.streamSequence++;client.send(delta);}
+                    Map<String,Object> delta=world.delta(session.id,client.scope,client.worldRevision,client.environmentRevision,client.lawRevision,client.streamSequence+1);
+                    if(delta!=null){
+                        client.worldRevision=((Number)delta.get("world_revision")).longValue();
+                        client.environmentRevision=((Number)((Map<?,?>)delta.get("environment")).get("revision")).longValue();
+                        client.lawRevision=((Number)((Map<?,?>)delta.get("law")).get("revision")).longValue();
+                        client.streamSequence++;client.send(delta);
+                    }else client.worldRevision=world.cut().cutRevision();
                 }catch(WorldService.Problem problem){sendWorldSnapshot(client);}
             }
         }
@@ -852,7 +864,7 @@ public final class Main {
         boolean combatFeedbackCapable;
         boolean worldCapable,worldInitialized,meleeEventsCapable;
         final java.util.Set<String> scope=new java.util.LinkedHashSet<>();
-        long worldRevision,streamSequence;
+        long worldRevision,environmentRevision,lawRevision,streamSequence;
         final AtomicBoolean closed = new AtomicBoolean();
         final ArrayBlockingQueue<Outbound> outgoing = new ArrayBlockingQueue<>(128);
         final CountDownLatch disconnected = new CountDownLatch(1);

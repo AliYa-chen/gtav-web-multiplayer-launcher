@@ -61,6 +61,7 @@ self.prepareMultiplayerBridge = function (imports) {
     let muzzleNameBuffer = 0;
     let visualReportAt = -Infinity, visualPlayed = 0, visualExpired = 0, visualSignature = '';
     const sessionUI = self.createNativeSessionUI?.({ ex, memory });
+    const environmentBridge = self.createWorldEnvironmentBridge?.({ ex, memory, post: (value) => post(value) });
     const worldEntities = self.createWorldEntityBridge?.({ ex, memory, post: (value) => post(value),
       playerReplica: (id) => replicas.get(id)?.ped || 0,
       onPlayerAnimation: (id, now, duration) => {
@@ -707,6 +708,7 @@ self.prepareMultiplayerBridge = function (imports) {
         }
         readPacket();
         worldEntities?.suppressPopulation(packet);
+        environmentBridge?.suppressLocalDispatch(packet);
         if (!useOwner(thread, handler, now)) return;
         sampleShots(now);
         const meleePed = ex.mpGetPlayerPed(-1);
@@ -717,12 +719,14 @@ self.prepareMultiplayerBridge = function (imports) {
         if (now - lastTick < 40) return;
         lastTick = now;
         observeWorldReadiness(now);
+        environmentBridge?.update(packet, now);
         processNotices(now);
         if (!packet?.connected) {
           for (const replica of replicas.values()) erase(replica);
           replicas.clear();
           visualShots.clear();
           worldEntities?.clear();
+          environmentBridge?.reset();
           // 断线恢复同一身份时保留本地角色和位置，不重复随机换模/出生。
           return;
         }

@@ -107,6 +107,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   let supportsCombat = false, supportsResume = false, supportsHeartbeat = false, supportsSnapshot = false;
   let supportsCombatFeedback = false;
   let supportsWorldV2 = false;
+  const serverFeatures = new Set();
   let supportsEntityBatch = false;
   let supportsMeleeEvents = false;
   let spawn = null;
@@ -419,6 +420,13 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
           || data.health > Math.min(200, entity.components.combat?.health ?? 0)
           || Object.keys(data).some((name) => !['type', 'world_epoch', 'entity_id', 'owner_epoch', 'generation', 'kind', 'health'].includes(name))) return;
         if (send('simulation_result', { ...envelope, kind: 'entity_health', health: data.health })) entityInputSequences.set(key, inputSequence);
+      } else if (data.kind === 'npc_shot') {
+        const target = world.entity(data.target_entity_id), response = entity.law_response;
+        if (entity.kind !== 'ped' || entity.player_id !== null || response?.role !== 'officer' || response.phase !== 'active'
+            || !target || target.generation !== data.target_generation || target.entity_id !== response.target_entity_id
+            || target.generation !== response.target_generation || target.components.combat?.alive === false
+            || Object.keys(data).some(name => !['type', 'world_epoch', 'entity_id', 'owner_epoch', 'generation', 'kind', 'target_entity_id', 'target_generation'].includes(name))) return;
+        if (send('simulation_result', { ...envelope, kind: 'npc_shot', target_entity_id: target.entity_id, target_generation: target.generation })) entityInputSequences.set(key, inputSequence);
       }
     }
   }
@@ -553,7 +561,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     supportsAppearance = supportsActions = false;
     supportsCombat = supportsResume = supportsHeartbeat = supportsSnapshot = false;
     supportsCombatFeedback = false;
-    supportsWorldV2 = false; world.reset(); entityInputSequences.clear(); entityReadyEpochs.clear(); lastWorldSyncAt = -Infinity;
+    supportsWorldV2 = false; serverFeatures.clear(); world.reset(); entityInputSequences.clear(); entityReadyEpochs.clear(); lastWorldSyncAt = -Infinity;
     supportsEntityBatch = false;
     supportsMeleeEvents = false;
     peers.clear(); combat.clear(); pendingState = null;
@@ -577,6 +585,8 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
       ...(supportsCombatFeedback ? ['combat_feedback'] : []),
       ...(supportsActions ? ['actions'] : []),
       ...(supportsWorldV2 ? ['world_v2'] : []),
+      ...(supportsWorldV2 && serverFeatures.has('world_environment') ? ['world_environment'] : []),
+      ...(supportsWorldV2 && serverFeatures.has('shared_law') ? ['shared_law'] : []),
       ...(supportsEntityBatch ? ['entity_batch'] : []),
       ...(supportsMeleeEvents ? ['melee_events'] : []),
     ];
@@ -640,6 +650,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
         supportsSnapshot = message.capabilities.includes('snapshot');
         supportsCombatFeedback = message.capabilities.includes('combat_feedback');
         supportsWorldV2 = message.capabilities.includes('world_v2');
+        serverFeatures.clear(); for (const feature of message.capabilities) serverFeatures.add(feature);
         supportsEntityBatch = supportsWorldV2 && message.capabilities.includes('entity_batch');
         supportsMeleeEvents = supportsWorldV2 && message.capabilities.includes('melee_events');
         weaponRules = Object.hasOwn(message, 'weapon_rules') ? cleanWeaponRules(message.weapon_rules) : [];
@@ -715,6 +726,14 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
       case 'melee_event':
         receiveMeleeEvent(message);
         break;
+      case 'world_shot_event': {
+        const current = world.state(), attacker = world.entity(message.attacker_entity_id), target = world.entity(message.target_entity_id);
+        if (!current.ready || message.world_epoch !== current.world_epoch || typeof message.event_id !== 'string'
+            || message.event_id.length > 200 || !attacker || !target || attacker.law_response?.role !== 'officer'
+            || attacker.generation !== message.attacker_generation || target.generation !== message.target_generation
+            || message.weapon !== 0x1b06d571 || !coordinates(message.origin) || !coordinates(message.target)) break;
+        emit({ type: 'world_shot_event', ...message }); break;
+      }
       case 'player_state': {
         if (message.room_id !== room?.id || !room.members.some(({ id }) => id === message.player_id)) return;
         const state = cleanPlayerState(message.state);

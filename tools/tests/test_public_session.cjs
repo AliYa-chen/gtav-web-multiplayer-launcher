@@ -1238,3 +1238,11 @@ test('不同完整长请求 ID 映射为不同短键，重发任一长 ID 仍使
   assert.notEqual(ids[0], ids[1]); assert.equal(ids[0], ids[2]); assert.ok(ids.every((id) => id.length <= 64));
   page.api.close();
 });
+
+test('共同世界协商明确声明环境与执法策略，新旧服务器能力不会混淆', async () => {
+ const page=await harness();const socket=page.enter(undefined,'LOCAL',{},[...capabilities,'world_v2','world_environment','shared_law']);
+ const hello=socket.messages('hello')[0];assert.ok(hello.capabilities.includes('world_environment'));assert.ok(hello.capabilities.includes('shared_law'));
+ page.api.close();
+ const old=await harness();const oldSocket=old.enter(undefined,'LOCAL',{},[...capabilities,'world_v2']);
+ assert.ok(!oldSocket.messages('hello')[0].capabilities.includes('shared_law'));old.api.close();
+});

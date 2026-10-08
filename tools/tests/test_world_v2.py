@@ -30,7 +30,7 @@ class WorldV2Harness(unittest.TestCase):
 
     def client(self, name="世界玩家", *, v2=True, resume=None):
         client = self.raw_client()
-        capabilities = ["combat", "resume", "combat_feedback"] + (["world_v2"] if v2 else [])
+        capabilities = ["combat", "resume", "combat_feedback"] + (["world_v2", "world_environment", "shared_law"] if v2 else [])
         hello = {"type": "hello", "name": name, "capabilities": capabilities}
         if resume:
             hello.update(client_id=resume["client_id"], resume_token=resume["resume_token"])
@@ -213,7 +213,11 @@ class WorldV2IntegrationTests(WorldV2Harness):
         first.expect("combat_state", lambda event: any(item["id"] == first.player_id and item["health"] == 140 for item in event["players"]))
         self.life(first, sequence=2, health=200, reason="environmental"); self.error(first, "health_increase_denied")
         self.life(first, sequence=1, health=130, reason="environmental"); self.error(first, "stale_input")
-        started = time.monotonic(); self.life(first, sequence=2, reason="arrest", health=100)
+        # 本地独立警察不能自行决定公共战局逮捕；拒绝也不能消费候选序号。
+        self.life(first, sequence=2, reason="arrest", health=100)
+        self.error(first, "unconfirmed_arrest")
+        self.assertEqual(self.entity(first.entity_id)["components"]["combat"]["health"], 140)
+        started = time.monotonic(); self.life(first, sequence=2, reason="dead", health=0)
         death = first.expect("death", lambda event: event.get("player_id") == first.player_id)
         dead = self.entity(first.entity_id)
         self.assertFalse(dead["components"]["combat"]["alive"])

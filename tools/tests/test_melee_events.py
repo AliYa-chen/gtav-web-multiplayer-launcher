@@ -18,7 +18,7 @@ class MeleeEventTests(world_tests.WorldV2Harness):
         client = super().client(name)
         if events:
             client.send({"type": "hello", "name": name,
-                         "capabilities": ["world_v2", "combat", "resume", "melee_events"]})
+                         "capabilities": ["world_v2", "combat", "resume", "melee_events", "world_environment", "shared_law"]})
             client.profile = client.expect("profile")
             self.read_snapshot(client)
             self.assertIn("melee_events", client.welcome["capabilities"])

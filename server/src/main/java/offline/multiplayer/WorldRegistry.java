@@ -377,9 +377,8 @@ public final class WorldRegistry {
     public synchronized Commit setCombatTrusted(String id, Combat combat, long expectedRevision, long nowTick) throws Rejection {
         tick(nowTick); Entity old=require(id); revision(old, expectedRevision);
         if (old.components.combat==null) throw reject("invalid_component", "实体没有战斗组件");
-        Components c=old.components;
-        Entity updated=updated(old, new Components(c.transform, c.ped, c.vehicle, c.object, Objects.requireNonNull(combat), c.attachment));
-        entities.put(id, updated); return commit(Change.UPDATE, List.of(updated), List.of());
+        // 单个生命候选也走战斗事务：死亡立即解除共享座位，不能保留四秒幽灵司机。
+        return setCombatBatchTrusted(Map.of(id,Objects.requireNonNull(combat)),nowTick);
     }
 
     /** 多实体战斗结果一次提交；规则模块先计算伤害和计分，不能分批产生半次击杀。 */
@@ -435,6 +434,19 @@ public final class WorldRegistry {
         Entity updated=owned(old, ownerId, leaseUntilTick);
         entities.put(id, updated); motion.put(id, new MotionBudget(nowTick, 2));
         return commit(Change.OWNER, List.of(updated), List.of());
+    }
+    /** 服务端撤销指定实体的仿真租约，保留最后确认姿态。 */
+    public synchronized Commit revokeOwnerTrusted(String id,long expectedRevision,long nowTick)throws Rejection{
+        tick(nowTick);Entity old=require(id);revision(old,expectedRevision);
+        Entity value=owned(old,null,0);entities.put(id,value);motion.put(id,new MotionBudget(nowTick,2));
+        return commit(Change.OWNER,List.of(value),List.of());
+    }
+
+    /** 规则关联移除后使实体描述重发；不允许客户端任意制造版本或改写组件。 */
+    public synchronized Commit touchTrusted(String id,long expectedRevision,long nowTick)throws Rejection{
+        tick(nowTick);Entity old=require(id);revision(old,expectedRevision);
+        Entity value=updated(old,old.components);entities.put(id,value);
+        return commit(Change.UPDATE,List.of(value),List.of());
     }
 
     /** 同一租约续期不改变 fencing epoch 和输入序号。 */
@@ -504,6 +516,14 @@ public final class WorldRegistry {
         Components c=ped.components;
         Entity passenger=updated(ped,new Components(vehicle.components.transform,c.ped,null,null,c.combat,new Attachment(vehicleId,seat)));
         entities.put(vehicleId,car);entities.put(pedId,passenger);return commit(Change.SEAT,List.of(car,passenger),List.of());
+    }
+    /** 共同事件只允许服务端释放NPC座位，不接受客户端自由解除附件。 */
+    public synchronized Commit releaseNpcSeatTrusted(String pedId,long nowTick)throws Rejection{
+        tick(nowTick);Entity ped=require(pedId);
+        if(ped.kind!=Kind.PED || ped.playerId!=null)throw reject("invalid_target","只能释放服务器NPC座位");
+        if(ped.components.attachment==null)return commit(Change.SEAT,List.of(),List.of());
+        Map<String,Entity> updates=new LinkedHashMap<>();detach(ped,updates,nowTick);updates.forEach(entities::put);
+        return commit(Change.SEAT,new ArrayList<>(updates.values()),List.of());
     }
 
     /** 断线立即撤销仿真所有权并释放该玩家座位；实体保留，不冒充服务器继续仿真。 */

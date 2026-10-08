@@ -87,7 +87,7 @@ def main():
             welcome = client.expect('welcome')
             assert 'world_v2' in welcome['capabilities'] and 'entity_batch' in welcome['capabilities']
             client.send({'type': 'hello', 'name': '持续验证' + str(index + 1),
-                         'capabilities': ['combat', 'resume', 'world_v2']})
+                         'capabilities': ['combat', 'resume', 'world_v2', 'world_environment', 'shared_law']})
             client.profile = client.expect('profile'); client.pending_snapshot = None
             client.entities = {}; client.epoch = None; client.stream_seq = 0
             client.seq = 0; client.inputs = {}; client.ready = set()

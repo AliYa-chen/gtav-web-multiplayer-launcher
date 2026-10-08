@@ -58,7 +58,8 @@ function harness() {
     mpSetCanRagdoll() {},
     mpDefaultVariation() {}, mpBlockEvents() {}, mpSetEngineHealth() {}, mpSetBodyHealth() {}, mpSetEngineOn() {},
     mpEngineRunning: () => 1, mpEngineHealth: handle => entities.get(handle).engine, mpBodyHealth: handle => entities.get(handle).body,
-    mpIsShooting: () => 0, mpTaskWander() {}, mpDriveWander() {},
+    mpIsShooting: handle => entities.get(handle).shooting ? 1 : 0, mpTaskWander() {}, mpDriveWander() {},
+    mpSetPedAsCop() {}, mpTaskCombatPed() {}, mpHasWeaponAsset: () => 1, mpRequestWeaponAsset() {}, mpGiveWeapon() {}, mpSetCurrentWeapon() {}, mpShootBullet() {},
     mpGetVehiclePedIsIn: handle => entities.get(handle).vehicle || 0,
     mpSetPedIntoVehicle: (handle, vehicle) => { entities.get(handle).vehicle = vehicle; },
     mpLeaveVehicle: handle => { entities.get(handle).vehicle = 0; },
@@ -260,4 +261,18 @@ test('统一人口只清理未登记随机实体，保护玩家、登记车与�
   h.bridge.update(state, 1200, 7);
   assert.ok(!h.entities.has(201)); assert.ok(!h.entities.has(202)); assert.ok(h.entities.has(203));
   for (const handle of [7, 8, vehicle, ped]) assert.ok(h.entities.has(handle));
+});
+
+test('共同警员仅模拟所有者执行服务器目标任务和上报射击，其他端不各自运行AI', () => {
+ const h=harness();
+ const response={response_id:'law:epoch1:1',role:'officer',target_player_id:'LOCAL',target_entity_id:'p1',target_generation:1,target_position:[711,-1088,22.4],owner_id:'LOCAL',phase:'active'};
+ const cop=npc({simulation_task:'police_pursuit',law_response:response,ownership:'active'});
+ const state=packet([player(),cop]);h.bridge.update(state,100,7);const handle=h.bridge.entityHandle('n1');
+ assert.ok(h.calls.some(c=>c.name==='mpTaskCombatPed'&&c.arguments[0]===handle&&c.arguments[1]===7));
+ h.entities.get(handle).shooting=true;h.bridge.update(state,200,7);
+ assert.ok(h.messages.some(m=>m.kind==='npc_shot'&&m.entity_id==='n1'&&m.target_entity_id==='p1'&&m.target_generation===1));
+ const count=h.messages.filter(m=>m.kind==='npc_shot').length;h.bridge.update(state,400,7);assert.equal(h.messages.filter(m=>m.kind==='npc_shot').length,count);
+ cop.owner_id='REMOTE';cop.owner_epoch=2;h.bridge.update(state,600,7);
+ const tasks=h.calls.filter(c=>c.name==='mpTaskCombatPed').length;h.bridge.update(state,4000,7);
+ assert.equal(h.calls.filter(c=>c.name==='mpTaskCombatPed').length,tasks);assert.ok(h.entities.get(handle).frozen);
 });

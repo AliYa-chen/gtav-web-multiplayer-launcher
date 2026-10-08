@@ -204,3 +204,40 @@ test('未确认世界事件不能因后续高频快照静默丢弃，老服务�
   legacy.session({ world_v2: false, melee_events: false });
   packet = legacy.packet(); assert.equal(packet.notices.filter((notice) => notice.text.includes('不支援近戰')).length, 1);
 });
+
+const environment = (changes = {}) => ({ revision: 1, weather: { type: 'CLEAR', rain: 0, wind: .2, transition_ms: 30000, anchor_tick: 100 },
+  clock: { hour: 12, minute: 0, second: 0, paused: false, rate: 30, anchor_tick: 100 }, ...changes });
+test('共同环境跟随完整快照原子安装，实体没有变化也可应用独立环境版本', async () => {
+  const { createWorldState } = await modulePromise; const world = createWorldState();
+  world.receive(begin({ environment: environment() })); world.receive(chunk([ped()]));
+  assert.equal(world.state().environment, null);
+  world.receive(end({ environment: environment() }));
+  assert.equal(world.state().environment.revision, 1); assert.equal(world.state().environment_server_tick, 100);
+  const next = environment({ revision: 2 });
+  assert.equal(world.receive(delta({ world_revision: 5, world_tick: 5100, environment: next })).changed, true);
+  assert.equal(world.state().world_revision, 5); assert.equal(world.state().environment.revision, 2);
+  assert.equal(world.state().environment_server_tick, 5100);
+  world.receive(delta({ stream_seq: 2, world_revision: 6, world_tick: 5200, environment: environment() }));
+  assert.equal(world.state().environment.revision, 2, '旧天气不能倒退');
+  assert.equal(world.state().environment_server_tick, 5100, '实体运动消息不能重新计算环境时间锚点');
+});
+test('非法环境、快照环境切面不同及序号缺口触发重取，不沿用另一世界天气', async () => {
+  const { createWorldState, cleanWorldEnvironment } = await modulePromise;
+  assert.equal(cleanWorldEnvironment(environment({ clock: { ...environment().clock, rate: 9999 } })), null);
+  const world = createWorldState();world.receive(begin({ environment: environment() }));world.receive(chunk([ped()]));
+  assert.equal(world.receive(end({ environment: environment({ revision: 2 }) })).needsSnapshot, true);
+  world.receive(end({ environment: environment() }));
+  assert.equal(world.receive(delta({ stream_seq: 2, environment: environment({ revision: 2 }) })).needsSnapshot, true);
+  assert.equal(world.state().ready, false);
+});
+
+test('执法规则独立版本更新NPC任务，不允许回滚实体姿态与生命', async () => {
+ const {createWorldState}=await modulePromise,world=createWorldState();
+ const law={revision:1,world_epoch:'epochA',players:[{player_id:'LOCAL',generation:1,stars:2,expires_at_tick:20000,last_crime_tick:100,revision:1}],dispatches:[]};
+ const officer=ped({player_id:null,task_revision:1,law_response:{response_id:'law:epochA:1',role:'officer',target_player_id:'LOCAL',target_entity_id:'w:epochA:9',target_generation:1,target_position:[711,-1088,22],owner_id:'LOCAL',phase:'active'}});
+ world.receive(begin({law}));world.receive(chunk([officer]));world.receive(end({law}));
+ const updated={...officer,task_revision:2,law_response:{...officer.law_response,target_position:[713,-1088,22]},components:{...officer.components,transform:transform(700)}};
+ assert.equal(world.receive(delta({world_revision:5,law:{...law,revision:2},entities:[updated]})).changed,true);
+ assert.equal(world.entity(officer.entity_id).task_revision,2);assert.equal(world.entity(officer.entity_id).components.transform.position[0],711.5);
+ assert.equal(world.entity(officer.entity_id).law_response.target_position[0],713);
+});

@@ -46,6 +46,38 @@ ADDITIONAL_EXPORTS = {
     "mpFree": (91002, "emscripten_builtin_free", ["i64"], []),
 }
 ENTITY_EXPORTS = {
+    # 共同世界的时钟/天气仅由服务器基线驱动；采用单机安全命令，不伪造网络会话。
+    # 服务端时钟先按 anchor_tick/rate 推算，再 PauseClock(true)+SetClockTime 应用。
+    # 天气字符串为本 tick 内有效的 NUL 结尾 UTF-8；客户端只接受已校验的天气枚举。
+    "mpSetClockTime": (49437, "clock_commands::CommandSetClockTime(int, int, int)", ["i32", "i32", "i32"], []),
+    "mpPauseClock": (49443, "clock_commands::CommandPauseClock(bool)", ["i32"], []),
+    "mpWeatherPersist": (52794, "misc_commands::CommandSetWeatherTypeNowPersist(char const*)", ["i64"], []),
+    # duration 为秒；同一天气段只设置一次，重复调用会从当前状态重新开始过渡。
+    "mpWeatherOvertime": (52796, "misc_commands::CommandSetWeatherTypeOvertimePersist(char const*, float)", ["i64", "f32"], []),
+    "mpClearOverrideWeather": (52803, "misc_commands::CommandClearOverrideWeather()", [], []),
+    "mpRain": (52824, "misc_commands::CommandSetRain(float)", ["f32"], []),
+    "mpWind": (52820, "misc_commands::CommandSetWindSpeed(float)", ["f32"], []),
+    # 禁止各客户端独立派出警察/救护等实体；真实警员由服务器实体与 AI 租约管理。
+    # DispatchType 仅用经校验的 1..15，不调用内部 CDispatchService* 或重写其指针。
+    "mpDispatchService": (52957, "misc_commands::CommandEnableDispatchService(int, bool)", ["i32", "i32"], []),
+    "mpRandomCops": (57371, "ped_commands::CommandSetCreateRandomCops(bool)", ["i32"], []),
+    "mpRandomCopsNotScenarios": (57372, "ped_commands::CommandSetCreateRandomCopsNotOnScenarios(bool)", ["i32"], []),
+    "mpRandomCopsScenarios": (57373, "ped_commands::CommandSetCreateRandomCopsOnScenarios(bool)", ["i32"], []),
+    # 星级是服务器 law 的显示投影；本地升星可报告，但客户端不能裁决共同通缉状态。
+    # player index 来自 mpPlayerId；当前适配层仍保留真实单机 network flag，因此为 0。
+    "mpWantedLevel": (58655, "player_commands::CommandGetPlayerWantedLevel(int)", ["i32"], ["i32"]),
+    "mpSetWantedLevel": (58638, "player_commands::CommandAlterWantedLevel(int, int, bool)", ["i32", "i32", "i32"], []),
+    "mpSetWantedNow": (58640, "player_commands::CommandApplyWantedLevelChangeNow(int, bool)", ["i32", "i32"], []),
+    "mpClearWanted": (58646, "player_commands::CommandClearWantedLevel(int)", ["i32"], []),
+    "mpSuppressWitnesses": (58680, "player_commands::CommandSuppressWitnessesCallingPoliceThisFrame(int)", ["i32"], []),
+    # 仅服务器分配的当前模拟者可对已验证且仍存在的真实 NPC 句柄创建任务。
+    # Combat 会产生真实本地 AI/物理伤害，不能用于远端玩家表现副本；伤害仍需服务器裁决。
+    "mpTaskCombatPed": (60593, "task_commands::CommandTaskCombat(int, int, int, int)", ["i32", "i32", "i32", "i32"], []),
+    "mpSetPedAsCop": (57350, "ped_commands::CommandSetPedAsCop(int, bool)", ["i32", "i32"], []),
+    # AI 实弹/近战仅表现，由服务器裁决一次扣血；0 是合法值，原生实现直接写 f32。
+    # 命令本身不校验 NaN 或负值，公共世界适配层只传常量 0；不影响玩家武器 modifier。
+    "mpAIWeaponDamage": (57226, "ped_commands::SetAiWeaponDamageModifier(float)", ["f32"], []),
+    "mpAIMeleeDamage": (57228, "ped_commands::SetAiMeleeWeaponDamageModifier(float)", ["f32"], []),
     "mpCachedMeleeInputs": (41719, "CPlayerInfo::GetCachedMeleeInputs(bool&, bool&)", ["i64", "i64"], []),
     "mpCreateVehicle": (61266, "vehicle_commands::CommandCreateVehicle(int, rage::scrVector const&, float, bool, bool, bool)", ["i32", "i64", "f32", "i32", "i32", "i32"], ["i32"]),
     "mpDeleteVehicle": (61267, "vehicle_commands::CommandDeleteVehicle(int&)", ["i64"], []),

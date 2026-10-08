@@ -7,6 +7,7 @@ import hashlib
 import os
 from pathlib import Path
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -21,7 +22,7 @@ from build_native_probe import (
     PUBLIC_MODEL_WRAPPER, build, checked_audit, export_map,
     FRONTEND_FUNCTION, FRONTEND_TAIL, FRONTEND_MAGIC,
 )
-from inspect_native_bridge import WasmAudit
+from inspect_native_bridge import Reader, WasmAudit
 
 
 class PublicEnginePatchTests(unittest.TestCase):
@@ -734,6 +735,145 @@ class PublicEnginePatchTests(unittest.TestCase):
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "compiled")
+
+
+class WorldPolicyNativeStaticTests(unittest.TestCase):
+    """只读 ABI/指令审计；单独运行本类不会生成或编译任何 WASM。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.original = checked_audit(DEFAULT_WASM, True, True)
+
+    def calls(self, index):
+        decoded = self.original.instructions(index)
+        self.assertTrue(decoded["decode_complete"], self.original.names[index])
+        return [item["target"]["function_index"] for item in decoded["instructions"]
+                if item["operation"] == "call"]
+
+    def test_environment_and_law_interfaces_match_real_native_abis(self):
+        expected = {
+            "mpSetClockTime": (49437, "clock_commands::CommandSetClockTime(int, int, int)", ["i32", "i32", "i32"], []),
+            "mpPauseClock": (49443, "clock_commands::CommandPauseClock(bool)", ["i32"], []),
+            "mpWeatherPersist": (52794, "misc_commands::CommandSetWeatherTypeNowPersist(char const*)", ["i64"], []),
+            "mpWeatherOvertime": (52796, "misc_commands::CommandSetWeatherTypeOvertimePersist(char const*, float)", ["i64", "f32"], []),
+            "mpClearOverrideWeather": (52803, "misc_commands::CommandClearOverrideWeather()", [], []),
+            "mpRain": (52824, "misc_commands::CommandSetRain(float)", ["f32"], []),
+            "mpWind": (52820, "misc_commands::CommandSetWindSpeed(float)", ["f32"], []),
+            "mpDispatchService": (52957, "misc_commands::CommandEnableDispatchService(int, bool)", ["i32", "i32"], []),
+            "mpRandomCops": (57371, "ped_commands::CommandSetCreateRandomCops(bool)", ["i32"], []),
+            "mpRandomCopsNotScenarios": (57372, "ped_commands::CommandSetCreateRandomCopsNotOnScenarios(bool)", ["i32"], []),
+            "mpRandomCopsScenarios": (57373, "ped_commands::CommandSetCreateRandomCopsOnScenarios(bool)", ["i32"], []),
+            "mpWantedLevel": (58655, "player_commands::CommandGetPlayerWantedLevel(int)", ["i32"], ["i32"]),
+            "mpSetWantedLevel": (58638, "player_commands::CommandAlterWantedLevel(int, int, bool)", ["i32", "i32", "i32"], []),
+            "mpSetWantedNow": (58640, "player_commands::CommandApplyWantedLevelChangeNow(int, bool)", ["i32", "i32"], []),
+            "mpClearWanted": (58646, "player_commands::CommandClearWantedLevel(int)", ["i32"], []),
+            "mpSuppressWitnesses": (58680, "player_commands::CommandSuppressWitnessesCallingPoliceThisFrame(int)", ["i32"], []),
+            "mpTaskCombatPed": (60593, "task_commands::CommandTaskCombat(int, int, int, int)", ["i32", "i32", "i32", "i32"], []),
+            "mpSetPedAsCop": (57350, "ped_commands::CommandSetPedAsCop(int, bool)", ["i32", "i32"], []),
+            "mpAIWeaponDamage": (57226, "ped_commands::SetAiWeaponDamageModifier(float)", ["f32"], []),
+            "mpAIMeleeDamage": (57228, "ped_commands::SetAiMeleeWeaponDamageModifier(float)", ["f32"], []),
+        }
+        for name, specification in expected.items():
+            with self.subTest(export=name):
+                self.assertEqual(export_map(True)[name], specification)
+                index, native_name, parameters, results = specification
+                descriptor = self.original.descriptor(index)
+                self.assertEqual(descriptor["name"], native_name)
+                self.assertEqual(descriptor["signature"], {"parameters": parameters, "results": results})
+                self.assertNotIn(name, export_map(False), "只读探针不能获得世界写接口")
+
+    def test_clock_and_weather_use_ordinary_commands_without_network_spoof(self):
+        self.assertIn(37676, self.calls(49437), "时钟通过 CClock::SetTime 应用")
+        self.assertNotIn(82905, self.calls(49437), "不能借用真实网络 ClockOverrideData")
+        pause = self.original.instructions(49443)["instructions"]
+        self.assertTrue(any(item["operation"] == "i64.const" and item["value"] == 19617753 for item in pause))
+        self.assertTrue(any(item["operation"] == "i32.store8" for item in pause))
+        self.assertEqual(self.calls(52794), [37934, 37945])
+        weather = self.original.instructions(52794)["instructions"]
+        self.assertTrue(any(item["operation"] == "i32.lt_s" for item in weather), "无效天气名称应先拒绝")
+        self.assertTrue(any(item["operation"] == "i32.ge_s" for item in weather), "枚举超出已加载天气列表应先拒绝")
+        self.assertIn(37944, self.calls(52803))
+        self.assertIn(37934, self.calls(52796), "过渡先查找真实天气类型")
+        self.assertEqual(self.calls(52796)[-1], 37947)
+        transition = self.original.instructions(52796)["instructions"]
+        self.assertTrue(any(item["operation"] == "i32.lt_s" for item in transition))
+        self.assertTrue(any(item["operation"] == "i32.ge_s" for item in transition))
+        transition_engine = self.original.instructions(37947)["instructions"]
+        self.assertTrue(any(item["operation"] == "f32.const" and item["value"] == 1000 for item in transition_engine),
+                        "原生 float 秒数转换为引擎毫秒，调用方不能直接传 transition_ms")
+        for index in (49437, 49443, 52794, 52796, 52803, 52820, 52824):
+            self.assertNotIn(59322, self.calls(index), "世界覆盖不得终止活动脚本")
+
+    def test_dispatch_controls_route_to_population_and_manager_without_private_pointers(self):
+        self.assertEqual(self.calls(52957), [38191])
+        self.assertEqual(self.calls(57371), [41474, 41475])
+        self.assertEqual(self.calls(57372), [41474])
+        self.assertEqual(self.calls(57373), [41475])
+        dispatch = self.original.instructions(52957)["instructions"]
+        self.assertEqual([item["operation"] for item in dispatch[:4]], ["local.get", "i32.const", "i32.le_u", "if"])
+        self.assertEqual(dispatch[1]["value"], 16, "原生命令仍保留 dispatch 类型边界判断")
+
+    def test_law_task_uses_real_guids_and_scripted_task_owner(self):
+        task_calls = self.calls(60593)
+        self.assertEqual(task_calls.count(8693), 2, "NPC 与目标均解析真实 guid，而非伪造对象地址")
+        self.assertIn(66157, task_calls, "沿用原引擎 ThreatResponse 任务")
+        self.assertEqual(task_calls[-1], 63902, "任务仍经 GivePedScriptedTask 绑定有效 handler")
+        self.assertIn(8693, self.calls(57350))
+        self.assertIn(45844, self.calls(57350))
+        self.assertEqual(self.calls(58655), [63816])
+        lookup = self.original.instructions(63816)["instructions"]
+        self.assertTrue(any(item["operation"] == "i64.const" and item["value"] == 28501281 for item in lookup),
+                        "本地/真实网络玩家解析沿用原 flag，不改写会话状态")
+        self.assertTrue(any(item["operation"] == "i64.const" and item["value"] == 20159720 for item in lookup),
+                        "未建立原网络会话时仍有真实本地 player 0 回退")
+        names = [item[1] for item in export_map(True).values()]
+        self.assertFalse(any("Terminate" in name and "Script" in name for name in names),
+                         "不得 blanket 结束单机脚本而清理共享实体与客户端生命周期")
+
+    def test_zero_ai_weapon_damage_is_accepted_without_affecting_player_modifier(self):
+        for native, address in ((57226, 19453620), (57228, 19453616)):
+            instructions = self.original.instructions(native)["instructions"]
+            self.assertEqual([item["operation"] for item in instructions], ["i64.const", "local.get", "f32.store", "end"])
+            self.assertEqual(instructions[0]["value"], address)
+            self.assertEqual(instructions[1]["index"], 0, "常量 0 直接写入 AI damage modifier，无正数下界")
+        damage = self.original.instructions(82063)
+        self.assertTrue(damage["decode_complete"])
+        instructions = damage["instructions"]
+        player_modifier = next(index for index, item in enumerate(instructions)
+                               if item["operation"] == "call" and item["target"]["function_index"] == 41726)
+        ai_modifier = next(index for index, item in enumerate(instructions)
+                           if item["operation"] == "i64.const" and item["value"] == 19453616)
+        self.assertLess(player_modifier, ai_modifier)
+        self.assertTrue(any(item["operation"] == "br" and item["index"] == 2
+                            for item in instructions[player_modifier + 1:ai_modifier]),
+                        "玩家 melee modifier 分支跳过全局 AI modifier，不替换玩家伤害规则")
+        self.assertEqual([item["operation"] for item in instructions[ai_modifier:ai_modifier + 7]],
+                         ["i64.const", "i64.const", "local.get", "select", "f32.load", "f32.mul", "local.set"])
+
+    def test_native_wind_speed_normalizer_is_twelve(self):
+        instructions = self.original.instructions(52820)["instructions"]
+        self.assertEqual([item["operation"] for item in instructions[:6]],
+                         ["i64.const", "local.get", "i64.const", "f32.load", "f32.div", "local.tee"])
+        address = instructions[2]["value"]
+        self.assertEqual(address, 5160336)
+        start, end = self.original.sections[11]
+        reader = Reader(self.original.data, start, end)
+        segments = []
+        for _ in range(reader.leb()):
+            self.assertEqual(reader.leb(), 1, "本版本使用被动数据段，由 init_memory 写入")
+            segments.append(reader.take(reader.leb()))
+        initialization = self.original.instructions(88)
+        self.assertTrue(initialization["decode_complete"])
+        operations = initialization["instructions"]
+        found = []
+        for index, item in enumerate(operations):
+            if item["operation"] != "opcode_fc" or item.get("sub_opcode") != 8:
+                continue
+            destination, source, length = [previous["value"] for previous in operations[index - 3:index]]
+            if destination <= address < destination + length:
+                segment = segments[item["indices"][0]]
+                found.append(struct.unpack_from("<f", segment, source + address - destination)[0])
+        self.assertEqual(found, [12.0], "服务器归一化风量 0..1 应乘 12 转换为原生 speed")
 
 
 if __name__ == "__main__":

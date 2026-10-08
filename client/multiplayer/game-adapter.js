@@ -11,6 +11,7 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
   let combat = [];
   let world = null;
   let worldEvents = [], nextWorldEventId = 0;
+  let worldShots = [], nextWorldShotId = 0;
   const seenWorldEvents = new Set();
   let oldServerNotice = false;
   const combatById = new Map();
@@ -116,7 +117,7 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
     timer = 0;
     if (!shared || closed) return;
     const packet = { ...session, peers: [...peers.values()], shots, combat, controls, notices, world, world_events: worldEvents,
-      remote_config: remoteConfig };
+      remote_config: remoteConfig, world_shots: worldShots };
     const bytes = new TextEncoder().encode(JSON.stringify(packet));
     if (bytes.length > shared.capacity) return;
     const header = new Int32Array(shared.memory.buffer, shared.block, 4);
@@ -148,10 +149,18 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
       combatFeedback(data);
       return;
     } else if (data.type === 'world_state_v2') {
-      if (world?.world_epoch && world.world_epoch !== data.world_epoch) { worldEvents = []; seenWorldEvents.clear(); }
+      if (world?.world_epoch && world.world_epoch !== data.world_epoch) { worldEvents = []; worldShots = []; seenWorldEvents.clear(); }
       world = { schema_version: 2, world_epoch: data.world_epoch, world_revision: data.world_revision,
         world_tick: data.world_tick, stream_seq: data.stream_seq, ready: data.ready === true,
+        environment: data.environment || null, environment_received_at: data.environment_received_at || 0,
+        environment_received_at_epoch: data.environment_received_at_epoch || 0,
+        environment_server_tick: data.environment_server_tick || 0,
+        law: data.law || null,
         entities: Array.isArray(data.entities) ? data.entities : [], tombstones: Array.isArray(data.tombstones) ? data.tombstones : [] };
+    } else if (data.type === 'world_shot_event') {
+      if (!world || data.world_epoch !== world.world_epoch || !data.event_id || seenWorldEvents.has(data.event_id)) return;
+      seenWorldEvents.add(data.event_id); worldShots.push({ id: ++nextWorldShotId, event: data });
+      if (worldShots.length > 32) worldShots.shift();
     } else if (data.type === 'melee_event') {
       if (!world || data.world_epoch !== world.world_epoch || !data.event_id || seenWorldEvents.has(data.event_id)) return;
       seenWorldEvents.add(data.event_id);
@@ -185,7 +194,7 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
       for (const id of peers.keys()) if (!members.has(id)) peers.delete(id);
       for (const id of combatById.keys()) if (!members.has(id)) combatById.delete(id);
       for (const peer of data.peers || []) mergePeer(peer);
-      if (!session.connected) { shots = []; controls = []; world = null; worldEvents = []; seenWorldEvents.clear(); }
+      if (!session.connected) { shots = []; controls = []; world = null; worldEvents = []; worldShots = []; seenWorldEvents.clear(); }
       for (const value of data.combat || []) mergeCombat(value);
       combat = [...combatById.values()];
     } else if (data.type === 'combat_state' && Array.isArray(data.players)) {
@@ -229,6 +238,8 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
       const consumed = new Set(message.ids);
       worldEvents = worldEvents.filter((entry) => !consumed.has(entry.id));
       schedule();
+    } else if (message.type === 'world_shot_ack' && Array.isArray(message.ids)) {
+      const consumed = new Set(message.ids); worldShots = worldShots.filter(entry => !consumed.has(entry.id)); schedule();
     } else if (message.type === 'notice_ack' && Array.isArray(message.ids)) {
       const consumed = new Set(message.ids);
       notices = notices.filter((notice) => !consumed.has(notice.id));
@@ -271,6 +282,8 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
       reportStatus({ phase: 'world_readiness', ...message });
     } else if (message.type === 'shot_visual') {
       reportStatus({ phase: 'shot_visual', ...message });
+    } else if (message.type === 'world_environment_status') {
+      reportStatus({ phase: 'world_environment', ...message });
     } else if (message.type === 'world_entity_status') {
       reportStatus({ phase: 'world_entity', entity_id: message.entity_id,
         kind: message.kind, state: message.phase });
