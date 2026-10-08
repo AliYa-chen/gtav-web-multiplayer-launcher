@@ -1,4 +1,5 @@
 """生成可脱离游戏资源独立部署的公共战局服务端压缩包。"""
+import argparse
 import hashlib
 import json
 import re
@@ -12,20 +13,34 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def main():
-    subprocess.run([sys.executable, '-B', str(ROOT / 'tools/build_multiplayer_server.py')], check=True)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--skip-build', action='store_true', help='复用现有 JAR，不重新编译；封包前核对 JAR 与源码版本')
+    parser.add_argument('--java', default='java', help='验证现有 JAR 版本使用的 Java 路径')
+    args = parser.parse_args()
+    if not args.skip_build:
+        subprocess.run([sys.executable, '-B', str(ROOT / 'tools/build_multiplayer_server.py')], check=True)
     source = ROOT / 'server'
     main_source = (source / 'src/main/java/offline/multiplayer/Main.java').read_text(encoding='utf-8')
     version = re.search(r'private static final String VERSION = "([^"]+)";', main_source)
     if not version:
         raise ValueError('无法读取当前服务端版本，拒绝生成错误的部署清单')
+    jar = source / 'multiplayer-server.jar'
+    if not jar.is_file():
+        parser.error('未找到 server/multiplayer-server.jar，请先构建服务端')
+    result = subprocess.run([args.java, '-jar', str(jar), '--help'], capture_output=True,
+                            text=True, encoding='utf-8', timeout=20, check=True)
+    jar_version = re.search(r'^GTA V 沙盒公共战局服务 ([^\s（]+)', result.stdout, re.MULTILINE)
+    if not jar_version or jar_version.group(1) != version.group(1):
+        parser.error('现有 JAR 版本与源码不一致，拒绝生成部署包；请先构建当前服务端')
     files = [source / name for name in ['multiplayer-server.jar', 'README.md', 'Start-Server.cmd',
                                        'Start-Server.command', 'Start-Server.sh']]
     files += sorted((source / 'src').rglob('*.java'))
     manifest = {
-        'version': version.group(1), 'protocol': 1, 'java_minimum': 17,
+        'version': version.group(1), 'protocol': 1, 'world_protocol': 2,
+        'launcher_minimum': '0.2.0', 'java_minimum': 17,
         'public_session': 'PUBLIC', 'map': 'gta5', 'mode': 'sandbox',
         'game_resources_required': False,
-        'validation': '公共战局、角色状态与射击事件传输通过测试；真实游戏角色同步仍为实验版。',
+        'validation': '统一世界、共同环境、共享执法及车辆协议回归通过；实际游戏及八人持续玩法仍需验收。',
         'files': [],
     }
     bodies = {}

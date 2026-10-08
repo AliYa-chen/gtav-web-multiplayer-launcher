@@ -17,11 +17,11 @@ AI 枪械本地扣血被抑制，服务端确认活动警员报告后统一提�
 
 本版将 `WorldRegistry` 作为玩家、车辆与 NPC 的唯一实体事实；`CombatWorld` 保留输入序号、移动预算和枪械冷却，规则结果直接提交到注册表，旧 v1 消息也从同一状态产生。已删除广播后的独立玩家镜像。服务端仍是轻量 Java 协调器，NPC AI、道路选择、车辆物理和环境损伤来自指定 GTA 客户端的受限候选，服务器没有 RAGE 物理运行时或地图碰撞。
 
-当前开发测试版最多八位玩家，公网 47485 和 47486 均已更新 0.3.1，原构建仍保留备份。独立部署可使用 47486 等测试端口。实际游戏内的车辆、NPC 和生命事件需两台 GTA 客户端继续验证，协议测试不能代替这项验收。`game_sync: false` 和 `native_clone_transport: false` 保留；`shared_population` 表示已有统一人口实体登记，不能据此认定原 GTA Online 网络层或完整 AI 已实现。
+当前开发测试版最多八位玩家，公网 47485 和 47486 均已更新 0.3.2，原构建仍保留备份。客户端需要启动器 0.2.0 或更新版本。独立部署可使用 47486 等测试端口。实际游戏内的车辆、NPC 和生命事件需两台 GTA 客户端继续验证，协议测试不能代替这项验收。`game_sync: false` 和 `native_clone_transport: false` 保留；`shared_population` 表示已有统一人口实体登记，不能据此认定原 GTA Online 网络层或完整 AI 已实现。
 
 所有玩家连接同一台服务器后，输入昵称就会自动进入唯一的 `PUBLIC` 公共战局。战局常驻，即使没有玩家也保留；无需创建房间、输入房间码、准备或等待房主开始。地图固定为 GTA V，游戏使用沙盒模式。
 
-服务端已经实现 WebSocket 连接、成员与聊天、角色状态和射击事件转发、新玩家状态快照及断线清理。新增服务端权威普通枪械伤害、击杀计分、四秒重生和六十秒身份恢复。真实游戏中的实体桥仍在试验验证，载具同步尚未实现。健康接口的 `game_sync: false` 表示真实游戏同步尚未完成稳定验证，`state_transport: true` 表示状态转发接口已经提供。
+服务端已经实现 WebSocket 连接、成员与聊天、角色状态和射击事件转发、新玩家状态快照及断线清理，并统一普通枪械／拳击伤害、击杀计分、四秒重生和六十秒身份恢复。已接入共享车辆姿态、驾驶权和座位，以及共同天气、时钟与执法规则。真实游戏中的实体桥仍需验收。健康接口的 `game_sync: false` 表示真实游戏同步尚未完成稳定验证，`state_transport: true` 表示状态转发接口已经提供。
 
 本服务使用自有协议，与原 GTA Online 的身份、会话及网络包协议不同。项目保留原网络代码，但其浏览器适配存在空实现；不能把本 JAR 当成兼容原 GTA Online 的私服。具体证据见完整项目的 `docs/原线上模式审计.md`。
 
@@ -227,6 +227,14 @@ python3 tools/build_multiplayer_server.py
 ```
 
 构建使用 JDK 的 `javac --release 17` 编译，由标准 ZIP 格式封装可执行 JAR，不需要 Maven 或 Gradle。运行已经构建的 JAR 只需要 Java 17+。
+
+已有验证或部署的 JAR 可以直接封包，不重新编译：
+
+```sh
+python3 -B tools/build_server_bundle.py --skip-build
+```
+
+工具核对 `java -jar server/multiplayer-server.jar --help` 版本与源码一致后输出 `archive/packages/`，逐文件校验 SHA-256。包内 `VERSION.json` 记录基础协议 1、世界协议 2、最低启动器 0.2.0 和 Java 17 要求。
 
 完整项目中的测试位于 `tools/tests/test_multiplayer.py`：
 
