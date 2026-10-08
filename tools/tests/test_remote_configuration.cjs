@@ -52,7 +52,7 @@ test('定时请求失败立即清除上次文案，恢复联网后重新读取',
    assert.equal(changes.at(-1).oltitle,expected);
   }
   assert.equal(requests.length,6);
-  assert.ok(requests.every(({url,options})=>url==='/api/remote-config' && options.cache==='no-store'));
+  assert.ok(requests.every(({url,options})=>url==='/api/remote-config?refresh=1' && options.cache==='no-store'));
   stop();assert.equal(scheduled.size,0);
  }finally{
   stop?.();Object.assign(global,originals);

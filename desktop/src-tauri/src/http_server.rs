@@ -245,8 +245,16 @@ fn handle(request: Request, state: &State) {
         return reply(request, 200, serde_json::to_vec(&body).unwrap(), "application/json; charset=utf-8", &[]);
     }
     if path == "/api/remote-config" {
-        let body = state.config.remote_configuration.read().map(|value| value.clone())
-            .unwrap_or_else(|_| json!({ "config": {}, "source": "unavailable", "stale": true }));
+        let refresh = url::form_urlencoded::parse(query.as_bytes())
+            .any(|(name, value)| name == "refresh" && value == "1");
+        let body = if refresh {
+            let value = serde_json::to_value(crate::remote_config::load()).unwrap_or_default();
+            if let Ok(mut snapshot) = state.config.remote_configuration.write() { *snapshot = value.clone(); }
+            value
+        } else {
+            state.config.remote_configuration.read().map(|value| value.clone())
+                .unwrap_or_else(|_| json!({ "config": {}, "source": "unavailable", "stale": true }))
+        };
         return reply(request, 200, serde_json::to_vec(&body).unwrap(), "application/json; charset=utf-8", &[]);
     }
     let client_path = if path == "/" || path == "/play" { "/index.html" } else { &path };

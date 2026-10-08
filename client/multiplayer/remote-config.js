@@ -18,9 +18,9 @@ export function watchOnlineConfiguration(onChange) {
   let closed = false, timer = 0, controller = null;
   async function update() {
     controller = new AbortController();
-    const abort = setTimeout(() => controller?.abort(), 4000);
+    const abort = setTimeout(() => controller?.abort(), 9000);
     try {
-      const response = await fetch('/api/remote-config', { cache: 'no-store', signal: controller.signal });
+      const response = await fetch('/api/remote-config?refresh=1', { cache: 'no-store', signal: controller.signal });
       if (!response.ok) throw new Error('远程配置响应失败');
       const snapshot = await response.json();
       if (!closed) onChange(cleanOnlineConfiguration(snapshot));

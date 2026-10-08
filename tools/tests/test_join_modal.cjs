@@ -15,6 +15,11 @@ const source = fs.readFileSync(path.join(root, 'client/multiplayer/join-modal.js
 const copy = (value) => JSON.parse(JSON.stringify(value));
 const panelKey = 'gta5.public.preferences', sessionKey = 'gta5.public.session', pendingKey = 'gta5.public.pending-join';
 const preferences = (extras = {}) => ({ name: '玩家甲', server: '183.66.27.21:47485', preset: 'npc_male', ...extras });
+const remoteSnapshot = (servers) => ({ config: { servers }, source: 'remote', stale: false });
+const remoteLines = () => [
+  { id: 'experimental', name: '实验战局', role: '实验线路', address: '183.66.27.21:47486' },
+  { id: 'main', name: '公共战局', role: '主线路', address: 'wss://main.example:443/public' },
+];
 
 function storage(initial = {}) {
   const values = new Map(Object.entries(initial));
@@ -32,7 +37,7 @@ async function harness(options = {}) {
     preventDefault() { this.defaultPrevented = true; }
   }
   class Element {
-    constructor() { this.listeners = new Map(); this.value = ''; this.hidden = false; this.isConnected = true; }
+    constructor() { this.listeners = new Map(); this.children = []; this.value = ''; this.textContent = ''; this.hidden = false; this.isConnected = true; }
     addEventListener(type, callback) {
       if (!this.listeners.has(type)) this.listeners.set(type, []);
       this.listeners.get(type).push(callback);
@@ -44,34 +49,39 @@ async function harness(options = {}) {
     }
     focus() { document.activeElement = this; }
     select() { this.selected = true; }
+    append(...children) { this.children.push(...children); }
+    replaceChildren(...children) { this.children = [...children]; }
   }
   const fields = { nickname: new Element(), server: new Element(), preset: new Element() };
   const form = new Element(), message = new Element(), close = new Element(), submit = new Element();
+  const serverList = new Element(), serverHint = new Element();
   form.elements = { namedItem: (name) => fields[name] };
   const overlay = new Element();
   overlay.querySelector = (selector) => ({ form, '.online-join__message': message, '.online-join__close': close,
-    '.online-join__submit': submit })[selector];
+    '.online-join__submit': submit, '#online-join-server-options': serverList,
+    '#online-join-server-hint': serverHint })[selector];
   overlay.querySelectorAll = () => [close, fields.nickname, fields.server, fields.preset, submit];
   const document = { activeElement: null, body: { append: (element) => assert.equal(element, overlay) },
-    createElement: () => overlay, exitPointerLock: () => {} };
+    createElement: (tag) => tag === 'div' ? overlay : new Element(), exitPointerLock: () => {} };
   const href = options.href || 'http://localhost:8010/';
   const context = vm.createContext({ ...address, document, Event, URL, URLSearchParams,
     location: { href, search: new URL(href).search }, localStorage, sessionStorage, AbortController,
     crypto: { getRandomValues: (array) => { array[0] = 123456; return array; } }, Uint32Array,
     setTimeout: (callback, delay) => { timers.set(++timerId, { callback, delay }); return timerId; },
     clearTimeout: (id) => timers.delete(id),
-    fetch: options.fetch || (async () => ({ ok: true, json: async () => options.config || null })),
+    fetch: options.fetch || (async (url) => ({ ok: true, json: async () => url.startsWith('/api/remote-config')
+      ? options.remoteConfig || null : options.config || null })),
   });
   if (options.localStorageDenied) {
     vm.runInContext("Object.defineProperty(globalThis, 'localStorage', { get() { throw new Error('SecurityError'); } });", context);
   }
-  vm.runInContext(source + '\nglobalThis.module = { readPublicPreferences, readPanelPreferences, savePanelPreferences, consumePublicEntryIntent, installJoinModal };',
+  vm.runInContext(source + '\nglobalThis.module = { cleanJoinServerOptions, readPublicPreferences, readPanelPreferences, savePanelPreferences, consumePublicEntryIntent, installJoinModal };',
     context, { filename: 'join-modal.js' });
   const api = context.module;
   const modal = options.install === false ? null : api.installJoinModal({ onJoin: (value) => joined.push(copy(value)) });
   async function settle() { for (let index = 0; index < 8; index++) await Promise.resolve(); }
   await settle();
-  return { api, context, modal, overlay, fields, form, message, submitButton: submit, localStorage, sessionStorage, joined, settle,
+  return { api, context, modal, overlay, fields, form, message, serverList, serverHint, submitButton: submit, localStorage, sessionStorage, joined, settle,
     input: (name, value) => { fields[name].value = value; fields[name].dispatchEvent(new Event(name === 'preset' ? 'change' : 'input')); },
     blur: () => fields.server.dispatchEvent(new Event('blur')),
     submit: () => form.dispatchEvent(new Event('submit')) };
@@ -313,4 +323,104 @@ test('无法读取或移除新加入标记时安全回落重连意图，不抛�
   assert.equal(page.api.consumePublicEntryIntent('navigate', {
     getItem: () => '1', removeItem() { throw new Error('SecurityError'); },
   }), true);
+});
+
+test('打开加入面板读取两条远程线路并优先主线路，选择后保留安全连接与路径', async () => {
+  const requests = [];
+  const page = await harness({ fetch: async (url, options) => {
+    requests.push({ url, options });
+    return { ok: true, json: async () => url.startsWith('/api/remote-config') ? remoteSnapshot(remoteLines()) : { multiplayer_ready: true } };
+  } });
+  assert.equal(requests.filter((item) => item.url.startsWith('/api/remote-config')).length, 0, '未打开面板不额外请求线路');
+  page.modal.open();await page.settle();
+  assert.match(page.overlay.innerHTML, /list="online-join-server-options"/);
+  assert.equal(page.serverList.children.length, 2);
+  assert.equal(page.serverList.children[0].label, '实验战局 · 实验线路 · 183.66.27.21:47486');
+  assert.equal(page.fields.server.value, 'main.example:443');
+  const remoteRequest = requests.find((item) => item.url.startsWith('/api/remote-config'));
+  assert.equal(remoteRequest.url, '/api/remote-config?refresh=1');
+  assert.equal(remoteRequest.options.cache, 'no-store');
+  page.input('server', '183.66.27.21:47486');page.submit();
+  assert.equal(page.joined[0].server, 'ws://183.66.27.21:47486/ws');
+  page.input('server', 'main.example:443');page.blur();page.submit();
+  assert.equal(page.joined[1].server, 'wss://main.example/public');
+  assert.equal(page.localStorage.getItem('gta5.remote.config'), null, '远程线路不保存为本地配置');
+});
+
+test('远程线路列表不覆盖已保存或 URL 指定的自定义服务器', async () => {
+  for (const options of [
+    { localStorage: storage({ [panelKey]: JSON.stringify(preferences({ server: 'wss://saved.example/custom' })) }), expected: 'saved.example:443' },
+    { sessionStorage: storage({ [sessionKey]: JSON.stringify({ ...preferences({ server: '192.168.31.2:48888' }), seed: 1 }) }), expected: '192.168.31.2:48888' },
+    { href: 'http://localhost:8010/?server=192.168.31.3%3A48888', expected: '192.168.31.3:48888' },
+  ]) {
+    const page = await harness({ ...options, remoteConfig: remoteSnapshot(remoteLines()) });
+    page.modal.open();await page.settle();
+    assert.equal(page.serverList.children.length, 2);
+    assert.equal(page.fields.server.value, options.expected);
+  }
+});
+
+test('远程响应晚到不能覆盖用户正在输入的手动服务器', async () => {
+  let finish;
+  const delayed = new Promise((resolve) => { finish = resolve; });
+  const page = await harness({ fetch: (url) => url.startsWith('/api/remote-config') ? delayed
+    : Promise.resolve({ ok: true, json: async () => ({ multiplayer_ready: true }) }) });
+  page.modal.open();
+  page.input('server', '192.168.31.20:49999');
+  finish({ ok: true, json: async () => remoteSnapshot(remoteLines()) });await page.settle();
+  assert.equal(page.serverList.children.length, 2);
+  assert.equal(page.fields.server.value, '192.168.31.20:49999');
+  page.submit();assert.equal(page.joined[0].server, 'ws://192.168.31.20:49999/ws');
+});
+
+test('线路请求失败清空旧选项，重新打开重新联网，失败不阻止手动加入', async () => {
+  let calls = 0;
+  const page = await harness({ fetch: async (url) => {
+    if (!url.startsWith('/api/remote-config')) return { ok: true, json: async () => ({ multiplayer_ready: true }) };
+    if (++calls === 2) throw new Error('网络不可用');
+    return { ok: true, json: async () => remoteSnapshot(remoteLines()) };
+  } });
+  page.modal.open();await page.settle();assert.equal(page.serverList.children.length, 2);
+  page.modal.close();assert.equal(page.serverList.children.length, 0);
+  page.modal.open();await page.settle();
+  assert.equal(page.serverList.children.length, 0);assert.equal(page.serverHint.textContent, '-');
+  page.input('server', '192.168.31.30:49999');page.submit();
+  assert.equal(page.joined[0].server, 'ws://192.168.31.30:49999/ws');
+  page.modal.close();page.modal.open();await page.settle();
+  assert.equal(page.serverList.children.length, 2);assert.equal(calls, 3);
+  assert.equal(page.fields.server.value, '192.168.31.30:49999', '重试成功仍保留手动服务器');
+});
+
+test('关闭后旧请求晚到不能替换新打开面板的线路与当前服务器', async () => {
+  const finishes = [];
+  const page = await harness({ fetch: (url) => url.startsWith('/api/remote-config')
+    ? new Promise((resolve) => finishes.push(resolve)) : Promise.resolve({ ok: true, json: async () => ({}) }) });
+  page.modal.open();page.modal.close();page.modal.open();
+  finishes[1]({ ok: true, json: async () => remoteSnapshot([{ id: 'main', name: '新线路', address: 'new.example:49999' }]) });
+  await page.settle();assert.equal(page.fields.server.value, 'new.example:49999');
+  finishes[0]({ ok: true, json: async () => remoteSnapshot([{ id: 'main', name: '旧线路', address: 'old.example:49999' }]) });
+  await page.settle();
+  assert.equal(page.serverList.children.length, 1);
+  assert.equal(page.serverList.children[0].label, '新线路 · new.example:49999');
+  assert.equal(page.fields.server.value, 'new.example:49999');
+});
+
+test('线路兼容对象和数组，拒绝缓存、无效地址和多余线路；名称按文本显示', async () => {
+  const page = await harness({ install: false });
+  const clean = (snapshot) => copy(page.api.cleanJoinServerOptions(snapshot, 'http://localhost:8010/'));
+  for (const server of [{ address: '183.66.27.21:47485' }, [{ address: '183.66.27.21:47485' }]])
+    assert.equal(clean({ source: 'remote', stale: false, config: { server } }).length, 1);
+  for (const snapshot of [null, { source: 'cache', stale: false, config: { servers: remoteLines() } },
+    { source: 'remote', stale: true, config: { servers: remoteLines() } }]) assert.deepEqual(clean(snapshot), []);
+  const safe = clean(remoteSnapshot([null, {}, { address: '' }, { address: 'javascript:alert(1)' },
+    { address: 'ws://user:secret@example.com' }, { address: 'valid.example:49999', name: '<img src=x onerror=alert(1)>', role: '主线路' },
+    { address: 'valid.example:49999', name: '重复线路' }]));
+  assert.equal(safe.length, 1);
+  const realPage = await harness({ remoteConfig: remoteSnapshot([{
+    address: 'valid.example:49999', name: '<img src=x onerror=alert(1)>', role: '主线路',
+  }]) });
+  realPage.modal.open();await realPage.settle();
+  assert.equal(realPage.serverList.children[0].textContent, '<img src=x onerror=alert(1)> · 主线路 · valid.example:49999');
+  assert.equal(realPage.serverList.children[0].innerHTML, undefined, '远程内容没有作为 HTML 写入');
+  assert.equal(clean(remoteSnapshot(Array.from({ length: 40 }, (_, index) => ({ address: `room${index}.example:49999` })))).length, 32);
 });

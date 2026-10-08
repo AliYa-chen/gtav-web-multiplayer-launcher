@@ -202,6 +202,16 @@ fn primary_server(servers: &[ServerInfo]) -> Option<&ServerInfo> {
     servers.iter().find(|server| server.id.as_deref() == Some("main")).or_else(|| servers.first())
 }
 
+fn merge_server_field(target: &mut Option<String>, legacy: Option<String>, field: &str) -> Result<(), String> {
+    let existing = target.as_deref().filter(|value| !value.is_empty());
+    let declared = legacy.as_deref().filter(|value| !value.is_empty());
+    if let (Some(existing), Some(declared)) = (existing, declared) {
+        if existing != declared { return Err(format!("远程配置的 server 与 servers 主线路 {field} 不一致。")); }
+    }
+    if existing.is_none() && declared.is_some() { *target = legacy; }
+    Ok(())
+}
+
 fn normalize_servers(server: Option<RawServer>, servers: Option<Vec<ServerInfo>>)
     -> Result<(Option<ServerInfo>, Vec<ServerInfo>), String> {
     // Both names are accepted, but a document cannot silently override one line list
@@ -212,11 +222,24 @@ fn normalize_servers(server: Option<RawServer>, servers: Option<Vec<ServerInfo>>
         (Some(RawServer::Many(list)), None) | (None, Some(list)) => clean_servers(list)?,
         (Some(RawServer::One(server)), Some(list)) => {
             let server = clean_server(server)?;
-            let list = clean_servers(list)?;
-            if primary_server(&list) != Some(&server) {
+            let mut list = clean_servers(list)?;
+            let index = list.iter().position(|entry| entry.id.as_deref() == Some("main"))
+                .or_else(|| (!list.is_empty()).then_some(0))
+                .ok_or("远程配置的 server 与 servers 主线路不一致。")?;
+            let primary = &mut list[index];
+            if primary.address != server.address {
                 return Err("远程配置的 server 与 servers 主线路不一致。".into());
             }
-            list
+            merge_server_field(&mut primary.id, server.id, "ID")?;
+            merge_server_field(&mut primary.role, server.role, "角色")?;
+            merge_server_field(&mut primary.status_url, server.status_url, "状态地址")?;
+            if !primary.name.is_empty() && !server.name.is_empty() && primary.name != server.name {
+                return Err("远程配置的 server 与 servers 主线路名称不一致。".into());
+            }
+            if primary.name.is_empty() { primary.name = server.name; }
+            // A previously absent legacy ID may now have been inserted. Revalidate
+            // uniqueness before exposing either the canonical primary or the full list.
+            clean_servers(list)?
         }
         (Some(RawServer::Many(first)), Some(second)) => {
             let first = clean_servers(first)?;
@@ -430,6 +453,44 @@ mod tests {
             assert!(missing_title.oltitle.is_empty());
             assert_eq!(parse_config(&serde_json::to_vec(&missing_title).unwrap()).unwrap(), missing_title);
         }
+    }
+
+    #[test]
+    fn legacy_primary_object_merges_missing_metadata_with_full_line_list() {
+        let bytes = include_bytes!("../../../tools/tests/fixtures/remote-launcher-server-object-and-lines.json");
+        let live = parse_config(bytes).unwrap();
+        assert_eq!(live.servers.len(), 2);
+        let mut raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        raw["server"] = serde_json::json!({"address":"183.66.27.21:47485","name":"公共战局",
+            "status_url":"https://gtav.2t.hk","health_url":"https://gtaserver.2t.hk:47485/47485/health"});
+        let config = parse_config(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        let primary = config.server.as_ref().unwrap();
+        assert_eq!(primary, &config.servers[0]);
+        assert_eq!(primary.id.as_deref(), Some("main"));
+        assert_eq!(primary.role.as_deref(), Some("主线路"));
+        assert_eq!(primary.status_url.as_deref(), Some("https://gtav.2t.hk/"));
+        assert_eq!(config.servers[1], live.servers[1]);
+        assert_eq!(parse_config(&serde_json::to_vec(&config).unwrap()).unwrap(), config);
+
+        let filled = parse_config(br#"{"server":{"id":"main","name":"Main","role":"Primary","address":"localhost:47485"},"servers":[{"address":"localhost:47485"},{"id":"test","address":"localhost:47486"}]}"#).unwrap();
+        assert_eq!(filled.server.as_ref().unwrap().id.as_deref(), Some("main"));
+        assert_eq!(filled.servers[0].name, "Main");
+        assert_eq!(filled.servers[0].role.as_deref(), Some("Primary"));
+        let blank_role = parse_config(br#"{"server":{"address":"localhost:47485","role":""},"servers":[{"address":"localhost:47485","role":"Primary"}]}"#).unwrap();
+        assert_eq!(blank_role.servers[0].role.as_deref(), Some("Primary"));
+    }
+
+    #[test]
+    fn conflicting_legacy_primary_metadata_and_inserted_duplicate_ids_are_rejected() {
+        let primary = serde_json::json!({"id":"main","name":"Main","role":"Primary","address":"localhost:47485","status_url":"https://gtav.2t.hk"});
+        for (field, value) in [("id", "test"), ("name", "Other"), ("role", "Other"),
+            ("address", "localhost:47486"), ("status_url", "https://other.example")] {
+            let mut legacy = primary.clone(); legacy[field] = serde_json::Value::String(value.into());
+            let document = serde_json::json!({"server":legacy,"servers":[primary.clone()]});
+            assert!(parse_config(&serde_json::to_vec(&document).unwrap()).is_err(), "accepted conflict: {field}");
+        }
+        let duplicate = br#"{"server":{"id":"test","address":"localhost:47485"},"servers":[{"address":"localhost:47485"},{"id":"test","address":"localhost:47486"}]}"#;
+        assert!(parse_config(duplicate).is_err());
     }
 
     #[test]

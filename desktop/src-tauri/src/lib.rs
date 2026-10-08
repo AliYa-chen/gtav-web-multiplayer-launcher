@@ -239,11 +239,20 @@ pub fn verify_resources(selected: &Path, cache: &Path) -> Result<serde_json::Val
     if body != CLIENT.get_file("index.html").ok_or("启动器未嵌入首页")?.contents() { return Err("HTTP首页未采用内嵌client".into()); }
     let headers = String::from_utf8_lossy(&bytes[..split]);
     if !headers.contains("Cross-Origin-Embedder-Policy: require-corp") { return Err("缺少跨域隔离响应头".into()); }
+    let mut remote_connection = std::net::TcpStream::connect(("127.0.0.1", server.port())).map_err(|e| e.to_string())?;
+    remote_connection.set_read_timeout(Some(std::time::Duration::from_secs(10))).map_err(|e| e.to_string())?;
+    remote_connection.write_all(format!("GET /api/remote-config?refresh=1 HTTP/1.0\r\nHost: 127.0.0.1:{}\r\n\r\n", server.port()).as_bytes()).map_err(|e| e.to_string())?;
+    let mut remote_bytes = Vec::new(); remote_connection.read_to_end(&mut remote_bytes).map_err(|e| e.to_string())?;
+    let remote_split = remote_bytes.windows(4).position(|part| part == b"\r\n\r\n").ok_or("远程配置代理响应格式无效")?;
+    let remote_http: serde_json::Value = serde_json::from_slice(&remote_bytes[remote_split + 4..]).map_err(|e| e.to_string())?;
     Ok(serde_json::json!({ "resources": info, "embedded_client": true, "fonts_cached": fonts.len(),
         "offline_engine": cache.join("runtime/offline/game.wasm"), "online_engine": cache.join("runtime/online/game.wasm"),
         "http_started": true, "python_required": false, "game_resources_changed": false,
         "remote_source": remote.source, "oltitle": remote.config.oltitle,
         "remote_error": remote.error, "remote_servers": remote.config.servers,
         "remote_announcements": remote.config.announcements.len(),
-        "remote_latest_version": remote.config.latest_version }))
+        "remote_latest_version": remote.config.latest_version,
+        "remote_http_source": remote_http["source"], "remote_http_error": remote_http["error"],
+        "remote_http_servers": remote_http["config"]["servers"],
+        "remote_http_announcements": remote_http["config"]["announcements"].as_array().map(Vec::len) }))
 }
