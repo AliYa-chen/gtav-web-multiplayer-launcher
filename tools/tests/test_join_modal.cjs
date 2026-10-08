@@ -113,6 +113,7 @@ test('配置请求尚未完成时阻止提交，确认副本可用后才允许�
   assert.equal(page.submitButton.disabled, false);
   assert.equal(page.message.textContent, '');
   assert.equal(page.joined.length, 0, '检查完成不能自动消费检查期间的提交');
+  page.input('server', '183.66.27.21:47485');
   page.submit();
   assert.equal(page.joined.length, 1);
 });
@@ -139,6 +140,7 @@ test('没有 local-config 接口或旧配置未提供 readiness 时仍允许已�
   ]) {
     const page = await harness(options);
     assert.equal(page.submitButton.disabled, false);
+    page.input('server', '183.66.27.21:47485');
     page.submit();
     assert.equal(page.joined.length, 1);
   }
@@ -191,6 +193,7 @@ test('浏览器拒绝 localStorage 读取或写入时可继续加入，不抛出
   const denied = await harness({ localStorageDenied: true });
   assert.equal(denied.api.readPanelPreferences(), null);
   assert.equal(denied.api.savePanelPreferences(preferences()), false);
+  denied.input('server', '183.66.27.21:47485');
   assert.doesNotThrow(() => denied.submit());
   assert.equal(denied.joined.length, 1);
   const rejected = await harness({ localStorage: {
@@ -198,32 +201,33 @@ test('浏览器拒绝 localStorage 读取或写入时可继续加入，不抛出
   } });
   assert.equal(rejected.api.readPanelPreferences(), null);
   assert.equal(rejected.api.savePanelPreferences(preferences()), false);
+  rejected.input('server', '183.66.27.21:47485');
   assert.doesNotThrow(() => rejected.submit());
   assert.equal(rejected.joined.length, 1);
 });
 
-test('重新打开主页使用保存的面板字段，不会被本机启动配置覆盖', async () => {
+test('重新打开主页仅恢复昵称和角色，服务器等待本次远程配置', async () => {
   const cached = preferences({ server: 'wss://room.example:443/ws', preset: 'npc_female' });
   const page = await harness({ localStorage: storage({ [panelKey]: JSON.stringify(cached) }),
     config: { instance_name: '本机玩家', multiplayer_server: '127.0.0.1:8787' } });
   assert.equal(page.fields.nickname.value, '玩家甲');
-  assert.equal(page.fields.server.value, 'room.example:443');
+  assert.equal(page.fields.server.value, '');
   assert.equal(page.fields.preset.value, 'npc_female');
   assert.ok(page.overlay.innerHTML.includes('服务器 IP:端口'));
   assert.ok(!page.fields.server.value.includes('://'));
 });
 
-test('URL 参数优先于缓存，角色仍使用已保存的选择', async () => {
+test('URL 昵称优先于缓存，URL 与本机地址均不作为线路默认值', async () => {
   const cached = preferences({ server: 'wss://saved.example:47485/ws', preset: 'freemode_female' });
   const page = await harness({ localStorage: storage({ [panelKey]: JSON.stringify(cached) }),
     href: 'http://localhost:8010/?name=%E7%8E%A9%E5%AE%B6%E4%B9%99&server=192.168.1.2%3A47485',
     config: { instance_name: '启动昵称', multiplayer_server: 'another.example:47485' } });
   assert.equal(page.fields.nickname.value, '玩家乙');
-  assert.equal(page.fields.server.value, '192.168.1.2:47485');
+  assert.equal(page.fields.server.value, '');
   assert.equal(page.fields.preset.value, 'freemode_female');
 });
 
-test('输入昵称、服务器和更换角色立即持久化，刷新后恢复相同字段', async () => {
+test('手动输入持久化昵称和角色，刷新后线路仍重新请求远程配置', async () => {
   const local = storage();
   const page = await harness({ localStorage: local });
   page.input('nickname', '  新玩家  ');
@@ -234,13 +238,15 @@ test('输入昵称、服务器和更换角色立即持久化，刷新后恢复�
   assert.equal(page.sessionStorage.values.size, 0);
   const refreshed = await harness({ localStorage: local });
   assert.equal(refreshed.fields.nickname.value, '新玩家');
-  assert.equal(refreshed.fields.server.value, '192.168.31.10:49494');
+  assert.equal(refreshed.fields.server.value, '');
   assert.equal(refreshed.fields.preset.value, 'freemode_male');
 });
 
 test('显示为 IP:端口的安全连接在昵称变更、失焦和提交后仍保留 WSS 与自定义路径', async () => {
-  const cached = preferences({ server: 'wss://secure.example:443/custom', preset: 'npc_female' });
-  const page = await harness({ localStorage: storage({ [panelKey]: JSON.stringify(cached) }) });
+  const page = await harness({ remoteConfig: remoteSnapshot([
+    { id: 'main', address: 'wss://secure.example:443/custom' },
+  ]) });
+  page.modal.open();await page.settle();
   assert.equal(page.fields.server.value, 'secure.example:443');
   page.input('nickname', '玩家乙');
   page.input('preset', 'freemode_female');
@@ -265,6 +271,7 @@ test('输入完整安全地址失焦后仅显示主机和端口，提交仍连�
 
 test('不完整输入保留上次有效偏好，提交无效地址或昵称时不创建战局', async () => {
   const page = await harness();
+  page.input('server', '183.66.27.21:47485');
   page.input('nickname', '玩家乙');
   const valid = page.localStorage.getItem(panelKey);
   page.input('server', 'ws://');
@@ -283,6 +290,7 @@ test('不完整输入保留上次有效偏好，提交无效地址或昵称时�
 test('禁用会话存储会显示错误并停止加入，永久偏好存储成功不能替代战局会话', async () => {
   const page = await harness({ sessionStorage: { getItem: () => null,
     setItem() { throw new Error('SecurityError'); } } });
+  page.input('server', '183.66.27.21:47485');
   page.submit();
   assert.equal(page.joined.length, 0);
   assert.ok(page.message.textContent.includes('会话存储'));
@@ -290,6 +298,7 @@ test('禁用会话存储会显示错误并停止加入，永久偏好存储成�
 
 test('模态框主动加入只创建一次新加入标记，首次导航后刷新按重连恢复', async () => {
   const page = await harness();
+  page.input('server', '183.66.27.21:47485');
   page.submit();
   assert.equal(page.sessionStorage.getItem(pendingKey), '1');
   assert.equal(page.api.consumePublicEntryIntent('navigate'), false);
@@ -347,16 +356,18 @@ test('打开加入面板读取两条远程线路并优先主线路，选择后�
   assert.equal(page.localStorage.getItem('gta5.remote.config'), null, '远程线路不保存为本地配置');
 });
 
-test('远程线路列表不覆盖已保存或 URL 指定的自定义服务器', async () => {
+test('本次远程主线路覆盖历史面板、游戏会话和 URL 中的地址默认值', async () => {
   for (const options of [
-    { localStorage: storage({ [panelKey]: JSON.stringify(preferences({ server: 'wss://saved.example/custom' })) }), expected: 'saved.example:443' },
-    { sessionStorage: storage({ [sessionKey]: JSON.stringify({ ...preferences({ server: '192.168.31.2:48888' }), seed: 1 }) }), expected: '192.168.31.2:48888' },
-    { href: 'http://localhost:8010/?server=192.168.31.3%3A48888', expected: '192.168.31.3:48888' },
+    { localStorage: storage({ [panelKey]: JSON.stringify(preferences({ server: 'wss://saved.example/custom' })) }) },
+    { localStorage: storage({ [panelKey]: JSON.stringify(preferences({ server: '127.0.0.1:47485' })) }) },
+    { sessionStorage: storage({ [sessionKey]: JSON.stringify({ ...preferences({ server: '192.168.31.2:48888' }), seed: 1 }) }) },
+    { href: 'http://localhost:8010/?server=192.168.31.3%3A48888' },
   ]) {
     const page = await harness({ ...options, remoteConfig: remoteSnapshot(remoteLines()) });
+    assert.equal(page.fields.server.value, '');
     page.modal.open();await page.settle();
     assert.equal(page.serverList.children.length, 2);
-    assert.equal(page.fields.server.value, options.expected);
+    assert.equal(page.fields.server.value, 'main.example:443');
   }
 });
 
@@ -373,6 +384,98 @@ test('远程响应晚到不能覆盖用户正在输入的手动服务器', async
   page.submit();assert.equal(page.joined[0].server, 'ws://192.168.31.20:49999/ws');
 });
 
+test('线路未加载或失败时空地址不可提交，也不隐式选择 localhost', async () => {
+  let finish;
+  const page = await harness({ fetch: (url) => url.startsWith('/api/remote-config')
+    ? new Promise((resolve) => { finish = resolve; })
+    : Promise.resolve({ ok: true, json: async () => ({ multiplayer_server: '127.0.0.1:47485' }) }) });
+  assert.equal(page.fields.server.value, '');
+  page.input('nickname', '玩家乙');
+  page.input('preset', 'npc_female');
+  assert.equal(page.localStorage.getItem(panelKey), null, '空地址不能因其他字段变化而持久化为 localhost');
+  page.modal.open();
+  page.submit();
+  assert.equal(page.joined.length, 0);
+  assert.equal(page.sessionStorage.values.size, 0);
+  assert.equal(page.fields.server.value, '');
+  assert.match(page.message.textContent, /服务器|线路|地址/);
+  finish({ ok: false });await page.settle();
+  assert.equal(page.serverHint.textContent, '-');
+  page.input('server', '   ');page.blur();page.submit();
+  assert.equal(page.joined.length, 0);
+  assert.equal(page.sessionStorage.values.size, 0);
+  assert.equal(page.localStorage.getItem(panelKey), null);
+});
+
+test('晚到的本机配置不能覆盖远程主线路，旧本地面板地址也不参与选择', async () => {
+  let finishLocal;
+  const page = await harness({ localStorage: storage({ [panelKey]: JSON.stringify(preferences({ server: '127.0.0.1:47485' })) }),
+    fetch: (url) => url.startsWith('/api/remote-config')
+      ? Promise.resolve({ ok: true, json: async () => remoteSnapshot(remoteLines()) })
+      : new Promise((resolve) => { finishLocal = resolve; }) });
+  assert.equal(page.fields.server.value, '');
+  page.modal.open();await page.settle();
+  assert.equal(page.fields.server.value, 'main.example:443');
+  finishLocal({ ok: true, json: async () => ({ multiplayer_ready: true, multiplayer_server: '127.0.0.1:47485' }) });
+  await page.settle();
+  assert.equal(page.fields.server.value, 'main.example:443');
+  page.submit();assert.equal(page.joined[0].server, 'wss://main.example/public');
+});
+
+test('每次重开读取当前线路，未手动修改的默认地址随远程响应更新', async () => {
+  const pending = [];
+  const page = await harness({ fetch: (url) => url.startsWith('/api/remote-config')
+    ? new Promise((resolve) => pending.push(resolve))
+    : Promise.resolve({ ok: true, json: async () => ({ multiplayer_ready: true }) }) });
+  page.modal.open();
+  pending[0]({ ok: true, json: async () => remoteSnapshot([{ id: 'main', address: 'old.example:48888' }]) });
+  await page.settle();assert.equal(page.fields.server.value, 'old.example:48888');
+  page.modal.close();page.modal.open();
+  assert.equal(page.fields.server.value, '', '本次读取前不展示上一轮默认地址');
+  pending[1]({ ok: true, json: async () => remoteSnapshot([{ id: 'main', address: 'new.example:49999' }]) });
+  await page.settle();assert.equal(page.fields.server.value, 'new.example:49999');
+  page.submit();assert.equal(page.joined[0].server, 'ws://new.example:49999/ws');
+});
+
+test('没有 main 时选择首条有效远程线路，拒绝静态或陈旧线路作为默认值', async () => {
+  for (const snapshot of [null, { source: 'cache', stale: false, config: { servers: remoteLines() } },
+    { source: 'remote', stale: true, config: { servers: remoteLines() } }]) {
+    const page = await harness({ remoteConfig: snapshot });
+    page.modal.open();await page.settle();
+    assert.equal(page.fields.server.value, '');
+    assert.equal(page.serverHint.textContent, '-');
+  }
+  const page = await harness({ remoteConfig: remoteSnapshot([
+    { id: 'invalid', address: '/ws' }, { id: 'other', address: 'first.example:49999' },
+    { id: 'another', address: 'second.example:48888' },
+  ]) });
+  page.modal.open();await page.settle();
+  assert.equal(page.fields.server.value, 'first.example:49999');
+});
+
+test('手动完整 WSS 地址跨关闭重开保留，远程线路更新不能改变输入', async () => {
+  const page = await harness({ remoteConfig: remoteSnapshot(remoteLines()) });
+  page.modal.open();await page.settle();
+  page.input('server', 'wss://manual.example:443/custom');page.blur();
+  assert.equal(page.fields.server.value, 'manual.example:443');
+  page.modal.close();page.modal.open();await page.settle();
+  assert.equal(page.fields.server.value, 'manual.example:443');
+  page.submit();assert.equal(page.joined[0].server, 'wss://manual.example/custom');
+});
+
+test('加入面板等待远程默认值时游戏会话仍保留完整重连地址与身份', async () => {
+  const stored = { ...preferences({ server: 'wss://session.example:443/room', preset: 'freemode_male' }), seed: 321 };
+  const page = await harness({ sessionStorage: storage({ [sessionKey]: JSON.stringify(stored) }),
+    remoteConfig: remoteSnapshot(remoteLines()) });
+  assert.equal(page.fields.server.value, '');
+  assert.deepEqual(copy(page.api.readPublicPreferences()), { ...stored, server: 'wss://session.example/room' });
+  page.modal.open();await page.settle();
+  assert.equal(page.fields.server.value, 'main.example:443');
+  assert.deepEqual(JSON.parse(page.sessionStorage.getItem(sessionKey)), stored, '读取线路不得篡改现有重连会话');
+  assert.equal(page.fields.nickname.value, stored.name);
+  assert.equal(page.fields.preset.value, stored.preset);
+});
+
 test('线路请求失败清空旧选项，重新打开重新联网，失败不阻止手动加入', async () => {
   let calls = 0;
   const page = await harness({ fetch: async (url) => {
@@ -384,6 +487,8 @@ test('线路请求失败清空旧选项，重新打开重新联网，失败不�
   page.modal.close();assert.equal(page.serverList.children.length, 0);
   page.modal.open();await page.settle();
   assert.equal(page.serverList.children.length, 0);assert.equal(page.serverHint.textContent, '-');
+  assert.equal(page.fields.server.value, '', '失败时不保留上次自动选择的线路');
+  page.submit();assert.equal(page.joined.length, 0);
   page.input('server', '192.168.31.30:49999');page.submit();
   assert.equal(page.joined[0].server, 'ws://192.168.31.30:49999/ws');
   page.modal.close();page.modal.open();await page.settle();

@@ -1,6 +1,5 @@
 import { normalizeServerAddress, displayServerAddress } from './server-address.js';
 
-export const PUBLIC_SERVER = '183.66.27.21:47485';
 export const SESSION_KEY = 'gta5.public.session';
 export const PREFERENCES_KEY = 'gta5.public.preferences';
 const FRESH_JOIN_KEY = 'gta5.public.pending-join';
@@ -115,18 +114,18 @@ export function installJoinModal({ onJoin } = {}) {
   let savedName = '';
   try { savedName = localStorage.getItem('gta5.multiplayer.nickname') || ''; } catch { /* 存储被禁用时仍可加入。 */ }
   nickname.value = query.get('name') || panel?.name || stored?.name || savedName || '玩家';
-  let connectionAddress;
-  try { connectionAddress = normalizeServerAddress(query.get('server') || panel?.server || stored?.server || PUBLIC_SERVER, location.href); }
-  catch { connectionAddress = normalizeServerAddress(PUBLIC_SERVER, location.href); }
-  server.value = displayServerAddress(connectionAddress, location.href);
+  // 加入面板的默认线路只来自本次远程请求，不恢复旧 IP 或本机启动配置。
+  let connectionAddress = null;
+  server.value = '';
   preset.value = panel?.preset || stored?.preset || 'npc_male';
   let editedName = false, editedServer = false;
   let previousFocus = null;
-  let serverOptions = [], remoteRequest = 0, remoteController = null, remoteDefaultSelected = false;
+  let serverOptions = [], remoteRequest = 0, remoteController = null;
   function inputAddress() {
-    // 保留已存储的 WSS 协议；只改显示形式不能把安全连接变成普通 WS。
+    // 保留远程选择或手动输入的 WSS 协议；空输入不能回退成本机地址。
     const value = server.value.trim();
-    if (value === displayServerAddress(connectionAddress, location.href)) return connectionAddress;
+    if (!value) throw new Error('请选择远程线路或输入服务器 IP:端口。');
+    if (connectionAddress && value === displayServerAddress(connectionAddress, location.href)) return connectionAddress;
     const option = serverOptions.find((item) => item.display === value);
     return option?.address || normalizeServerAddress(value, location.href);
   }
@@ -154,6 +153,7 @@ export function installJoinModal({ onJoin } = {}) {
     const request = ++remoteRequest;
     remoteController?.abort();
     const controller = remoteController = new AbortController();
+    if (!editedServer) { connectionAddress = null; server.value = ''; }
     const initialInput = server.value;
     clearServerOptions();
     serverHint.textContent = '正在读取服务器线路…';
@@ -172,11 +172,10 @@ export function installJoinModal({ onJoin } = {}) {
         serverList.append(option);
       }
       serverHint.textContent = serverOptions.length ? '可选择线路，也可手动输入 IP:端口。' : '-';
-      if (!query.has('server') && !panel && !stored && !editedServer && server.value === initialInput && serverOptions.length) {
+      if (!editedServer && server.value === initialInput && serverOptions.length) {
         const preferred = serverOptions.find((item) => item.id === 'main') || serverOptions[0];
         connectionAddress = preferred.address;
         server.value = preferred.display;
-        remoteDefaultSelected = true;
       }
     } catch {
       if (request === remoteRequest && !overlay.hidden) clearServerOptions();
@@ -206,7 +205,6 @@ export function installJoinModal({ onJoin } = {}) {
     if (previousFocus?.isConnected) previousFocus.focus();
   }
   overlay.querySelector('.online-join__close').addEventListener('click', close);
-  overlay.addEventListener('click', (event) => { if (event.target === overlay) close(); });
   overlay.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') { event.preventDefault(); close(); }
     if (event.key !== 'Tab') return;
@@ -238,7 +236,7 @@ export function installJoinModal({ onJoin } = {}) {
     onJoin?.(preferences);
   });
 
-  // 显式 URL 参数和用户输入优先。启动器的本机默认值不能覆盖公网地址。
+  // 本机配置仅用于资源就绪与昵称，服务器默认线路由远程接口决定。
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), 3000);
   fetch('/api/local-config', { cache: 'no-store', signal: abort.signal })
@@ -248,13 +246,6 @@ export function installJoinModal({ onJoin } = {}) {
       // 只有启动器明确报告缺少适配器时才阻止加入；旧服务与静态部署可以没有此接口。
       if (config.multiplayer_ready === false) resourceCheck = 'missing';
       if (!query.has('name') && !panel && !stored && !editedName && typeof config.instance_name === 'string') nickname.value = config.instance_name;
-      if (!query.has('server') && !panel && !stored && !editedServer && !remoteDefaultSelected && typeof config.multiplayer_server === 'string'
-        && !/^(?:wss?:\/\/)?(?:localhost|0\.0\.0\.0|127\.0\.0\.1|\[::1\])(?::8787)?(?:\/ws)?\/?$/i.test(config.multiplayer_server)) {
-        try {
-          connectionAddress = normalizeServerAddress(config.multiplayer_server, location.href);
-          server.value = displayServerAddress(connectionAddress, location.href);
-        } catch { /* 无效启动配置不覆盖正常公网地址。 */ }
-      }
     }).catch(() => {}).finally(() => {
       clearTimeout(timer);
       if (resourceCheck === 'pending') resourceCheck = 'ready';
