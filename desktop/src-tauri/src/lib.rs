@@ -3,6 +3,10 @@ mod fonts;
 mod http_server;
 mod resources;
 mod remote_config;
+mod lan;
+mod lan_ca_embedded;
+mod lan_bootstrap;
+mod ca_trust;
 
 use include_dir::{include_dir, Dir};
 use serde::{Deserialize, Serialize};
@@ -12,10 +16,12 @@ use tauri::{Emitter, Manager, State};
 static CLIENT: Dir<'_> = include_dir!("$OUT_DIR/embedded-client");
 
 #[derive(Default, Deserialize, Serialize)]
-struct Preferences { selected_directory: Option<String>, preferred_port: Option<u16> }
+struct Preferences { selected_directory: Option<String>, preferred_port: Option<u16>, #[serde(default)] lan_settings: Option<lan::Settings> }
 struct Prepared { resources: resources::ResourceInfo, runtime: PathBuf, fonts: HashMap<String, PathBuf> }
 #[derive(Default)]
-struct Inner { selected: Option<String>, preferred_port: Option<u16>, prepared: Option<Prepared>, servers: Vec<http_server::ServerHandle> }
+struct Inner { selected: Option<String>, preferred_port: Option<u16>, prepared: Option<Prepared>, servers: Vec<http_server::ServerHandle>,
+    lan_settings: lan::Settings, lan_server: Option<http_server::ServerHandle>, lan_guide: Option<lan_bootstrap::BootstrapHandle>,
+    lan_address: Option<String>, lan_fingerprint: Option<String> }
 struct LauncherState { inner: Mutex<Inner>, busy: Arc<AtomicBool>, remote_busy: Arc<AtomicBool>,
     update_required: Arc<AtomicBool>, remote: Arc<RwLock<serde_json::Value>> }
 impl Default for LauncherState {
@@ -35,7 +41,10 @@ fn acquire(state: &LauncherState) -> Result<BusyGuard, String> {
 
 #[derive(Serialize)]
 struct LauncherStatus { selected_directory: Option<String>, resources: Option<resources::ResourceInfo>, running_urls: Vec<String>,
-    version: &'static str, platform: &'static str, update_required: bool, remote_configuration: serde_json::Value }
+    version: &'static str, platform: &'static str, update_required: bool, remote_configuration: serde_json::Value, lan: LanStatus }
+#[derive(Serialize)]
+struct LanStatus { settings: lan::Settings, addresses: Vec<String>, running_url: Option<String>, guide_url: Option<String>,
+    host_address: Option<String>, ca_fingerprint: Option<String> }
 fn platform_key() -> &'static str {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => "macos_arm64", ("macos", "x86_64") => "macos_x64",
@@ -79,7 +88,9 @@ fn snapshot(inner: &Inner, state: &LauncherState) -> LauncherStatus {
     }).unwrap_or_else(|_| (serde_json::Value::Null, state.update_required.load(Ordering::Acquire)));
     LauncherStatus { selected_directory: inner.selected.clone(), resources: inner.prepared.as_ref().map(|p| p.resources.clone()),
         running_urls: inner.servers.iter().map(|s| s.url()).collect(), version: env!("CARGO_PKG_VERSION"), platform: platform_key(),
-        update_required, remote_configuration }
+        update_required, remote_configuration, lan: LanStatus { settings: inner.lan_settings.clone(), addresses: lan::addresses(),
+            running_url: inner.lan_server.as_ref().map(|server| server.url()), guide_url: inner.lan_guide.as_ref().map(|server| server.url()),
+            host_address: inner.lan_address.clone(), ca_fingerprint: inner.lan_fingerprint.clone().or_else(|| ca_trust::fingerprint().ok()) } }
 }
 fn preferences_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     app.path().app_config_dir().map(|p| p.join("launcher.json")).map_err(|e| e.to_string())
@@ -87,7 +98,8 @@ fn preferences_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 fn save_preferences(app: &tauri::AppHandle, inner: &Inner) -> Result<(), String> {
     let path = preferences_path(app)?;
     fs::create_dir_all(path.parent().ok_or("启动器设置目录无效")?).map_err(|e| e.to_string())?;
-    let bytes = serde_json::to_vec_pretty(&Preferences { selected_directory: inner.selected.clone(), preferred_port: inner.preferred_port }).map_err(|e| e.to_string())?;
+    let bytes = serde_json::to_vec_pretty(&Preferences { selected_directory: inner.selected.clone(), preferred_port: inner.preferred_port,
+        lan_settings: Some(inner.lan_settings.clone()) }).map_err(|e| e.to_string())?;
     fs::write(&path, bytes).map_err(|e| format!("无法保存启动器设置：{e}"))
 }
 fn embedded_client() -> HashMap<String, &'static [u8]> {
@@ -122,7 +134,7 @@ fn progress(app: &tauri::AppHandle, phase: &str, text: &str) {
 async fn prepare_game(app: tauri::AppHandle, state: State<'_, LauncherState>, selected: String) -> Result<LauncherStatus, String> {
     ensure_current_launcher(&state)?;
     let _guard = acquire(&state)?;
-    if !state.inner.lock().map_err(|e| e.to_string())?.servers.is_empty() {
+    if { let inner = state.inner.lock().map_err(|e| e.to_string())?; !inner.servers.is_empty() || inner.lan_server.is_some() } {
         return Err("请先停止正在运行的游戏服务，再更换资源目录。".into());
     }
     let cache = app.path().app_cache_dir().map_err(|e| e.to_string())?;
@@ -187,6 +199,105 @@ fn open_game(state: State<'_, LauncherState>, index: usize) -> Result<(), String
 }
 
 #[tauri::command]
+async fn start_lan_share(app: tauri::AppHandle, state: State<'_, LauncherState>,
+    port: u16, http_port: u16, address: String) -> Result<LauncherStatus, String> {
+    ensure_current_launcher(&state)?;
+    let _guard = acquire(&state)?;
+    {
+        let inner = state.inner.lock().map_err(|e| e.to_string())?;
+        if inner.lan_server.is_some() { return Ok(snapshot(&inner, &state)); }
+        inner.prepared.as_ref().ok_or("请先选择并校验游戏资源。")?;
+    }
+    let settings = lan::Settings { port, http_port };
+    progress(&app, "lan", "使用内置 CA 签发本机局域网 IP 证书…");
+    let lan = tauri::async_runtime::spawn_blocking(move || lan::prepare(settings, &address))
+        .await.map_err(|_| "局域网证书准备异常。".to_string())??;
+    ensure_current_launcher(&state)?;
+    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+    let prepared = inner.prepared.as_ref().ok_or("游戏资源尚未就绪。")?;
+    let ip = lan.config.address;
+    let server = http_server::start(prepared.resources.clone(), prepared.runtime.clone(), embedded_client(), http_server::ServerConfig {
+        online_ready: true, instance_name: "局域网玩家".into(),
+        log_file: app.path().app_log_dir().map_err(|e| e.to_string())?.join("browser-lan.log"),
+        preferred_port: Some(lan.settings.port), font_overrides: prepared.fonts.clone(), remote_configuration: state.remote.clone(),
+        multiplayer_server: configured_remote(&state).ok().and_then(|config| config.server.map(|server| server.websocket_url.unwrap_or(server.address)))
+            .unwrap_or_default(), lan: Some(lan.config), ..Default::default()
+    })?;
+    // 两个监听器都成功才发布共享地址；引导端口冲突时自动停止刚开启的 HTTPS。
+    let guide = lan_bootstrap::start(ip, lan.settings.http_port, server.port(), lan.ca_certificate, lan.fingerprint.clone())?;
+    let previous_settings = inner.lan_settings.clone();
+    inner.lan_settings = lan.settings;
+    if let Err(error) = save_preferences(&app, &inner) {
+        inner.lan_settings = previous_settings;
+        drop(guide); drop(server); return Err(error);
+    }
+    inner.lan_address = Some(ip.to_string());
+    inner.lan_fingerprint = Some(lan.fingerprint);
+    inner.lan_server = Some(server);
+    inner.lan_guide = Some(guide);
+    progress(&app, "ready", "局域网共享已开启，朋友先打开 HTTP 安装引导地址。");
+    Ok(snapshot(&inner, &state))
+}
+
+#[tauri::command]
+fn stop_lan_share(state: State<'_, LauncherState>) -> Result<LauncherStatus, String> {
+    let _guard = acquire(&state)?;
+    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+    inner.lan_guide = None; inner.lan_server = None;
+    inner.lan_address = None; inner.lan_fingerprint = None;
+    Ok(snapshot(&inner, &state))
+}
+
+#[tauri::command]
+async fn install_lan_ca(app: tauri::AppHandle, state: State<'_, LauncherState>) -> Result<String, String> {
+    ensure_current_launcher(&state)?;
+    let _guard = acquire(&state)?;
+    progress(&app, "ca", "正在请求系统授权，安装并信任局域网 CA…");
+    let message = tauri::async_runtime::spawn_blocking(ca_trust::install)
+        .await.map_err(|_| "证书安装任务异常，请下载 CA 证书后手动安装。".to_string())??;
+    progress(&app, "ready", &message);
+    Ok(message)
+}
+
+#[tauri::command]
+async fn save_lan_ca_certificate(state: State<'_, LauncherState>) -> Result<Option<String>, String> {
+    ensure_current_launcher(&state)?;
+    let _guard = acquire(&state)?;
+    let Some(file) = rfd::AsyncFileDialog::new().set_title("保存局域网 CA 公共证书")
+        .set_file_name("GTA5DATA-LAN-CA.cer").add_filter("CA 公共证书", &["cer", "crt"])
+        .save_file().await else { return Ok(None); };
+    ensure_current_launcher(&state)?;
+    let path = file.path().to_owned();
+    let game_root = {
+        let inner = state.inner.lock().map_err(|e| e.to_string())?;
+        inner.prepared.as_ref().map(|prepared| prepared.resources.root.clone())
+            .or_else(|| inner.selected.as_ref().and_then(|selected| Path::new(selected).canonicalize().ok()))
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        write_public_ca(&path, game_root.as_deref())?;
+        Ok(Some(path.to_string_lossy().into_owned()))
+    }).await.map_err(|_| "证书保存任务异常，请重试。".to_string())?
+}
+
+fn write_public_ca(path: &Path, game_root: Option<&Path>) -> Result<(), String> {
+    let parent = path.parent().ok_or("证书保存位置无效。")?.canonicalize().map_err(|_| "证书保存目录不可访问。")?;
+    let target = parent.join(path.file_name().ok_or("证书文件名无效。")?);
+    if let Some(game) = game_root {
+        let game = game.canonicalize().map_err(|_| "游戏资源目录不可访问，请重新选择保存位置。".to_string())?;
+        if target.starts_with(game) {
+            return Err("CA 证书不能保存到游戏资源目录，请选择其他位置。".into());
+        }
+    }
+    if let Ok(metadata) = fs::symlink_metadata(&target) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("证书保存位置必须是普通文件，不能使用目录或符号链接。".into());
+        }
+    }
+    let der = ca_trust::public_certificate_der()?;
+    fs::write(target, der).map_err(|_| "无法保存 CA 公共证书，请选择可写目录。".into())
+}
+
+#[tauri::command]
 async fn remote_configuration(app: tauri::AppHandle, state: State<'_, LauncherState>, force_refresh: bool) -> Result<serde_json::Value, String> {
     if !force_refresh || state.remote_busy.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
         return state.remote.read().map(|value| value.clone()).map_err(|e| e.to_string());
@@ -235,11 +346,36 @@ pub fn run() {
     tauri::Builder::default()
         .manage(LauncherState::default())
         .setup(|app| {
+            // 默认 macOS 菜单仍提供全屏和最大化；固定窗口只保留必要系统操作。
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::menu::{Menu, Submenu, PredefinedMenuItem};
+                let application = Submenu::with_items(app, "GTA5Data", true, &[
+                    &PredefinedMenuItem::hide(app, Some("隐藏启动器"))?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::quit(app, Some("退出启动器"))?,
+                ])?;
+                let edit = Submenu::with_items(app, "编辑", true, &[
+                    &PredefinedMenuItem::undo(app, Some("撤销"))?,
+                    &PredefinedMenuItem::redo(app, Some("重做"))?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::cut(app, Some("剪切"))?,
+                    &PredefinedMenuItem::copy(app, Some("复制"))?,
+                    &PredefinedMenuItem::paste(app, Some("粘贴"))?,
+                    &PredefinedMenuItem::select_all(app, Some("全选"))?,
+                ])?;
+                let window = Submenu::with_items(app, "窗口", true, &[
+                    &PredefinedMenuItem::minimize(app, Some("最小化"))?,
+                    &PredefinedMenuItem::close_window(app, Some("关闭"))?,
+                ])?;
+                app.set_menu(Menu::with_items(app, &[&application, &edit, &window])?)?;
+            }
             let settings = preferences_path(app.handle()).ok().and_then(|path| fs::read(path).ok())
                 .and_then(|bytes| serde_json::from_slice::<Preferences>(&bytes).ok()).unwrap_or_default();
             let state = app.state::<LauncherState>();
             let mut inner = state.inner.lock().unwrap();
             inner.selected = settings.selected_directory; inner.preferred_port = settings.preferred_port;
+            inner.lan_settings = settings.lan_settings.unwrap_or_default();
             drop(inner);
             let remote = state.remote.clone(); let busy = state.remote_busy.clone();
             let update_required = state.update_required.clone();
@@ -254,11 +390,12 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![launcher_status, choose_game_directory, prepare_game, start_game, stop_game, open_game,
-            remote_configuration, open_update_download, open_project_website, open_game_resource_page])
+            remote_configuration, open_update_download, open_project_website, open_game_resource_page,
+            start_lan_share, stop_lan_share, install_lan_ca, save_lan_ca_certificate])
         .build(tauri::generate_context!()).expect("启动桌面界面失败")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
-                if let Ok(mut inner) = app.state::<LauncherState>().inner.lock() { inner.servers.clear(); }
+                if let Ok(mut inner) = app.state::<LauncherState>().inner.lock() { inner.servers.clear(); inner.lan_guide = None; inner.lan_server = None; }
             }
         });
 }
@@ -341,5 +478,38 @@ mod update_gate_tests {
         assert!(ensure_current_launcher(&state).is_err());
         *state.remote.write().unwrap() = serde_json::to_value(fresh_release(env!("CARGO_PKG_VERSION"))).unwrap();
         assert!(ensure_current_launcher(&state).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod public_ca_export_tests {
+    use super::*;
+
+    #[test]
+    fn export_contains_only_the_public_certificate_and_refuses_game_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let game = temp.path().join("game");
+        fs::create_dir(&game).unwrap();
+        let protected = game.join("original.data");
+        fs::write(&protected, b"original data").unwrap();
+        assert!(write_public_ca(&game.join("ca.cer"), Some(&game)).is_err());
+        assert!(write_public_ca(&protected, Some(&game)).is_err());
+        assert_eq!(fs::read(&protected).unwrap(), b"original data");
+        let target = temp.path().join("public.cer");
+        write_public_ca(&target, Some(&game)).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), ca_trust::public_certificate_der().unwrap());
+        assert!(x509_parser::parse_x509_certificate(&fs::read(target).unwrap()).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_cannot_follow_a_symbolic_link_into_resources() {
+        let temp = tempfile::tempdir().unwrap();
+        let original = temp.path().join("original.data");
+        fs::write(&original, b"read only resources").unwrap();
+        let alias = temp.path().join("ca.cer");
+        std::os::unix::fs::symlink(&original, &alias).unwrap();
+        assert!(write_public_ca(&alias, None).is_err());
+        assert_eq!(fs::read(original).unwrap(), b"read only resources");
     }
 }

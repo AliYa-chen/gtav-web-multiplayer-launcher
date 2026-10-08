@@ -150,7 +150,7 @@ $announcements = [
 ];
 $downloadCandidates = [
     'macos_arm64' => [
-        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-macOS-arm64-v0.2.6-development.zip',
+        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-macOS-arm64-v0.2.6.zip',
         'sha256' => '83a5983636ed4e09547294580036bb2fe14eeffc457e5951248ec9c0b5d47184',
     ],
     'windows_x64' => [

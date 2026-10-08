@@ -18,9 +18,11 @@ self.createNativeSessionUI = function ({ ex, memory }) {
     .every((name) => typeof ex?.[name] === 'function');
   let buffer = 0, disposed = false, wasOpen = false;
   let lastAttempt = -Infinity, lastSuccess = -Infinity, lastSignature = '', lastPanel = '';
+  let preparedSignature = '', preparedMemory = null;
 
   function reset() {
     wasOpen = false; lastAttempt = -Infinity; lastSuccess = -Infinity; lastSignature = ''; lastPanel = '';
+    preparedSignature = '';
   }
   function cleanName(value) {
     // Scaleform 可解释 ~ 格式标签及 HTML；昵称只作为受限纯文字，不允许其改动布局。
@@ -71,6 +73,7 @@ self.createNativeSessionUI = function ({ ex, memory }) {
         bytes.set(encoded, cursor); cursor += encoded.length;
       }
     }
+    preparedMemory = memory.buffer;
     return true;
   }
   function pointer(key) { return BigInt(buffer + slots[key][0]); }
@@ -115,31 +118,40 @@ self.createNativeSessionUI = function ({ ex, memory }) {
       const open = Boolean(ex.mpPauseMenuActive()) && Boolean(ex.mpFrontendReady());
       if (!open) { reset(); return { available: true, applied: false, reason: 'menu_closed' }; }
       const justOpened = !wasOpen; wasOpen = true;
+      const value = texts(summary), signature = JSON.stringify(value);
       // 这个原始 pane 的 XML runtime 是 PauseMenu_Multiplayer，已有引擎日志也确认“線上”进入它。
       // 查询实际 MenuScreenId；不能用可见标签索引，也不能覆盖地图/设置等任意当前电影。
-      if (!buffer && !prepare(texts(summary))) return { available: false, applied: false, reason: 'allocation_failed' };
-      const panel = currentPanel(), panelChanged = panel !== lastPanel;
-      const value = texts(summary), signature = JSON.stringify(value);
-      // 原 CPauseMenu 会重建 header，750ms 重应用；状态变化最短间隔250ms。
-      if (!justOpened && !panelChanged && (now - lastAttempt < 250 || (signature === lastSignature && now - lastSuccess < 750))) {
-        return { available: true, applied: false, content_applied: false, panel, reason: 'throttled' };
+      if (!buffer || signature !== preparedSignature || preparedMemory !== memory.buffer) {
+        if (!prepare(value)) return { available: false, applied: false, reason: 'allocation_failed' };
+        preparedSignature = signature;
       }
-      lastAttempt = now;
-      if (!prepare(value)) return { available: false, applied: false, reason: 'allocation_failed' };
-      // 原 CPauseMenu::Update 的常规标题分支只有一个字符串；不猜测额外可选参数。
-      const title = invoke('titleMethod', ['title']);
-      // 原 UpdatePlayerInfoAtTopOfScreen：三字符串、bool、末字符串。false采用线上 header 布局。
-      const details = invoke('detailsMethod', ['name', 'count', 'status', false, 'mode']);
-      let content = false;
+      const panel = currentPanel(), panelChanged = panel !== lastPanel;
+      // Header 保持原有限刷新频率；线上正文必须在每次前端尾部恢复，
+      // 否则原单机脚本在两次刷新之间写回 Social Club 登录内容，造成交替闪烁。
+      const headerDue = justOpened || panelChanged || (now - lastAttempt >= 250
+        && (signature !== lastSignature || now - lastSuccess >= 750));
+      let title = false, details = false, content = false, nativeFailure = false;
+      if (headerDue) {
+        lastAttempt = now;
+        try {
+          // 原 CPauseMenu::Update 的常规标题分支只有一个字符串。
+          title = invoke('titleMethod', ['title']);
+          // 原 UpdatePlayerInfoAtTopOfScreen：三字符串、bool、末字符串。
+          details = invoke('detailsMethod', ['name', 'count', 'status', false, 'mode']);
+          if (title && details) { lastSignature = signature; lastSuccess = now; }
+        } catch { nativeFailure = true; }
+      }
       if (panel === 'MENU_UNIQUE_ID_MISSION_CREATOR') {
         // 与 CScaleformMenuHelper::SHOW_WARNING_MESSAGE 的原始参数一致：
         // visible=true, column=0, layout=3（整页），标题、正文、宽度430、空图像/纹理、alignment=0、空图像说明、false。
-        content = invoke('panelMethod', [true, 0, 3, 'panelTitle', 'panelBody', 430, 'empty', 'empty', 0, 'empty', false], true);
+        try {
+          content = invoke('panelMethod', [true, 0, 3, 'panelTitle', 'panelBody', 430, 'empty', 'empty', 0, 'empty', false], true);
+        } catch { nativeFailure = true; }
       }
       lastPanel = panel;
-      if (title && details) { lastSignature = signature; lastSuccess = now; }
+      if (nativeFailure) return { available: false, applied: title && details, content_applied: content, panel, reason: 'native_failure' };
       return { available: true, applied: title && details, content_applied: content, panel,
-        reason: title && details ? 'applied' : 'header_pending' };
+        reason: title && details ? 'applied' : headerDue ? 'header_pending' : content ? 'content_applied' : 'throttled' };
     } catch {
       // UI 不可用不能终止角色/世界同步；下次前端回调限频重试。
       lastAttempt = now;
@@ -153,6 +165,8 @@ self.createNativeSessionUI = function ({ ex, memory }) {
       try { ex.mpFree(BigInt(buffer)); } catch { /* 退出时原引擎可能已结束。 */ }
     }
     buffer = 0;
+    preparedSignature = '';
+    preparedMemory = null;
   }
   return { tick, reset, dispose };
 };

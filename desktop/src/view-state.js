@@ -89,12 +89,38 @@ export function remotePresentation(snapshot, version, platform = '') {
     sourceText: loaded ? '已更新' : '-',
   };
 }
-export function launcherActions({ selected, busy, desktop, urls, updateRequired = false }, remoteBusy = false) {
+export function launcherActions({ selected, busy, desktop, urls, lan, updateRequired = false }, remoteBusy = false) {
   return {
-    choose: Boolean(desktop && !busy && !urls.length && !updateRequired),
+    choose: Boolean(desktop && !busy && !urls.length && !lan?.running_url && !updateRequired),
     launch: !updateRequired && canLaunch({ selected, busy, desktop }),
     additional: Boolean(desktop && !busy && urls.length && !updateRequired),
     stop: Boolean(desktop && !busy && urls.length),
     refresh: Boolean(desktop && !remoteBusy),
   };
+}
+
+export function lanSettings(lan) {
+  return {
+    port: lan?.settings?.port || 8443,
+    httpPort: lan?.settings?.http_port || 8442,
+    address: lan?.host_address || lan?.addresses?.[0] || '',
+  };
+}
+export function lanActions({ desktop, selected, busy, updateRequired, lan }) {
+  return {
+    configure: Boolean(desktop && !busy && !updateRequired),
+    start: Boolean(desktop && selected && !busy && !updateRequired && !lan?.running_url),
+    stop: Boolean(desktop && !busy && lan?.running_url && !updateRequired),
+  };
+}
+export function lanRequest(settings) {
+  const port = Number(settings.port), httpPort = Number(settings.httpPort);
+  const address = String(settings.address || '').trim();
+  if (![port, httpPort].every((value) => Number.isInteger(value) && value >= 1 && value <= 65535)) throw new Error('游戏和引导页端口应为 1 至 65535 的整数。');
+  if (port === httpPort) throw new Error('游戏 HTTPS 端口和安装引导 HTTP 端口不能相同。');
+  const parts = address.split('.');
+  if (parts.length !== 4 || !parts.every((part) => /^(?:0|[1-9]\d{0,2})$/.test(part) && Number(part) <= 255)) throw new Error('请选择本机局域网 IPv4 地址。');
+  const [a, b] = parts.map(Number);
+  if (!(a === 10 || a === 172 && b >= 16 && b <= 31 || a === 192 && b === 168 || a === 169 && b === 254 || a === 100 && b >= 64 && b <= 127)) throw new Error('请选择本机局域网 IPv4 地址。');
+  return { port, httpPort, address };
 }

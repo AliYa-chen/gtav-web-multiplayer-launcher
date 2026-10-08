@@ -16,7 +16,8 @@ class BrowserTextDecoder extends TextDecoder {
 }
 function harness(shared = false) {
   const memory = { buffer: shared ? new SharedArrayBuffer(8192) : new ArrayBuffer(8192) }, calls = [], methods = [];
-  let open = true, ready = true, begins = true, contentBegins = true, parameterFailure = false, current;
+  let open = true, ready = true, begins = true, contentBegins = true, parameterFailure = false, contentParameterFailure = false, current;
+  let displayedContent = null;
   let panel = 'MENU_UNIQUE_ID_MAP', panelPointer = 4096n, panelId = 0;
   const read = pointer => {
     const bytes = new Uint8Array(memory.buffer), start = Number(pointer);
@@ -42,11 +43,16 @@ function harness(shared = false) {
     },
     mpBeginPauseContent(pointer) { calls.push(['content_begin', read(pointer)]); if (!contentBegins) return 0;
       current = { method: read(pointer), parameters: [] }; return 1; },
-    mpScaleformString(pointer) { assert.equal(typeof pointer, 'bigint'); if (parameterFailure) throw Error('not ready');
+    mpScaleformString(pointer) { assert.equal(typeof pointer, 'bigint');
+      if (parameterFailure || (contentParameterFailure && current?.method === 'SHOW_WARNING_MESSAGE')) throw Error('not ready');
       assert.ok(current); current.parameters.push(read(pointer)); },
     mpScaleformBool(value) { assert.equal(typeof value, 'number'); assert.ok(current); current.parameters.push(Boolean(value)); },
     mpScaleformInt(value) { assert.equal(typeof value, 'number'); assert.ok(current); current.parameters.push(value); },
-    mpEndScaleform() { assert.ok(current); methods.push(current); current = null; calls.push(['end']); },
+    mpEndScaleform() { assert.ok(current); methods.push(current);
+      if (current.method === 'SHOW_WARNING_MESSAGE' && current.parameters.length === 11) {
+        displayedContent = { title: current.parameters[3], body: current.parameters[4] };
+      }
+      current = null; calls.push(['end']); },
   };
   const self = {}, context = vm.createContext({ self, TextEncoder, TextDecoder: BrowserTextDecoder, Uint8Array, BigInt });
   vm.runInContext(source, context);
@@ -54,8 +60,16 @@ function harness(shared = false) {
   return { ui, calls, methods, memory, ex, factory: self.createNativeSessionUI,
     setOpen: value => { open = value; }, setReady: value => { ready = value; },
     setBegin: value => { begins = value; }, setParameterFailure: value => { parameterFailure = value; },
+    setContentParameterFailure: value => { contentParameterFailure = value; },
     setPanel: value => { panel = value; }, setPanelPointer: value => { panelPointer = value; },
-    setPanelId: value => { panelId = value; }, setContentBegin: value => { contentBegins = value; } };
+    setPanelId: value => { panelId = value; }, setContentBegin: value => { contentBegins = value; },
+    displayedContent: () => displayedContent,
+    // 模拟原菜单脚本先写正文，然后运行前端尾部；这里只验证调用顺序，不模拟实际引擎绘制。
+    originalRewrite: () => { displayedContent = { title: 'GTA 線上模式', body: '登入 Social Club 以開始 GTA 線上模式遊戲。' }; },
+    growMemory: () => {
+      const previous = new Uint8Array(memory.buffer), grown = new ArrayBuffer(memory.buffer.byteLength * 2);
+      new Uint8Array(grown).set(previous); memory.buffer = grown;
+    } };
 }
 
 test('只在显式公共在线身份且原暂停菜单就绪时调用，原生参数顺序与已核对ABI一致', () => {
@@ -175,4 +189,92 @@ test('浏览器共享内存中的真实pane名字先复制再解码，正文保�
   const h = harness(true); h.setPanel('MENU_UNIQUE_ID_MISSION_CREATOR');
   assert.equal(h.ui.tick(0, summary()).content_applied, true);
   assert.equal(h.methods.at(-1).parameters[4].split('\n')[0], '線上模式伺服器狀態：-');
+});
+
+test('原菜单每帧重写Social Club后，前端尾部每帧恢复线上正文且标题仍限频', () => {
+  const h = harness(); h.setPanel('MENU_UNIQUE_ID_MISSION_CREATOR');
+  const state = summary({ remote_config: { oltitle: 'https://gtav.2t.hk' } }), headerFrames = [];
+  let frames = 0;
+  for (let now = 0; now <= 1600; now += 16) {
+    h.originalRewrite();
+    const result = h.ui.tick(now, state);
+    assert.equal(result.content_applied, true, `正文应在 ${now} ms 这一帧恢复`);
+    assert.deepEqual(h.displayedContent(), {
+      title: 'GTA 線上模式',
+      body: '線上模式伺服器狀態：https://gtav.2t.hk\n已連接公共戰局 · 在線玩家：2\n公共戰局 · GTA V 自由模式',
+    });
+    if (result.applied) headerFrames.push(now);
+    else assert.equal(result.reason, 'content_applied');
+    frames++;
+  }
+  assert.deepEqual(headerFrames, [0, 752, 1504]);
+  assert.equal(h.methods.filter(method => method.method === 'SHOW_WARNING_MESSAGE').length, frames);
+  assert.equal(h.methods.filter(method => method.method === 'SET_HEADER_TITLE').length, 3);
+  assert.equal(h.methods.filter(method => method.method === 'SET_HEADING_DETAILS').length, 3);
+  assert.equal(h.calls.filter(call => call[0] === 'alloc').length, 1);
+});
+
+test('正文不等待header成功，header限频期间状态变化也立即更新正文', () => {
+  const h = harness(); h.setPanel('MENU_UNIQUE_ID_MISSION_CREATOR'); h.setBegin(false);
+  const first = h.ui.tick(0, summary());
+  assert.equal(first.applied, false); assert.equal(first.content_applied, true);
+  assert.equal(h.methods.filter(method => method.method.startsWith('SET_')).length, 0);
+  const result = h.ui.tick(16, summary({ connected: false, phase: 'reconnecting', player_count: 1 }));
+  assert.equal(result.applied, false); assert.equal(result.content_applied, true);
+  assert.match(h.displayedContent().body, /正在重新連線 · 在線玩家：1/);
+  assert.equal(h.calls.filter(call => call[0] === 'begin').length, 2, '限频期间不重新尝试两个header方法');
+  h.setBegin(true);
+  assert.equal(h.ui.tick(250, summary({ connected: false, phase: 'reconnecting', player_count: 1 })).applied, true);
+  assert.equal(h.calls.filter(call => call[0] === 'alloc').length, 1);
+});
+
+test('线上正文Begin或参数暂未就绪时下一帧重试，不重写已成功的header', () => {
+  const h = harness(); h.setPanel('MENU_UNIQUE_ID_MISSION_CREATOR'); h.ui.tick(0, summary());
+  const headers = () => h.methods.filter(method => method.method.startsWith('SET_')).length;
+  h.setContentBegin(false); h.originalRewrite();
+  const before = h.methods.length, ends = h.calls.filter(call => call[0] === 'end').length;
+  assert.equal(h.ui.tick(16, summary()).content_applied, false);
+  assert.equal(h.methods.length, before); assert.equal(h.calls.filter(call => call[0] === 'end').length, ends);
+  h.setContentBegin(true);
+  assert.equal(h.ui.tick(32, summary()).content_applied, true);
+  assert.match(h.displayedContent().body, /^線上模式伺服器狀態：-/);
+  h.setContentParameterFailure(true); h.originalRewrite();
+  assert.equal(h.ui.tick(48, summary()).content_applied, false);
+  h.setContentParameterFailure(false);
+  assert.equal(h.ui.tick(64, summary()).content_applied, true);
+  assert.equal(headers(), 2);
+  assert.equal(h.calls.filter(call => call[0] === 'alloc').length, 1);
+});
+
+test('离开线上pane或关闭菜单后停止正文写入，返回时立即恢复且不重新分配', () => {
+  const h = harness(); h.setPanel('MENU_UNIQUE_ID_MISSION_CREATOR'); h.ui.tick(0, summary());
+  const contents = () => h.calls.filter(call => call[0] === 'content_begin').length;
+  const initial = contents();
+  h.setPanel('MENU_UNIQUE_ID_MAP'); assert.equal(h.ui.tick(16, summary()).content_applied, false);
+  h.setPanel('MENU_UNIQUE_ID_SETTINGS'); assert.equal(h.ui.tick(32, summary()).content_applied, false);
+  assert.equal(contents(), initial);
+  h.setPanel('MENU_UNIQUE_ID_MISSION_CREATOR'); h.originalRewrite();
+  assert.equal(h.ui.tick(48, summary()).content_applied, true);
+  h.setOpen(false); assert.equal(h.ui.tick(64, summary()).reason, 'menu_closed');
+  assert.equal(contents(), initial + 1);
+  h.setOpen(true); h.originalRewrite(); const reopened = h.ui.tick(80, summary());
+  assert.equal(reopened.applied, true); assert.equal(reopened.content_applied, true);
+  const reopenedContents = contents();
+  assert.equal(h.ui.tick(96, summary({ online: false })).reason, 'inactive');
+  assert.equal(contents(), reopenedContents);
+  assert.equal(h.calls.filter(call => call[0] === 'alloc').length, 1);
+});
+
+test('内存增长保留字符串时逐帧正文使用新视图，正文能力缺失只保留header', () => {
+  const h = harness(); h.setPanel('MENU_UNIQUE_ID_MISSION_CREATOR'); h.ui.tick(0, summary());
+  h.growMemory(); h.originalRewrite();
+  assert.equal(h.ui.tick(16, summary()).content_applied, true);
+  assert.match(h.displayedContent().body, /^線上模式伺服器狀態：-/);
+  assert.equal(h.calls.filter(call => call[0] === 'alloc').length, 1);
+  const missing = harness(); missing.setPanel('MENU_UNIQUE_ID_MISSION_CREATOR');
+  delete missing.ex.mpBeginPauseContent;
+  const ui = missing.factory({ ex: missing.ex, memory: missing.memory });
+  assert.equal(ui.tick(0, summary()).applied, true);
+  assert.equal(ui.tick(16, summary()).content_applied, false);
+  assert.equal(missing.calls.filter(call => call[0] === 'content_begin').length, 0);
 });

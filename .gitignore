@@ -37,6 +37,10 @@ __pycache__/
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*.p12
+*.pfx
 .idea/
 .vscode/
 node_modules/

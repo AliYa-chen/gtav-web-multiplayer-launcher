@@ -1,4 +1,4 @@
-//! Loopback-only HTTP bridge. Client UI is embedded; player resources are read-only.
+//! Local HTTP and optional LAN HTTPS bridges. Player resources are read-only.
 use crate::resources::{contained_file, safe_relative, ResourceInfo};
 use flate2::{write::GzEncoder, Compression};
 use percent_encoding::percent_decode_str;
@@ -6,16 +6,36 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{atomic::{AtomicBool, Ordering}, mpsc, Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
+use tiny_http::{Header, Method, Request, Response, Server, SslConfig, StatusCode};
 
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_BATCH_BYTES: u64 = 64 * 1024 * 1024;
 const WORKERS: usize = 8;
+
+#[derive(Clone)]
+pub struct LanConfig {
+    /// Selected local interface; never an arbitrary public address.
+    pub address: Ipv4Addr,
+    pub tls_certificate: Vec<u8>,
+    pub tls_private_key: Vec<u8>,
+    /// Only this HTTP guide can probe certificate trust; it cannot read game data.
+    pub bootstrap_origin: String,
+    pub ca_fingerprint: String,
+}
+impl std::fmt::Debug for LanConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("LanConfig")
+            .field("address", &self.address).field("bootstrap_origin", &self.bootstrap_origin)
+            .field("ca_fingerprint", &self.ca_fingerprint)
+            .field("tls_certificate", &"[redacted]")
+            .field("tls_private_key", &"[redacted]").finish()
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
@@ -29,6 +49,8 @@ pub struct ServerConfig {
     pub font_overrides: HashMap<String, PathBuf>,
     /// Validated launcher metadata shared with the UI and all local game clients.
     pub remote_configuration: Arc<RwLock<Value>>,
+    /// A separate HTTPS resource service for friends on the same LAN.
+    pub lan: Option<LanConfig>,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -41,6 +63,7 @@ impl Default for ServerConfig {
             font_overrides: HashMap::new(),
             remote_configuration: Arc::new(RwLock::new(json!({ "config": {},
                 "source": "unavailable", "stale": true }))),
+            lan: None,
         }
     }
 }
@@ -56,12 +79,13 @@ struct State {
 
 pub struct ServerHandle {
     port: u16,
+    url: String,
     running: Arc<AtomicBool>,
     server: Option<Arc<Server>>,
     dispatcher: Option<JoinHandle<()>>,
 }
 impl ServerHandle {
-    pub fn url(&self) -> String { format!("http://127.0.0.1:{}/", self.port) }
+    pub fn url(&self) -> String { self.url.clone() }
     pub fn port(&self) -> u16 { self.port }
 }
 impl Drop for ServerHandle {
@@ -99,12 +123,50 @@ fn resolved_future_path(path: &Path) -> Result<PathBuf, String> {
     Ok(resolved)
 }
 
+pub(crate) fn private_lan_address(address: Ipv4Addr) -> bool {
+    address.is_private() || address.is_link_local()
+        || (address.octets()[0] == 100 && (64..128).contains(&address.octets()[1]))
+}
+
+fn bind_service(config: &ServerConfig, port: u16) -> Result<Server, String> {
+    if let Some(lan) = config.lan.as_ref() {
+        // tiny_http's PEM parser can panic on malformed private keys. The certificate
+        // launcher validates first, but this boundary must still fail without a crash.
+        std::panic::catch_unwind(|| Server::https((Ipv4Addr::UNSPECIFIED, port), SslConfig {
+            certificate: lan.tls_certificate.clone(), private_key: lan.tls_private_key.clone(),
+        })).map_err(|_| "HTTPS 证书或私钥格式无效。".to_owned())?
+            .map_err(|error| format!("无法启动局域网 HTTPS 服务：{error}"))
+    } else {
+        Server::http((Ipv4Addr::LOCALHOST, port))
+            .map_err(|error| format!("无法启动本机游戏服务：{error}"))
+    }
+}
+
 pub fn start(
     resources: ResourceInfo,
     runtime_root: PathBuf,
     client: HashMap<String, &'static [u8]>,
     mut config: ServerConfig,
 ) -> Result<ServerHandle, String> {
+    if let Some(lan) = config.lan.as_mut() {
+        if !private_lan_address(lan.address) {
+            return Err("共享资源服务只能选择本机的局域网 IPv4 地址。".into());
+        }
+        let bootstrap = url::Url::parse(&lan.bootstrap_origin)
+            .map_err(|_| "证书安装引导地址无效。")?;
+        if bootstrap.scheme() != "http" || bootstrap.host_str() != Some(&lan.address.to_string())
+            || !bootstrap.username().is_empty() || bootstrap.password().is_some()
+            || bootstrap.path() != "/" || bootstrap.query().is_some() || bootstrap.fragment().is_some()
+            || bootstrap.port_or_known_default() == Some(0)
+            || lan.bootstrap_origin != bootstrap.origin().ascii_serialization()
+            || lan.ca_fingerprint.is_empty()
+        {
+            return Err("证书安装引导地址必须使用当前局域网 IP 和 HTTP 端口。".into());
+        }
+        if lan.tls_certificate.is_empty() || lan.tls_private_key.is_empty() {
+            return Err("启动器缺少本机生成的 HTTPS 证书或对应私钥。".into());
+        }
+    }
     let runtime_root = runtime_root.canonicalize().map_err(|e| format!("启动器运行目录不存在：{e}"))?;
     if runtime_root.starts_with(&resources.root) {
         return Err("启动器运行目录不能位于游戏资源目录内。".into());
@@ -122,11 +184,18 @@ pub fn start(
     }
     if !client.contains_key("/index.html") { return Err("启动器缺少内嵌 client/index.html。".into()); }
     let listen = match config.preferred_port {
-        Some(port) if port != 0 => Server::http(("127.0.0.1", port)).or_else(|_| Server::http("127.0.0.1:0")),
-        _ => Server::http("127.0.0.1:0"),
+        // A shared URL must retain the requested public port. Local test instances
+        // may still pick an unused origin when a previous port is occupied.
+        Some(port) if port != 0 && config.lan.is_some() => bind_service(&config, port),
+        Some(port) if port != 0 => bind_service(&config, port).or_else(|_| bind_service(&config, 0)),
+        _ => bind_service(&config, 0),
     };
-    let server = Arc::new(listen.map_err(|e| format!("无法启动本机游戏服务：{e}"))?);
+    let server = Arc::new(listen?);
     let port = server.server_addr().to_ip().ok_or("本机监听地址无效。")?.port();
+    let url = match config.lan.as_ref() {
+        Some(lan) => format!("https://{}:{port}/", lan.address),
+        None => format!("http://127.0.0.1:{port}/"),
+    };
     let running = Arc::new(AtomicBool::new(true));
     let state = Arc::new(State { resources, runtime_root, client, config, port, log_lock: Mutex::new(()) });
     let dispatcher_server = server.clone();
@@ -157,7 +226,7 @@ pub fn start(
         drop(sender);
         for worker in workers { let _ = worker.join(); }
     }).map_err(|e| format!("无法启动本机服务线程：{e}"))?;
-    Ok(ServerHandle { port, running, server: Some(server), dispatcher: Some(dispatcher) })
+    Ok(ServerHandle { port, url, running, server: Some(server), dispatcher: Some(dispatcher) })
 }
 
 fn header(request: &Request, name: &'static str) -> Option<String> {
@@ -202,20 +271,51 @@ fn normalized_path(raw: &str) -> Result<String, String> {
     Ok(format!("/{}", parts.join("/")))
 }
 
-fn valid_origin(request: &Request, state: &State) -> bool {
-    let allowed_hosts = [format!("127.0.0.1:{}", state.port), format!("localhost:{}", state.port)];
-    if !header(request, "Host").map(|host| allowed_hosts.contains(&host.to_lowercase())).unwrap_or(false) { return false; }
-    match header(request, "Origin") {
-        None => true,
-        Some(origin) => allowed_hosts.iter().any(|host| origin == format!("http://{host}")),
-    }
+fn valid_request_context(
+    remote_ip: Option<IpAddr>, secure: bool, host: &str, origin: Option<&str>,
+    port: u16, lan: Option<&LanConfig>,
+) -> bool {
+    let allowed_hosts = match lan {
+        Some(lan) => {
+            if !secure || !remote_ip.map(|ip| match ip {
+                IpAddr::V4(ip) => private_lan_address(ip) || ip.is_loopback(),
+                IpAddr::V6(ip) => ip.is_loopback(),
+            }).unwrap_or(false) { return false; }
+            let mut hosts = vec![format!("{}:{port}", lan.address)];
+            if port == 443 { hosts.push(lan.address.to_string()); }
+            hosts
+        },
+        None => {
+            if secure || !remote_ip.map(|ip| ip.is_loopback()).unwrap_or(false) { return false; }
+            let mut hosts = vec![format!("127.0.0.1:{port}"), format!("localhost:{port}")];
+            if port == 80 { hosts.extend(["127.0.0.1".into(), "localhost".into()]); }
+            hosts
+        },
+    };
+    if !allowed_hosts.contains(&host.to_ascii_lowercase()) { return false; }
+    let scheme = if lan.is_some() { "https" } else { "http" };
+    origin.map(|origin| allowed_hosts.iter().any(|host| origin == format!("{scheme}://{host}")))
+        .unwrap_or(true)
+}
+
+fn valid_origin(request: &Request, state: &State, readiness_probe: bool) -> bool {
+    if request.headers().iter().filter(|header| header.field.equiv("Host")).count() != 1
+        || request.headers().iter().filter(|header| header.field.equiv("Origin")).count() > 1 { return false; }
+    let origin = header(request, "Origin");
+    let bootstrap_probe = readiness_probe && state.config.lan.as_ref()
+        .map(|lan| origin.as_deref() == Some(lan.bootstrap_origin.as_str())).unwrap_or(false);
+    valid_request_context(request.remote_addr().map(|address| address.ip()), request.secure(),
+        &header(request, "Host").unwrap_or_default(), if bootstrap_probe { None } else { origin.as_deref() },
+        state.port, state.config.lan.as_ref())
 }
 
 fn handle(request: Request, state: &State) {
-    if !valid_origin(&request, state) { return reply_error(request, 403, "仅允许当前本机游戏页面访问资源。 "); }
     let target = request.url().to_owned();
     let (raw_path, query) = target.split_once('?').unwrap_or((&target, ""));
     let path = match normalized_path(raw_path) { Ok(path) => path, Err(error) => return reply_error(request, 403, &error) };
+    let readiness_probe = path == "/api/lan/ready";
+    if !valid_origin(&request, state, readiness_probe) { return reply_error(request, 403, "仅允许当前游戏地址和局域网访问资源。 "); }
+    if readiness_probe { return handle_ready(request, state); }
     match request.method() {
         Method::Post => return handle_post(request, &path, query, state),
         Method::Get | Method::Head => {},
@@ -288,6 +388,40 @@ fn handle(request: Request, state: &State) {
         Ok(file) => serve_file(request, &file),
         Err(_) => reply_error(request, 404, "未找到游戏资源。"),
     }
+}
+
+fn handle_ready(request: Request, state: &State) {
+    let Some(lan) = state.config.lan.as_ref() else {
+        return reply_error(request, 404, "本机未启用局域网 HTTPS 共享。");
+    };
+    let preflight = request.method() == &Method::Options;
+    if request.method() != &Method::Get && !preflight {
+        return reply_error(request, 405, "证书就绪检测仅支持 GET。");
+    }
+    if preflight && (header(&request, "Access-Control-Request-Method").as_deref() != Some("GET")
+        || header(&request, "Access-Control-Request-Headers").is_some()) {
+        return reply_error(request, 403, "不允许此跨域检测请求。");
+    }
+    let origin = header(&request, "Origin");
+    let private_network = header(&request, "Access-Control-Request-Private-Network").as_deref() == Some("true");
+    let mut response_headers = headers("application/json; charset=utf-8");
+    response_headers.retain(|value| !value.field.equiv("Cache-Control"));
+    extra_header(&mut response_headers, "Cache-Control", "no-store");
+    extra_header(&mut response_headers, "Vary", "Origin");
+    if let Some(origin) = origin {
+        extra_header(&mut response_headers, "Access-Control-Allow-Origin", &origin);
+        if preflight {
+            extra_header(&mut response_headers, "Access-Control-Allow-Methods", "GET");
+            if private_network { extra_header(&mut response_headers, "Access-Control-Allow-Private-Network", "true"); }
+        }
+    }
+    let body = if preflight { vec![] } else {
+        serde_json::to_vec(&json!({"ready":true,"fingerprint":lan.ca_fingerprint})).unwrap()
+    };
+    let length = body.len();
+    let response = Response::new(StatusCode(if preflight { 204 } else { 200 }), response_headers,
+        Cursor::new(body), Some(length), None);
+    let _ = request.respond(response);
 }
 
 fn data_file(state: &State, name: &str) -> Result<PathBuf, String> {
@@ -434,6 +568,28 @@ fn mime_type(path: &str) -> &'static str {
 mod tests {
     use super::*;
     use std::net::TcpStream;
+
+    struct TestIdentity { certificate: Vec<u8>, private_key: Vec<u8>, root: rustls_pki_types::CertificateDer<'static> }
+    // Generated disposable credentials. Nothing from the host's actual CA or game pack is used.
+    fn test_identity() -> &'static TestIdentity {
+        static IDENTITY: std::sync::OnceLock<TestIdentity> = std::sync::OnceLock::new();
+        IDENTITY.get_or_init(|| {
+            use rcgen::{CertificateParams, IsCa, BasicConstraints, KeyPair, KeyUsagePurpose, SanType, ExtendedKeyUsagePurpose};
+            let root_key = KeyPair::generate().unwrap();
+            let mut root_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+            root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            root_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+            let root = root_params.self_signed(&root_key).unwrap();
+            let key = KeyPair::generate().unwrap();
+            let mut leaf_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+            leaf_params.subject_alt_names = vec![SanType::IpAddress(Ipv4Addr::new(192, 168, 1, 20).into())];
+            leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+            leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+            let leaf = leaf_params.signed_by(&key, &root, &root_key).unwrap();
+            TestIdentity { certificate: format!("{}{}", leaf.pem(), root.pem()).into_bytes(),
+                private_key: key.serialize_pem().into_bytes(), root: root.der().clone() }
+        })
+    }
     fn fixture() -> (tempfile::TempDir, ResourceInfo, PathBuf) {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("game");
@@ -468,6 +624,156 @@ mod tests {
     }
     fn client() -> HashMap<String, &'static [u8]> {
         HashMap::from([("/index.html".into(), b"trusted client index" as &'static [u8]), ("/b/8b0b5899ed/loader.js".into(), b"trusted loader" as &'static [u8])])
+    }
+    fn lan_config() -> LanConfig {
+        let identity = test_identity();
+        LanConfig { address: Ipv4Addr::new(192, 168, 1, 20), bootstrap_origin: "http://192.168.1.20:8442".into(),
+            ca_fingerprint: "AA:BB:CC".into(), tls_certificate: identity.certificate.clone(),
+            tls_private_key: identity.private_key.clone() }
+    }
+    fn tls_request(server: &ServerHandle, method: &str, path: &str, extra: &str, body: &[u8], trust: bool)
+        -> Result<(String, Vec<u8>), String>
+    {
+        let mut roots = rustls::RootCertStore::empty();
+        if trust { roots.add(test_identity().root.clone()).unwrap(); }
+        let config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions().unwrap().with_root_certificates(roots).with_no_client_auth();
+        let name = rustls_pki_types::ServerName::IpAddress(Ipv4Addr::new(192, 168, 1, 20).into());
+        let connection = rustls::ClientConnection::new(Arc::new(config), name).map_err(|error| error.to_string())?;
+        let tcp = TcpStream::connect((Ipv4Addr::LOCALHOST, server.port())).map_err(|error| error.to_string())?;
+        tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        tcp.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut stream = rustls::StreamOwned::new(connection, tcp);
+        write!(stream, "{method} {path} HTTP/1.1\r\nHost: 192.168.1.20:{}\r\nConnection: close\r\nContent-Length: {}\r\n{extra}\r\n", server.port(), body.len()).map_err(|error| error.to_string())?;
+        stream.write_all(body).map_err(|error| error.to_string())?;
+        let mut output = vec![];
+        if let Err(error) = stream.read_to_end(&mut output) {
+            if error.kind() != std::io::ErrorKind::UnexpectedEof || output.is_empty() { return Err(error.to_string()); }
+        }
+        let split = output.windows(4).position(|chunk| chunk == b"\r\n\r\n").ok_or("No HTTP response")?;
+        Ok((String::from_utf8(output[..split].to_vec()).unwrap(), output[split + 4..].to_vec()))
+    }
+    #[test]
+    fn lan_requests_require_private_peers_https_and_exact_ip_origin() {
+        let lan = lan_config();
+        let peer = Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 30)));
+        assert!(valid_request_context(peer, true, "192.168.1.20:9443", Some("https://192.168.1.20:9443"), 9443, Some(&lan)));
+        assert!(valid_request_context(peer, true, "192.168.1.20:443", Some("https://192.168.1.20"), 443, Some(&lan)));
+        assert!(valid_request_context(peer, true, "192.168.1.20", None, 443, Some(&lan)));
+        assert!(valid_request_context(Some("100.64.1.2".parse().unwrap()), true,
+            "192.168.1.20:9443", None, 9443, Some(&lan)));
+        for origin in ["http://192.168.1.20:9443", "https://evil.invalid:9443", "null", "http://192.168.1.20:8442"] {
+            assert!(!valid_request_context(peer, true, "192.168.1.20:9443", Some(origin), 9443, Some(&lan)));
+        }
+        for host in ["other.invalid:9443", "127.0.0.1:9443", "192.168.1.20:9444"] {
+            assert!(!valid_request_context(peer, true, host, None, 9443, Some(&lan)));
+        }
+        assert!(!valid_request_context(peer, false, "192.168.1.20:9443", None, 9443, Some(&lan)));
+        assert!(!valid_request_context(None, true, "192.168.1.20:9443", None, 9443, Some(&lan)));
+        assert!(!valid_request_context(Some("8.8.8.8".parse().unwrap()), true, "192.168.1.20:9443", None, 9443, Some(&lan)));
+        assert!(!valid_request_context(Some("100.128.1.2".parse().unwrap()), true, "192.168.1.20:9443", None, 9443, Some(&lan)));
+        assert!(!valid_request_context(peer, false, "127.0.0.1:9443", None, 9443, None));
+    }
+    #[test]
+    fn invalid_lan_settings_and_private_keys_do_not_start_a_listener() {
+        let (temp, info, runtime) = fixture();
+        let config = ServerConfig { lan: Some(lan_config()), log_file: temp.path().join("log.txt"), ..Default::default() };
+        let mut invalid = config.clone(); invalid.lan.as_mut().unwrap().address = Ipv4Addr::new(8, 8, 8, 8);
+        assert!(start(info.clone(), runtime.clone(), client(), invalid).is_err());
+        for origin in ["https://192.168.1.20:8442", "http://192.168.1.21:8442", "http://192.168.1.20:8442/path", "http://192.168.1.20:8442/", "http://user@192.168.1.20:8442"] {
+            let mut invalid = config.clone(); invalid.lan.as_mut().unwrap().bootstrap_origin = origin.into();
+            assert!(start(info.clone(), runtime.clone(), client(), invalid).is_err(), "{origin}");
+        }
+        let mut invalid = config; invalid.lan.as_mut().unwrap().tls_private_key = b"not a private key".to_vec();
+        assert!(start(info, runtime, client(), invalid).is_err());
+        let debug = format!("{:?}", lan_config());
+        assert!(!debug.contains("BEGIN PRIVATE KEY"));
+        assert!(!debug.contains("BEGIN CERTIFICATE"));
+    }
+    #[test]
+    fn actual_ip_https_requires_its_ca_and_preserves_resource_isolation_ranges_batch_and_restart() {
+        let (temp, info, runtime) = fixture();
+        let config = ServerConfig { lan: Some(lan_config()), online_ready: true,
+            log_file: temp.path().join("log.txt"), ..Default::default() };
+        let local = start(info.clone(), runtime.clone(), client(), ServerConfig {
+            log_file: temp.path().join("local-log.txt"), ..Default::default()
+        }).unwrap();
+        let server = start(info.clone(), runtime.clone(), client(), config.clone()).unwrap();
+        assert_eq!(server.url(), format!("https://192.168.1.20:{}/", server.port()));
+        assert_ne!(server.port(), local.port());
+        assert_eq!(request(&local, "GET", "/", "", b"").1, b"trusted client index");
+        assert!(tls_request(&server, "GET", "/", "", b"", false).is_err(), "untrusted CA must fail the real TLS handshake");
+        let (headers, body) = tls_request(&server, "GET", "/", "", b"", true).unwrap();
+        assert!(headers.starts_with("HTTP/1.1 200"));
+        for header in ["cross-origin-embedder-policy: require-corp", "cross-origin-opener-policy: same-origin", "cross-origin-resource-policy: same-origin"] {
+            assert!(headers.to_ascii_lowercase().contains(header));
+        }
+        assert_eq!(body, b"trusted client index");
+        let (headers, body) = tls_request(&server, "GET", "/data/sample.bin", "Range: bytes=3-5\r\n", b"", true).unwrap();
+        assert!(headers.starts_with("HTTP/1.1 206")); assert_eq!(body, b"345");
+        let origin = format!("Origin: https://192.168.1.20:{}\r\n", server.port());
+        let (headers, body) = tls_request(&server, "POST", "/data/batch", &origin, br#"[["sample.bin",1,3],["sample.bin",8,20]]"#, true).unwrap();
+        assert!(headers.starts_with("HTTP/1.1 200")); assert!(headers.to_ascii_lowercase().contains("x-run-lengths: 3,2"));
+        assert_eq!(body, b"12389");
+        let (headers, body) = tls_request(&server, "HEAD", "/data/sample.bin", "", b"", true).unwrap();
+        assert!(headers.starts_with("HTTP/1.1 200")); assert!(headers.to_ascii_lowercase().contains("content-length: 10"));
+        assert!(body.is_empty());
+        let (headers, _) = tls_request(&server, "GET", "/data/sample.bin", "Range: bytes=40-\r\n", b"", true).unwrap();
+        assert!(headers.starts_with("HTTP/1.1 416")); assert!(headers.to_ascii_lowercase().contains("content-range: bytes */10"));
+        assert!(tls_request(&server, "POST", "/data/batch", "", br#"[["../index.html",0,1]]"#, true).unwrap().0.starts_with("HTTP/1.1 400"));
+        let (headers, body) = tls_request(&server, "GET", "/engine/online/game.wasm", "", b"", true).unwrap();
+        assert!(headers.starts_with("HTTP/1.1 200")); assert!(body.starts_with(b"\0asm"));
+        for path in ["/b/8b0b5899ed/game.wasm", "/b/8b0b5899ed/game-multiplayer.wasm"] {
+            assert!(tls_request(&server, "GET", path, "", b"", true).unwrap().0.starts_with("HTTP/1.1 410"));
+        }
+        assert!(tls_request(&server, "GET", "/data/%252e%252e/index.html", "", b"", true).unwrap().0.starts_with("HTTP/1.1 403"));
+        assert!(tls_request(&server, "GET", "/", "Origin: https://evil.invalid\r\n", b"", true).unwrap().0.starts_with("HTTP/1.1 403"));
+        let preferred_port = Some(server.port()); drop(server);
+        assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, preferred_port.unwrap())).is_err());
+        let restarted = start(info, runtime, client(), ServerConfig { preferred_port, ..config }).unwrap();
+        assert_eq!(Some(restarted.port()), preferred_port);
+        assert!(tls_request(&restarted, "GET", "/", "", b"", true).unwrap().0.starts_with("HTTP/1.1 200"));
+    }
+    #[test]
+    fn only_readiness_endpoint_allows_exact_http_guide_origin() {
+        let (temp, info, runtime) = fixture();
+        let server = start(info, runtime, client(), ServerConfig { lan: Some(lan_config()),
+            log_file: temp.path().join("log.txt"), ..Default::default() }).unwrap();
+        let origin = "Origin: http://192.168.1.20:8442\r\n";
+        let (headers, body) = tls_request(&server, "GET", "/api/lan/ready", origin, b"", true).unwrap();
+        assert!(headers.starts_with("HTTP/1.1 200"));
+        let headers = headers.to_ascii_lowercase();
+        assert!(headers.contains("access-control-allow-origin: http://192.168.1.20:8442"));
+        assert!(headers.contains("cache-control: no-store")); assert!(!headers.contains("cache-control: no-cache"));
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body, json!({"ready":true,"fingerprint":"AA:BB:CC"}));
+        for path in ["/", "/data/sample.bin", "/engine/offline/game.wasm", "/api/local-config", "/api/remote-config"] {
+            assert!(tls_request(&server, "GET", path, origin, b"", true).unwrap().0.starts_with("HTTP/1.1 403"), "{path}");
+        }
+        for path in ["/data/batch", "/log"] {
+            assert!(tls_request(&server, "POST", path, origin, b"[]", true).unwrap().0.starts_with("HTTP/1.1 403"), "{path}");
+        }
+        for extra in ["Origin: http://192.168.1.20:8441\r\n", "Origin: http://evil.invalid\r\n", "Origin: null\r\n", "Origin: http://192.168.1.20:8442\r\nOrigin: http://192.168.1.20:8442\r\n"] {
+            assert!(tls_request(&server, "GET", "/api/lan/ready", extra, b"", true).unwrap().0.starts_with("HTTP/1.1 403"));
+        }
+        assert!(tls_request(&server, "GET", "/api/lan/ready", "", b"", true).unwrap().0.starts_with("HTTP/1.1 200"));
+        let same_origin = format!("Origin: https://192.168.1.20:{}\r\n", server.port());
+        assert!(tls_request(&server, "GET", "/api/lan/ready", &same_origin, b"", true).unwrap().0.starts_with("HTTP/1.1 200"));
+        assert!(tls_request(&server, "POST", "/api/lan/ready", origin, b"", true).unwrap().0.starts_with("HTTP/1.1 405"));
+        let preflight = format!("{origin}Access-Control-Request-Method: GET\r\nAccess-Control-Request-Private-Network: true\r\n");
+        let (headers, body) = tls_request(&server, "OPTIONS", "/api/lan/ready", &preflight, b"", true).unwrap();
+        assert!(headers.starts_with("HTTP/1.1 204")); assert!(body.is_empty());
+        assert!(headers.to_ascii_lowercase().contains("access-control-allow-private-network: true"));
+    }
+    #[test]
+    fn a_busy_lan_port_is_reported_instead_of_silently_changing_the_shared_url() {
+        let (temp, info, runtime) = fixture();
+        let config = ServerConfig { lan: Some(lan_config()),
+            log_file: temp.path().join("log.txt"), ..Default::default() };
+        let first = start(info.clone(), runtime.clone(), client(), config.clone()).unwrap();
+        let result = start(info, runtime, client(), ServerConfig { preferred_port: Some(first.port()), ..config });
+        assert!(result.is_err());
+        assert!(tls_request(&first, "GET", "/", "", b"", true).unwrap().0.starts_with("HTTP/1.1 200"));
     }
     #[test]
     fn ranges_cover_suffix_clipping_and_invalid_reads() {
