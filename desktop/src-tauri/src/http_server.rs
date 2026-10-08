@@ -23,7 +23,7 @@ pub struct LanConfig {
     pub address: Ipv4Addr,
     pub tls_certificate: Vec<u8>,
     pub tls_private_key: Vec<u8>,
-    /// Only this HTTP guide can probe certificate trust; it cannot read game data.
+    /// This HTTP guide and the launcher may probe certificate trust, but cannot read game data.
     pub bootstrap_origin: String,
     pub ca_fingerprint: String,
 }
@@ -298,14 +298,20 @@ fn valid_request_context(
         .unwrap_or(true)
 }
 
+fn launcher_probe_origin(origin: &str) -> bool {
+    matches!(origin, "tauri://localhost" | "https://tauri.localhost" | "http://tauri.localhost")
+        || (cfg!(debug_assertions) && matches!(origin, "http://localhost:1420" | "http://127.0.0.1:1420"))
+}
+
 fn valid_origin(request: &Request, state: &State, readiness_probe: bool) -> bool {
     if request.headers().iter().filter(|header| header.field.equiv("Host")).count() != 1
         || request.headers().iter().filter(|header| header.field.equiv("Origin")).count() > 1 { return false; }
     let origin = header(request, "Origin");
-    let bootstrap_probe = readiness_probe && state.config.lan.as_ref()
-        .map(|lan| origin.as_deref() == Some(lan.bootstrap_origin.as_str())).unwrap_or(false);
+    let trusted_probe = readiness_probe && state.config.lan.as_ref()
+        .map(|lan| origin.as_deref().map(|origin|
+            origin == lan.bootstrap_origin || launcher_probe_origin(origin)).unwrap_or(false)).unwrap_or(false);
     valid_request_context(request.remote_addr().map(|address| address.ip()), request.secure(),
-        &header(request, "Host").unwrap_or_default(), if bootstrap_probe { None } else { origin.as_deref() },
+        &header(request, "Host").unwrap_or_default(), if trusted_probe { None } else { origin.as_deref() },
         state.port, state.config.lan.as_ref())
 }
 
@@ -764,6 +770,70 @@ mod tests {
         let (headers, body) = tls_request(&server, "OPTIONS", "/api/lan/ready", &preflight, b"", true).unwrap();
         assert!(headers.starts_with("HTTP/1.1 204")); assert!(body.is_empty());
         assert!(headers.to_ascii_lowercase().contains("access-control-allow-private-network: true"));
+    }
+    #[test]
+    fn launcher_origin_whitelist_is_exact_and_dev_origins_are_debug_only() {
+        for origin in ["tauri://localhost", "https://tauri.localhost", "http://tauri.localhost"] {
+            assert!(launcher_probe_origin(origin), "{origin}");
+        }
+        for origin in ["http://localhost:1420", "http://127.0.0.1:1420"] {
+            assert_eq!(launcher_probe_origin(origin), cfg!(debug_assertions), "{origin}");
+        }
+        for origin in ["null", "tauri://evil.invalid", "https://tauri.localhost.evil.invalid",
+            "https://tauri.localhost:443", "https://tauri.localhost/", "http://localhost:1421",
+            "https://localhost:1420", "http://127.0.0.1:1421", "http://user@tauri.localhost"] {
+            assert!(!launcher_probe_origin(origin), "{origin}");
+        }
+    }
+    #[test]
+    fn launcher_origins_can_probe_tls_readiness_but_cannot_read_resources() {
+        let (temp, info, runtime) = fixture();
+        let server = start(info, runtime, client(), ServerConfig { lan: Some(lan_config()),
+            log_file: temp.path().join("log.txt"), ..Default::default() }).unwrap();
+        let mut origins = vec!["tauri://localhost", "https://tauri.localhost", "http://tauri.localhost"];
+        if cfg!(debug_assertions) { origins.extend(["http://localhost:1420", "http://127.0.0.1:1420"]); }
+        for origin in origins {
+            let origin_header = format!("Origin: {origin}\r\n");
+            let (headers, body) = tls_request(&server, "GET", "/api/lan/ready", &origin_header, b"", true).unwrap();
+            assert!(headers.starts_with("HTTP/1.1 200"), "{origin}: {headers}");
+            assert!(headers.to_ascii_lowercase().contains(&format!("access-control-allow-origin: {origin}")));
+            assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), json!({"ready":true,"fingerprint":"AA:BB:CC"}));
+            let preflight = format!("{origin_header}Access-Control-Request-Method: GET\r\nAccess-Control-Request-Private-Network: true\r\n");
+            let (headers, body) = tls_request(&server, "OPTIONS", "/api/lan/ready", &preflight, b"", true).unwrap();
+            assert!(headers.starts_with("HTTP/1.1 204"), "{origin}: {headers}");
+            assert!(body.is_empty());
+            let headers = headers.to_ascii_lowercase();
+            assert!(headers.contains(&format!("access-control-allow-origin: {origin}")));
+            assert!(headers.contains("access-control-allow-methods: get"));
+            assert!(headers.contains("access-control-allow-private-network: true"));
+            for path in ["/", "/data/sample.bin", "/engine/offline/game.wasm", "/api/local-config", "/api/remote-config"] {
+                let (headers, _) = tls_request(&server, "GET", path, &origin_header, b"", true).unwrap();
+                assert!(headers.starts_with("HTTP/1.1 403"), "{origin} {path}: {headers}");
+                assert!(!headers.to_ascii_lowercase().contains("access-control-allow-origin:"));
+            }
+            for path in ["/data/batch", "/log"] {
+                assert!(tls_request(&server, "POST", path, &origin_header, b"[]", true).unwrap().0.starts_with("HTTP/1.1 403"), "{origin} {path}");
+            }
+            let duplicate = format!("{origin_header}{origin_header}");
+            assert!(tls_request(&server, "GET", "/api/lan/ready", &duplicate, b"", true).unwrap().0.starts_with("HTTP/1.1 403"), "{origin}");
+            let bad_preflight = format!("{origin_header}Access-Control-Request-Method: POST\r\n");
+            assert!(tls_request(&server, "OPTIONS", "/api/lan/ready", &bad_preflight, b"", true).unwrap().0.starts_with("HTTP/1.1 403"), "{origin}");
+        }
+        for origin in ["null", "tauri://evil.invalid", "https://tauri.localhost.evil.invalid", "http://localhost:1421"] {
+            let extra = format!("Origin: {origin}\r\n");
+            assert!(tls_request(&server, "GET", "/api/lan/ready", &extra, b"", true).unwrap().0.starts_with("HTTP/1.1 403"), "{origin}");
+            let preflight = format!("{extra}Access-Control-Request-Method: GET\r\n");
+            assert!(tls_request(&server, "OPTIONS", "/api/lan/ready", &preflight, b"", true).unwrap().0.starts_with("HTTP/1.1 403"), "{origin}");
+        }
+        assert!(tls_request(&server, "GET", "/api/lan/ready", "Origin: tauri://localhost\r\n", b"", false).is_err(),
+            "launcher probes must still require a trusted TLS certificate");
+    }
+    #[test]
+    fn launcher_probe_exception_does_not_apply_to_local_http_services() {
+        let (temp, info, runtime) = fixture();
+        let server = start(info, runtime, client(), ServerConfig {
+            log_file: temp.path().join("log.txt"), ..Default::default() }).unwrap();
+        assert!(request(&server, "GET", "/api/lan/ready", "Origin: tauri://localhost\r\n", b"").0.starts_with("HTTP/1.1 403"));
     }
     #[test]
     fn a_busy_lan_port_is_reported_instead_of_silently_changing_the_shared_url() {

@@ -103,14 +103,13 @@ export function lanSettings(lan) {
   return {
     port: lan?.settings?.port || 8443,
     httpPort: lan?.settings?.http_port || 8442,
-    address: lan?.host_address || lan?.addresses?.[0] || '',
+    address: lan?.settings?.address || '',
   };
 }
-export function lanActions({ desktop, selected, busy, updateRequired, lan }) {
+export function lanActions({ desktop, busy, updateRequired, lan, urls = [] }) {
   return {
     configure: Boolean(desktop && !busy && !updateRequired),
-    start: Boolean(desktop && selected && !busy && !updateRequired && !lan?.running_url),
-    stop: Boolean(desktop && !busy && lan?.running_url && !updateRequired),
+    save: Boolean(desktop && !busy && !updateRequired && !urls.length && !lan?.running_url),
   };
 }
 export function lanRequest(settings) {
@@ -118,6 +117,7 @@ export function lanRequest(settings) {
   const address = String(settings.address || '').trim();
   if (![port, httpPort].every((value) => Number.isInteger(value) && value >= 1 && value <= 65535)) throw new Error('游戏和引导页端口应为 1 至 65535 的整数。');
   if (port === httpPort) throw new Error('游戏 HTTPS 端口和安装引导 HTTP 端口不能相同。');
+  if (!address) return { port, httpPort, address: null };
   const parts = address.split('.');
   if (parts.length !== 4 || !parts.every((part) => /^(?:0|[1-9]\d{0,2})$/.test(part) && Number(part) <= 255)) throw new Error('请选择本机局域网 IPv4 地址。');
   const [a, b] = parts.map(Number);

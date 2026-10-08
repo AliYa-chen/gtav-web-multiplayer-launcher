@@ -13,9 +13,14 @@ use crate::lan_ca_embedded::{CERTIFICATE_PEM as CA_CERTIFICATE, PRIVATE_KEY_PEM 
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
-pub struct Settings { pub port: u16, pub http_port: u16 }
+pub struct Settings {
+    pub port: u16,
+    pub http_port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+}
 impl Default for Settings {
-    fn default() -> Self { Self { port: 8443, http_port: 8442 } }
+    fn default() -> Self { Self { port: 8443, http_port: 8442, address: None } }
 }
 
 pub struct PreparedLan {
@@ -50,22 +55,43 @@ pub fn addresses() -> Vec<String> {
 /// 网站证书和私钥只保留在内存；不写配置目录，也不触碰游戏资源。
 pub fn prepare(settings: Settings, address: &str)
     -> Result<PreparedLan, String> {
-    let ip = validate_settings(&settings, address)?;
-    TcpListener::bind(SocketAddrV4::new(ip, 0))
-        .map_err(|_| "此局域网 IP 不属于本机网卡，请重新选择。".to_string())?;
+    let ip = validate_local_settings(&settings, address)?;
     prepare_with_ca(settings, ip, CA_CERTIFICATE, CA_PRIVATE_KEY)
 }
 
+pub fn validate_local_settings(settings: &Settings, address: &str) -> Result<Ipv4Addr, String> {
+    let ip = validate_settings(settings, address)?;
+    TcpListener::bind(SocketAddrV4::new(ip, 0))
+        .map_err(|_| "此局域网 IP 不属于本机网卡，请重新选择。".to_string())?;
+    Ok(ip)
+}
+
+/// 额外客户端拥有独立的浏览器存储源和安装引导，仍共享同一份资源。
+pub fn additional_settings() -> Result<Settings, String> {
+    let game = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(|e| format!("无法分配客户端端口：{e}"))?;
+    let guide = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(|e| format!("无法分配证书引导端口：{e}"))?;
+    Ok(Settings {
+        port: game.local_addr().map_err(|e| e.to_string())?.port(),
+        http_port: guide.local_addr().map_err(|e| e.to_string())?.port(),
+        address: None,
+    })
+}
+
 fn validate_settings(settings: &Settings, address: &str) -> Result<Ipv4Addr, String> {
-    if settings.port == 0 || settings.http_port == 0 || settings.port == settings.http_port {
-        return Err("HTTPS 游戏端口和 HTTP 引导端口必须为不同的 1 至 65535 之间的端口。".into());
-    }
+    validate_ports(settings)?;
     let ip: Ipv4Addr = address.trim().parse()
         .map_err(|_| "请选择本机的局域网 IPv4 地址。".to_string())?;
     if !private_address(ip) {
         return Err("共享地址必须是本机的局域网 IPv4 地址，不能使用公网或回环地址。".into());
     }
     Ok(ip)
+}
+
+pub fn validate_ports(settings: &Settings) -> Result<(), String> {
+    if settings.port == 0 || settings.http_port == 0 || settings.port == settings.http_port {
+        return Err("HTTPS 游戏端口和 HTTP 引导端口必须为不同的 1 至 65535 之间的端口。".into());
+    }
+    Ok(())
 }
 
 fn prepare_with_ca(settings: Settings, ip: Ipv4Addr, certificate: &[u8], private_key: &[u8])
@@ -170,6 +196,102 @@ fn validate_certificate(cert: &CertificateDer<'_>, key: &KeyPair, ca: &Certifica
 mod tests {
     use super::*;
     use rcgen::BasicConstraints;
+    use std::{collections::HashMap, fs, io::{Read, Write}, net::TcpStream, sync::{Arc, RwLock}};
+
+    fn game_fixture() -> (tempfile::TempDir, crate::Prepared) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("game");
+        let data = root.join("data");
+        let runtime = temp.path().join("runtime");
+        fs::create_dir_all(&data).unwrap();
+        fs::create_dir_all(&runtime).unwrap();
+        fs::write(data.join("sample.bin"), b"shared resources").unwrap();
+        let resources = crate::resources::ResourceInfo {
+            root: root.canonicalize().unwrap(), data_root: data.canonicalize().unwrap(),
+            original_wasm: root.join("original.wasm"), manifest_version: "test".into(),
+            original_sha256: "test".into(), manifest_file_count: 1, sample_md5: None,
+        };
+        (temp, crate::Prepared { resources, runtime, fonts: HashMap::new() })
+    }
+
+    fn guide_page(url: &str) -> String {
+        let url = url::Url::parse(url).unwrap();
+        let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, url.port().unwrap())).unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+        write!(stream, "GET / HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n\r\n", url.host_str().unwrap(), url.port().unwrap()).unwrap();
+        let mut response = String::new(); stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"));
+        response
+    }
+
+    fn shared_resource(client: &crate::GameClient, root: &[u8]) -> Vec<u8> {
+        let url = url::Url::parse(&client.server.url()).unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(CertificateDer::from(root.to_vec())).unwrap();
+        let config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions().unwrap().with_root_certificates(roots).with_no_client_auth();
+        let name = ServerName::IpAddress(url.host_str().unwrap().parse::<IpAddr>().unwrap().into());
+        let connection = rustls::ClientConnection::new(Arc::new(config), name).unwrap();
+        let tcp = TcpStream::connect((Ipv4Addr::LOCALHOST, client.server.port())).unwrap();
+        tcp.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+        let mut stream = rustls::StreamOwned::new(connection, tcp);
+        write!(stream, "GET /data/sample.bin HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n\r\n", url.host_str().unwrap(), client.server.port()).unwrap();
+        let mut response = vec![];
+        if let Err(error) = stream.read_to_end(&mut response) {
+            assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+        }
+        assert!(response.starts_with(b"HTTP/1.1 200"));
+        response
+    }
+
+    #[test]
+    fn clients_have_independent_https_origins_and_guides_and_stop_together() {
+        let (temp, game) = game_fixture();
+        let (cert, key) = ca_fixture();
+        let state = crate::LauncherState::default();
+        let mut inner = crate::Inner::default();
+        let mut ports = vec![];
+        for index in 1..=2 {
+            let lan = prepared(additional_settings().unwrap(), "192.168.1.20", &cert, &key);
+            let root = lan.ca_certificate.clone();
+            inner.lan_fingerprint = Some(lan.fingerprint.clone());
+            let client = crate::start_client(&game, lan, index, temp.path(),
+                Arc::new(RwLock::new(serde_json::Value::Null)), "server.test:47485".into()).unwrap();
+            assert!(shared_resource(&client, &root).ends_with(b"shared resources"));
+            assert!(guide_page(&client.guide.url()).contains(&client.server.url()));
+            ports.push(client.server.port());
+            ports.push(url::Url::parse(&client.guide.url()).unwrap().port().unwrap());
+            inner.clients.push(client);
+        }
+        inner.lan_address = Some("192.168.1.20".into());
+        let snapshot = crate::snapshot(&inner, &state);
+        assert_eq!(snapshot.running_urls.len(), 2);
+        assert_eq!(snapshot.invitation_urls.len(), 2);
+        assert_ne!(snapshot.running_urls[0], snapshot.running_urls[1]);
+        assert_ne!(snapshot.invitation_urls[0], snapshot.invitation_urls[1]);
+        assert!(snapshot.running_urls.iter().all(|url| url.starts_with("https://192.168.1.20:")));
+        assert_eq!(snapshot.lan.running_url.as_ref(), snapshot.running_urls.first());
+        assert_eq!(snapshot.lan.guide_url.as_ref(), snapshot.invitation_urls.first());
+        crate::stop_clients(&mut inner);
+        assert!(crate::snapshot(&inner, &state).running_urls.is_empty());
+        assert!(crate::snapshot(&inner, &state).invitation_urls.is_empty());
+        assert!(inner.lan_address.is_none());
+        for port in ports { assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err(), "port {port}"); }
+        assert_eq!(fs::read(game.resources.data_root.join("sample.bin")).unwrap(), b"shared resources");
+    }
+
+    #[test]
+    fn occupied_guide_port_rolls_back_the_matching_https_service() {
+        let (temp, game) = game_fixture();
+        let (cert, key) = ca_fixture();
+        let occupied = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        let settings = Settings { http_port: occupied.local_addr().unwrap().port(), ..additional_settings().unwrap() };
+        let https_port = settings.port;
+        let lan = prepared(settings, "192.168.1.20", &cert, &key);
+        assert!(crate::start_client(&game, lan, 1, temp.path(),
+            Arc::new(RwLock::new(serde_json::Value::Null)), String::new()).is_err());
+        assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, https_port)).is_err());
+    }
 
     fn ca_fixture() -> (Vec<u8>, Vec<u8>) {
         let key = KeyPair::generate().unwrap();
@@ -196,7 +318,7 @@ mod tests {
     fn embedded_issuer_remains_identical_across_restarts_ports_and_ip_changes() {
         let (cert, key) = ca_fixture();
         let first = prepared(Settings::default(), "192.168.1.5", &cert, &key);
-        let restarted = prepared(Settings { port: 9000, http_port: 9001 }, "192.168.1.5", &cert, &key);
+        let restarted = prepared(Settings { port: 9000, http_port: 9001, ..Settings::default() }, "192.168.1.5", &cert, &key);
         assert_eq!(first.fingerprint, restarted.fingerprint);
         assert_eq!(first.ca_certificate, restarted.ca_certificate);
         assert_ne!(first.config.tls_private_key, restarted.config.tls_private_key);
@@ -253,7 +375,7 @@ mod tests {
         for address in ["0.0.0.0", "127.0.0.1", "8.8.8.8", "::1", "192.168.1.1:8443"] {
             assert!(prepare(Settings::default(), address).is_err());
         }
-        for settings in [Settings { port: 0, http_port: 8442 }, Settings { port: 8443, http_port: 0 }, Settings { port: 8443, http_port: 8443 }] {
+        for settings in [Settings { port: 0, http_port: 8442, ..Settings::default() }, Settings { port: 8443, http_port: 0, ..Settings::default() }, Settings { port: 8443, http_port: 8443, ..Settings::default() }] {
             assert!(prepare(settings, "192.168.1.1").is_err());
         }
         let foreign = ["10.231.249.199", "172.30.249.199", "192.168.254.199"].into_iter()
@@ -294,7 +416,7 @@ mod tests {
     #[test]
     fn default_http_port_uses_browser_canonical_origin() {
         let (cert, key) = ca_fixture();
-        let value = prepared(Settings { port: 443, http_port: 80 }, "192.168.1.2", &cert, &key);
+        let value = prepared(Settings { port: 443, http_port: 80, ..Settings::default() }, "192.168.1.2", &cert, &key);
         assert_eq!(value.config.bootstrap_origin, "http://192.168.1.2");
     }
 }

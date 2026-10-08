@@ -7,14 +7,16 @@ import * as presentation from '../src/view-state.js';
 const source = (await readFile(new URL('../src/main.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '');
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 async function launcher(desktop = true, options = {}) {
-  const calls = [], values = new Map(), events = new Map(), intervals = [], held = new Map(), failures = new Set(), copied = [];
-  let urls = [];
+  const calls = [], values = new Map(), events = new Map(), intervals = [], held = new Map(), failures = new Set(), copied = [], requests = [], timers = new Map();
+  let timerId = 0, fetchHandler = options.fetch || (async () => { throw new TypeError('TLS not trusted'); });
+  let urls = options.urls || [], invitationUrls = options.invitationUrls || [];
   let lan = { settings: { port: 8443, http_port: 8442 }, addresses: ['192.168.31.225'], running_url: null, guide_url: null, host_address: null, ca_fingerprint: null, ...options.lan };
   let remoteFailure = false;
   let resources = options.resources === undefined ? { manifest_file_count: 5814 } : options.resources;
   let remote = { config: { oltitle: 'https://gtav.2t.hk', latest_version: '0.2.5', downloads: { windows_x64: { url: 'https://oss.2t.hk/launcher.exe', sha256: 'a'.repeat(64) } }, announcements: [{ title: '<img>', body: '<script>unsafe</script>' }] }, source: 'remote' };
-  const status = () => ({ selected_directory: options.selected === undefined ? '/游戏资源' : options.selected, resources, running_urls: urls, lan, version: '0.2.5', platform: 'windows_x64', remote_configuration: remote });
-  const app = { innerHTML: '', addEventListener(name, callback) { events.set(`app:${name}`, callback); } };
+  const status = () => ({ selected_directory: options.selected === undefined ? '/游戏资源' : options.selected, resources, running_urls: urls, invitation_urls: invitationUrls, lan, version: '0.2.5', platform: 'windows_x64', remote_configuration: remote });
+  let renderCount = 0, rendered = '';
+  const app = { get innerHTML() { return rendered; }, set innerHTML(value) { rendered = value; renderCount++; }, addEventListener(name, callback) { events.set(`app:${name}`, callback); } };
   const nodes = new Map();
   const button = (id) => {
     if (!nodes.has(id)) nodes.set(id, { id, focus() { document.activeElement = this; } });
@@ -49,18 +51,27 @@ async function launcher(desktop = true, options = {}) {
       if (command === 'save_lan_ca_certificate') return options.caSaveResult === undefined ? '/证书/BinGo Root CA.crt' : options.caSaveResult;
       if (command === 'choose_game_directory') return '/新资源';
       if (command === 'prepare_game') resources = { manifest_file_count: 5814 };
-      if (command === 'start_game') urls = [...urls, `http://127.0.0.1:${61000 + urls.length}/`];
-      if (command === 'stop_game') urls = [];
-      if (command === 'start_lan_share') lan = { ...lan, settings: { port: args.port, http_port: args.httpPort }, host_address: args.address, running_url: `https://${args.address}:${args.port}/`, guide_url: `http://${args.address}:${args.httpPort}/`, ca_fingerprint: 'AB:'.repeat(31) + 'CD' };
-      if (command === 'stop_lan_share') lan = { ...lan, running_url: null, guide_url: null, host_address: null };
+      if (command === 'start_game') {
+        const address = lan.settings.address || '192.168.31.225', offset = urls.length * 2;
+        urls = [...urls, `https://${address}:${lan.settings.port + offset}/`];
+        invitationUrls = [...invitationUrls, `http://${address}:${lan.settings.http_port + offset}/`];
+        lan = { ...lan, host_address: address, running_url: urls[0], guide_url: invitationUrls[0], ca_fingerprint: 'AB:'.repeat(31) + 'CD' };
+      }
+      if (command === 'stop_game') { urls = []; invitationUrls = []; lan = { ...lan, running_url: null, guide_url: null, host_address: null }; }
+      if (command === 'save_lan_settings') lan = { ...lan, settings: { port: args.port, http_port: args.httpPort, address: args.address } };
       if (command === 'remote_configuration') { if (remoteFailure) throw new Error('failed request'); return remote; }
       return status();
     },
+    AbortController, URL, fetch: (...args) => { requests.push(args); return fetchHandler(...args); },
+    setTimeout: (callback, delay) => { const id = ++timerId; timers.set(id, { callback, delay }); return id; }, clearTimeout: (id) => timers.delete(id),
     setInterval: (callback, delay) => { intervals.push({ callback, delay }); return intervals.length; },
   });
   vm.runInContext(source, context);
   await tick();
-  return { calls, app, values, events, intervals, document, status, copied,
+  return { calls, app, values, events, intervals, document, status, copied, requests, timers,
+    renderCount: () => renderCount,
+    setFetch(handler) { fetchHandler = handler; },
+    async runTimer(delay) { const entry = [...timers].find(([, timer]) => timer.delay === delay); assert.ok(entry, `missing ${delay}ms timer`); timers.delete(entry[0]); entry[1].callback(); await tick(); },
     setRemote(value) { remote = value; remoteFailure = false; }, failRemote() { remoteFailure = true; },
     failCommand(command, failed = true) { failed ? failures.add(command) : failures.delete(command); },
     hold(command) { let resolve; const promise = new Promise((accept) => { resolve = accept; }); held.set(command, { promise }); return (value = status()) => { held.delete(command); resolve(value); }; },
@@ -187,13 +198,15 @@ test('实际启动界面仅通过后端读取远程配置，并从目录选择�
   await ui.click('choose');
   await ui.click('launch');
   assert.deepEqual(ui.calls.filter((call) => ['prepare_game', 'start_game', 'open_game'].includes(call.command)).map((call) => [call.command, JSON.stringify(call.args)]), [
-    ['prepare_game', '{"selected":"/新资源"}'], ['start_game', '{"additional":false}'], ['open_game', '{"index":0}'],
+    ['prepare_game', '{"selected":"/新资源"}'], ['start_game', '{"additional":false}'], ['open_game', '{"index":0,"trusted":false}'],
   ]);
-  await ui.click('additional');
-  assert.equal(ui.calls.at(-1).args.index, 1);
+  const beforeAdditional = ui.calls.length; await ui.click('additional');
+  assert.deepEqual(ui.calls.slice(beforeAdditional).map(call => call.command), ['start_game']);
+  await ui.click('', { copyClient: '1' });
+  assert.equal(ui.copied.at(-1), 'http://192.168.31.225:8444/');
   assert.match(ui.app.innerHTML, /2 个客户端已启动/);
   await ui.click('stop');
-  assert.match(ui.app.innerHTML, /游戏服务已停止/);
+  assert.match(ui.app.innerHTML, /游戏与局域网共享已停止/);
 });
 
 test('实际设置点击持久化背景，检查更新与下载始终交给受限的后端命令', async () => {
@@ -356,108 +369,108 @@ test('背景设置保留所有可选场景，关闭按钮与背景遮罩均可�
   assert.deepEqual(ui.calls.slice(before), []);
 });
 
-test('超过四个客户端时分页保留全局编号，最后一页打开正确客户端', async () => {
+test('新增客户端自动展示邀请地址，分页保留全局编号并打开正确客户端', async () => {
   const ui = await launcher();
   await ui.click('launch');
   for (let count = 1; count < 5; count++) await ui.click('additional');
   const clientIndices = () => [...ui.app.innerHTML.matchAll(/data-open="(\d+)"/g)].map((match) => Number(match[1]));
-  assert.deepEqual(clientIndices(), [0, 1, 2, 3]);
-  await ui.click('clients-next');
   assert.deepEqual(clientIndices(), [4]);
-  assert.match(ui.app.innerHTML, /客户端 5<code>http:\/\/127\.0\.0\.1:61004\//);
+  assert.match(ui.app.innerHTML, /客户端 5 · 朋友/);
+  assert.match(ui.app.innerHTML, /http:\/\/192\.168\.31\.225:8450\//);
   const before = ui.calls.length;
   await ui.click('', { open: '4' });
-  assert.deepEqual(ui.calls.slice(before).map((call) => [call.command, JSON.stringify(call.args)]), [['open_game', '{"index":4}']]);
+  assert.deepEqual(ui.calls.slice(before).map((call) => [call.command, JSON.stringify(call.args)]), [['open_game', '{"index":4,"trusted":false}']]);
+  await ui.click('', { copyClient: '4' }); assert.equal(ui.copied.at(-1), 'http://192.168.31.225:8450/');
   await ui.click('clients-next');
   assert.deepEqual(clientIndices(), [0, 1, 2, 3]);
 });
 
-test('共享使用内置统一 CA，无文件选择或域名配置；外部点击不关闭设置', async () => {
+test('共享设置默认自动检测 IP，仅保存设置，没有独立开启或停止共享入口', async () => {
   const ui = await launcher();
   await ui.click('lan-setup');
   assert.match(ui.app.innerHTML, /class="shell" inert aria-hidden="true"/);
-  assert.match(ui.app.innerHTML, /id="lan-address"[^>]*list="lan-ip-options"[^>]*value="192\.168\.31\.225"/);
+  assert.match(ui.app.innerHTML, /id="lan-address"[^>]*list="lan-ip-options"[^>]*value=""[^>]*placeholder="自动检测：192\.168\.31\.225/);
   assert.match(ui.app.innerHTML, /id="lan-http-port"[^>]*value="8442"/);
   assert.match(ui.app.innerHTML, /id="lan-port"[^>]*value="8443"/);
-  assert.match(ui.app.innerHTML, /所有共享主机和端口共用同一 CA，朋友信任一次即可/);
-  assert.doesNotMatch(ui.app.innerHTML, /type="file"|certificate_path|private_key_path|选择证书|选择私钥|游戏域名|域名须指向/);
+  assert.match(ui.app.innerHTML, /所有客户端共用 BinGo Root CA，朋友信任一次即可/);
+  assert.doesNotMatch(ui.app.innerHTML, /type="file"|certificate_path|private_key_path|id="lan-(?:start|stop|modal-stop)"/);
   ui.events.get('document:click')({ target: { closest: () => null } });
   assert.match(ui.app.innerHTML, /class="lan-overlay"/);
   await ui.click('lan-close');
   assert.doesNotMatch(ui.app.innerHTML, /class="lan-overlay"/);
 });
 
-test('共享自动准备资源，提交 IP 和双端口，邀请默认复制 HTTP 引导并可复制 HTTPS 及指纹', async () => {
+test('设置只提交 IP 和双端口，启动默认共享，朋友客户端不自动打开本机', async () => {
   const ui = await launcher(true, { resources: null });
   await ui.click('lan-setup');
   ui.input('address', '192.168.1.8'); ui.input('httpPort', '8445'); ui.input('port', '8444');
   const before = ui.calls.length;
-  await ui.click('lan-start');
+  await ui.click('lan-save');
   assert.deepEqual(ui.calls.slice(before).map((call) => [call.command, JSON.stringify(call.args)]), [
-    ['prepare_game', '{"selected":"/游戏资源"}'],
-    ['start_lan_share', '{"port":8444,"httpPort":8445,"address":"192.168.1.8"}'],
+    ['save_lan_settings', '{"port":8444,"httpPort":8445,"address":"192.168.1.8"}'],
   ]);
-  assert.match(ui.app.innerHTML, /http:\/\/192\.168\.1\.8:8445\//);
-  assert.match(ui.app.innerHTML, /https:\/\/192\.168\.1\.8:8444\//);
-  assert.match(ui.app.innerHTML, /CA SHA-256 指纹/);
-  await ui.click('lan-modal-copy'); await ui.click('lan-game-copy'); await ui.click('lan-fingerprint-copy');
-  assert.deepEqual(ui.copied, ['http://192.168.1.8:8445/', 'https://192.168.1.8:8444/', 'AB:'.repeat(31) + 'CD']);
-  await ui.click('lan-done'); await ui.click('lan-copy');
-  assert.equal(ui.copied.at(-1), 'http://192.168.1.8:8445/');
+  assert.doesNotMatch(ui.app.innerHTML, /class="lan-overlay"/);
   await ui.click('launch');
-  assert.match(ui.app.innerHTML, /1 个客户端已启动/);
-  assert.match(ui.app.innerHTML, /id="choose" disabled/);
-  await ui.click('lan-stop');
-  assert.equal(ui.calls.at(-1).command, 'stop_lan_share');
-  assert.match(ui.app.innerHTML, /1 个客户端已启动/);
-  assert.doesNotMatch(ui.app.innerHTML, /class="lan-address"/);
+  assert.match(ui.app.innerHTML, /http:\/\/192\.168\.1\.8:8445\//);
+  await ui.click('', { copyClient: '0' }); assert.equal(ui.copied.at(-1), 'http://192.168.1.8:8445/');
+  const opening = ui.calls.filter(call => call.command === 'open_game').length;
+  await ui.click('additional');
+  assert.equal(ui.calls.filter(call => call.command === 'open_game').length, opening);
+  assert.match(ui.app.innerHTML, /http:\/\/192\.168\.1\.8:8447\//);
+  await ui.click('', { copyClient: '1' }); assert.equal(ui.copied.at(-1), 'http://192.168.1.8:8447/');
+  assert.equal([...ui.app.innerHTML.matchAll(/id="stop"/g)].length, 1);
+  assert.doesNotMatch(ui.app.innerHTML, /id="lan-(?:start|stop|modal-stop)"/);
+  await ui.click('stop');
+  assert.equal(ui.calls.at(-1).command, 'stop_game');
+  assert.doesNotMatch(ui.app.innerHTML, /class="client-address"/);
+  assert.equal(ui.timers.size, 0);
 });
 
-test('共享连接失败保持设置，修复后可重试，剪贴板不可用不误报成功', async () => {
+test('保存失败保持输入以便修复重试，剪贴板失败不误报成功', async () => {
   const ui = await launcher(true, { clipboard: false });
   await ui.click('lan-setup'); ui.input('address', '192.168.1.8');
-  ui.failCommand('start_lan_share'); await ui.click('lan-start');
+  ui.failCommand('save_lan_settings'); await ui.click('lan-save');
   assert.match(ui.app.innerHTML, /class="lan-overlay"/);
-  assert.match(ui.app.innerHTML, /start_lan_share failed/);
+  assert.match(ui.app.innerHTML, /save_lan_settings failed/);
   assert.match(ui.app.innerHTML, /id="lan-address"[^>]*value="192\.168\.1\.8"/);
-  assert.doesNotMatch(ui.app.innerHTML, /class="lan-result"/);
-  ui.failCommand('start_lan_share', false); await ui.click('lan-start');
-  await ui.click('lan-modal-copy');
+  ui.failCommand('save_lan_settings', false); await ui.click('lan-save');
+  await ui.click('launch'); await ui.click('', { copyClient: '0' });
   assert.match(ui.app.innerHTML, /无法访问剪贴板，请手动复制/);
-  assert.doesNotMatch(ui.app.innerHTML, /地址已复制/);
+  assert.doesNotMatch(ui.app.innerHTML, /邀请地址已复制/);
 });
 
-test('共享拒绝重复端口和缺失 IP，强制更新阻止创建服务', async () => {
+test('保存拒绝重复端口，空 IP 保存自动检测，强制更新阻止变更设置', async () => {
   const ui = await launcher(); await ui.click('lan-setup');
   const before = ui.calls.length;
-  ui.input('httpPort', '8443'); await ui.click('lan-start');
+  ui.input('httpPort', '8443'); await ui.click('lan-save');
   assert.equal(ui.calls.length, before);
   assert.match(ui.app.innerHTML, /游戏 HTTPS 端口和安装引导 HTTP 端口不能相同/);
   publish(ui, newerSnapshot());
   assert.doesNotMatch(ui.app.innerHTML, /class="lan-overlay"/);
-  await ui.click('lan-start');
-  assert.equal(ui.calls.length, before);
+  await ui.click('lan-save'); assert.equal(ui.calls.length, before);
   const missing = await launcher(true, { lan: { addresses: [] } });
-  await missing.click('lan-setup'); const count = missing.calls.length;
-  assert.match(missing.app.innerHTML, /id="lan-start"[^>]*disabled/);
-  await missing.click('lan-start'); assert.equal(missing.calls.length, count);
-  assert.match(missing.app.innerHTML, /请选择本机局域网 IPv4 地址/);
+  await missing.click('lan-setup'); await missing.click('lan-save');
+  assert.equal(missing.calls.at(-1).command, 'save_lan_settings');
+  assert.equal(missing.calls.at(-1).args.address, null);
 });
 
-test('共享准备中 Esc 不退出，完成后退出面板仍保持 HTTP 与 HTTPS 服务', async () => {
+test('保存中 Esc 不退出，运行时设置只读且不另放停止按钮', async () => {
   const ui = await launcher(); await ui.click('lan-setup');
-  const finish = ui.hold('start_lan_share'), starting = ui.click('lan-start');
+  const finish = ui.hold('save_lan_settings'), saving = ui.click('lan-save');
   await tick();
   let prevented = false;
   ui.events.get('document:keydown')({ key: 'Escape', preventDefault() { prevented = true; } });
   assert.equal(prevented, true); assert.match(ui.app.innerHTML, /class="lan-overlay"/);
-  finish({ ...ui.status(), lan: { ...ui.status().lan, running_url: 'https://192.168.31.225:8443/', guide_url: 'http://192.168.31.225:8442/', host_address: '192.168.31.225' } });
-  await starting;
+  const count = ui.calls.length; ui.input('port', '9999'); await ui.click('lan-save'); assert.equal(ui.calls.length, count);
+  finish(); await saving; await ui.click('launch'); await ui.click('lan-setup');
+  assert.match(ui.app.innerHTML, /请先停止游戏，再修改 IP 或端口/);
+  assert.match(ui.app.innerHTML, /id="lan-address"[^>]*disabled/);
+  assert.match(ui.app.innerHTML, /id="lan-save"[^>]*disabled/);
+  assert.doesNotMatch(ui.app.innerHTML.slice(ui.app.innerHTML.indexOf('class="lan-overlay"')), /id="stop"|停止局域网共享/);
+  const before = ui.calls.length; await ui.click('lan-save'); assert.equal(ui.calls.length, before);
   ui.events.get('document:keydown')({ key: 'Escape', preventDefault() {} });
   assert.doesNotMatch(ui.app.innerHTML, /class="lan-overlay"/);
-  assert.match(ui.app.innerHTML, /class="lan-address"/);
-  assert.match(ui.app.innerHTML, /http:\/\/192\.168\.31\.225:8442/);
-  assert.equal(ui.calls.some((call) => call.command === 'stop_lan_share'), false);
+  assert.match(ui.app.innerHTML, /class="client-address"/);
 });
 
 
@@ -507,4 +520,113 @@ test('CA 操作禁止忙时重入、网页预览与强制更新时的原生命�
   assert.match(preview.app.innerHTML, /id="ca-install"[^>]*disabled/);
   assert.match(preview.app.innerHTML, /id="ca-save"[^>]*disabled/);
   await preview.click('ca-install'); await preview.click('ca-save'); assert.equal(preview.calls.length, 0);
+});
+
+const caFingerprint = 'AB:'.repeat(31) + 'CD';
+const readyResponse = (body = { ready: true, fingerprint: caFingerprint }, properties = {}) => ({ ok: true, type: 'cors', json: async () => body, ...properties });
+
+test('本机证书通过实际主客户端 HTTPS 与 CA 指纹验证，首次启动直接打开 HTTPS 并隐藏 CA 入口', async () => {
+  const ui = await launcher(true, { fetch: async () => readyResponse() });
+  await ui.click('launch');
+  assert.equal(ui.requests.length, 1);
+  assert.equal(ui.requests[0][0], 'https://192.168.31.225:8443/api/lan/ready');
+  for (const [key, value] of [['mode', 'cors'], ['credentials', 'omit'], ['cache', 'no-store'], ['redirect', 'error']]) assert.equal(ui.requests[0][1][key], value);
+  assert.equal(ui.calls.at(-1).command, 'open_game');
+  assert.equal(ui.calls.at(-1).args.trusted, true);
+  assert.doesNotMatch(ui.app.innerHTML, /id="ca-install"|id="ca-save"|ca-trust-fallback/);
+  assert.equal(ui.timers.size, 0);
+  await ui.click('additional');
+  assert.equal(ui.requests.length, 1);
+  await ui.click('launch'); assert.equal(ui.calls.at(-1).args.trusted, true);
+  await ui.click('stop'); assert.doesNotMatch(ui.app.innerHTML, /id="ca-install"|id="ca-save"/);
+});
+
+test('系统安装返回成功不会代替 HTTPS 检测，每四秒重试并在信任生效后隐藏失败说明', async () => {
+  const ui = await launcher(); await ui.click('launch');
+  assert.equal(ui.calls.at(-1).args.trusted, false);
+  assert.match(ui.app.innerHTML, /id="ca-install"|id="ca-save"/);
+  await ui.click('ca-install'); await tick();
+  assert.equal(ui.requests.length, 2);
+  assert.match(ui.app.innerHTML, /id="ca-install"/);
+  ui.failCommand('install_lan_ca'); await ui.click('ca-install'); await tick();
+  assert.match(ui.app.innerHTML, /自动安装未完成/);
+  ui.setFetch(async () => readyResponse()); await ui.runTimer(4000);
+  assert.doesNotMatch(ui.app.innerHTML, /id="ca-install"|id="ca-save"|自动安装未完成|install_lan_ca failed/);
+  assert.equal(ui.timers.size, 0);
+});
+
+test('不匹配指纹、未就绪、不透明响应、HTTP 错误和无效 JSON 都保留 CA 入口并重试', async () => {
+  for (const reply of [
+    readyResponse({ ready: true, fingerprint: 'OTHER' }),
+    readyResponse({ ready: false, fingerprint: caFingerprint }),
+    readyResponse(undefined, { type: 'opaque' }),
+    readyResponse(undefined, { ok: false }),
+    readyResponse(undefined, { json: async () => { throw new Error('invalid JSON'); } }),
+  ]) {
+    const ui = await launcher(true, { fetch: async () => reply }); await ui.click('launch');
+    assert.equal(ui.calls.at(-1).args.trusted, false);
+    assert.match(ui.app.innerHTML, /id="ca-install"|id="ca-save"/);
+    assert.equal([...ui.timers.values()].filter(timer => timer.delay === 4000).length, 1);
+  }
+});
+
+test('HTTPS 探测及 JSON 解析共用六秒超时，一次只发一个请求，超时可重新检测', async () => {
+  let finish;
+  const ui = await launcher(true, { fetch: async () => readyResponse(undefined, { json: () => new Promise(resolve => { finish = resolve; }) }) });
+  const launching = ui.click('launch'); await tick();
+  assert.equal(ui.requests.length, 1);
+  const count = ui.calls.length; await ui.click('launch'); await ui.click('ca-install'); assert.equal(ui.calls.length, count);
+  await ui.runTimer(6000); await launching;
+  assert.equal(ui.requests[0][1].signal.aborted, true);
+  assert.equal(ui.calls.at(-1).args.trusted, false);
+  finish({ ready: true, fingerprint: caFingerprint }); await tick();
+  assert.match(ui.app.innerHTML, /id="ca-install"/);
+  ui.setFetch(async () => readyResponse()); await ui.runTimer(4000);
+  assert.equal(ui.requests.length, 2);
+  assert.doesNotMatch(ui.app.innerHTML, /id="ca-install"|id="ca-save"/);
+});
+
+test('停止会取消探测与重试，旧请求即使迟到成功也不能标记为已信任', async () => {
+  let finish;
+  const ui = await launcher(); await ui.click('launch');
+  ui.setFetch(() => new Promise(resolve => { finish = resolve; })); await ui.runTimer(4000);
+  const pending = ui.requests.at(-1)[1].signal;
+  await ui.click('stop'); assert.equal(pending.aborted, true); assert.equal(ui.timers.size, 0);
+  finish(readyResponse()); await tick();
+  assert.match(ui.app.innerHTML, /id="ca-install"|id="ca-save"/);
+  assert.equal(ui.timers.size, 0);
+});
+
+test('更换运行 IP 重新验证，旧会话响应不能覆盖新会话证书状态', async () => {
+  let finish;
+  const ui = await launcher(); await ui.click('launch');
+  ui.setFetch(() => new Promise(resolve => { finish = resolve; })); await ui.runTimer(4000);
+  await ui.click('stop');
+  await ui.click('lan-setup'); ui.input('address', '10.0.0.7'); await ui.click('lan-save');
+  ui.setFetch(async () => { throw new TypeError('not trusted'); }); await ui.click('launch');
+  assert.equal(ui.requests.at(-1)[0], 'https://10.0.0.7:8443/api/lan/ready');
+  finish(readyResponse()); await tick();
+  assert.match(ui.app.innerHTML, /id="ca-install"/);
+  assert.equal(ui.calls.at(-1).args.trusted, false);
+  ui.setFetch(async () => readyResponse()); await ui.runTimer(4000);
+  assert.doesNotMatch(ui.app.innerHTML, /id="ca-install"/);
+});
+
+test('探测成功不重绘正在打开的设置面板，关闭后隐藏 CA 入口', async () => {
+  const ui = await launcher(); await ui.click('launch'); await ui.click('lan-setup');
+  const before = ui.renderCount();
+  ui.setFetch(async () => readyResponse()); await ui.runTimer(4000);
+  assert.equal(ui.renderCount(), before);
+  assert.match(ui.app.innerHTML, /class="lan-overlay"/);
+  await ui.click('lan-close');
+  assert.doesNotMatch(ui.app.innerHTML, /id="ca-install"|id="ca-save"/);
+});
+
+test('信任成功只清理 CA 安装错误，保留后来出现的剪贴板错误', async () => {
+  const ui = await launcher(true, { clipboard: false }); await ui.click('launch');
+  ui.failCommand('install_lan_ca'); await ui.click('ca-install'); await tick();
+  await ui.click('', { copyClient: '0' });
+  ui.setFetch(async () => readyResponse()); await ui.runTimer(4000);
+  assert.match(ui.app.innerHTML, /无法访问剪贴板，请手动复制/);
+  assert.doesNotMatch(ui.app.innerHTML, /id="ca-install"|id="ca-save"|自动安装未完成/);
 });

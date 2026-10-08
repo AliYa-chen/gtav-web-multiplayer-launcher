@@ -16,11 +16,12 @@ use tauri::{Emitter, Manager, State};
 static CLIENT: Dir<'_> = include_dir!("$OUT_DIR/embedded-client");
 
 #[derive(Default, Deserialize, Serialize)]
-struct Preferences { selected_directory: Option<String>, preferred_port: Option<u16>, #[serde(default)] lan_settings: Option<lan::Settings> }
+struct Preferences { selected_directory: Option<String>, #[serde(default)] lan_settings: Option<lan::Settings> }
 struct Prepared { resources: resources::ResourceInfo, runtime: PathBuf, fonts: HashMap<String, PathBuf> }
+struct GameClient { guide: lan_bootstrap::BootstrapHandle, server: http_server::ServerHandle }
 #[derive(Default)]
-struct Inner { selected: Option<String>, preferred_port: Option<u16>, prepared: Option<Prepared>, servers: Vec<http_server::ServerHandle>,
-    lan_settings: lan::Settings, lan_server: Option<http_server::ServerHandle>, lan_guide: Option<lan_bootstrap::BootstrapHandle>,
+struct Inner { selected: Option<String>, prepared: Option<Prepared>, clients: Vec<GameClient>,
+    lan_settings: lan::Settings,
     lan_address: Option<String>, lan_fingerprint: Option<String> }
 struct LauncherState { inner: Mutex<Inner>, busy: Arc<AtomicBool>, remote_busy: Arc<AtomicBool>,
     update_required: Arc<AtomicBool>, remote: Arc<RwLock<serde_json::Value>> }
@@ -40,7 +41,7 @@ fn acquire(state: &LauncherState) -> Result<BusyGuard, String> {
 }
 
 #[derive(Serialize)]
-struct LauncherStatus { selected_directory: Option<String>, resources: Option<resources::ResourceInfo>, running_urls: Vec<String>,
+struct LauncherStatus { selected_directory: Option<String>, resources: Option<resources::ResourceInfo>, running_urls: Vec<String>, invitation_urls: Vec<String>,
     version: &'static str, platform: &'static str, update_required: bool, remote_configuration: serde_json::Value, lan: LanStatus }
 #[derive(Serialize)]
 struct LanStatus { settings: lan::Settings, addresses: Vec<String>, running_url: Option<String>, guide_url: Option<String>,
@@ -87,9 +88,10 @@ fn snapshot(inner: &Inner, state: &LauncherState) -> LauncherStatus {
         (value.clone(), update_required)
     }).unwrap_or_else(|_| (serde_json::Value::Null, state.update_required.load(Ordering::Acquire)));
     LauncherStatus { selected_directory: inner.selected.clone(), resources: inner.prepared.as_ref().map(|p| p.resources.clone()),
-        running_urls: inner.servers.iter().map(|s| s.url()).collect(), version: env!("CARGO_PKG_VERSION"), platform: platform_key(),
+        running_urls: inner.clients.iter().map(|client| client.server.url()).collect(),
+        invitation_urls: inner.clients.iter().map(|client| client.guide.url()).collect(), version: env!("CARGO_PKG_VERSION"), platform: platform_key(),
         update_required, remote_configuration, lan: LanStatus { settings: inner.lan_settings.clone(), addresses: lan::addresses(),
-            running_url: inner.lan_server.as_ref().map(|server| server.url()), guide_url: inner.lan_guide.as_ref().map(|server| server.url()),
+            running_url: inner.clients.first().map(|client| client.server.url()), guide_url: inner.clients.first().map(|client| client.guide.url()),
             host_address: inner.lan_address.clone(), ca_fingerprint: inner.lan_fingerprint.clone().or_else(|| ca_trust::fingerprint().ok()) } }
 }
 fn preferences_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -98,7 +100,7 @@ fn preferences_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 fn save_preferences(app: &tauri::AppHandle, inner: &Inner) -> Result<(), String> {
     let path = preferences_path(app)?;
     fs::create_dir_all(path.parent().ok_or("启动器设置目录无效")?).map_err(|e| e.to_string())?;
-    let bytes = serde_json::to_vec_pretty(&Preferences { selected_directory: inner.selected.clone(), preferred_port: inner.preferred_port,
+    let bytes = serde_json::to_vec_pretty(&Preferences { selected_directory: inner.selected.clone(),
         lan_settings: Some(inner.lan_settings.clone()) }).map_err(|e| e.to_string())?;
     fs::write(&path, bytes).map_err(|e| format!("无法保存启动器设置：{e}"))
 }
@@ -134,7 +136,7 @@ fn progress(app: &tauri::AppHandle, phase: &str, text: &str) {
 async fn prepare_game(app: tauri::AppHandle, state: State<'_, LauncherState>, selected: String) -> Result<LauncherStatus, String> {
     ensure_current_launcher(&state)?;
     let _guard = acquire(&state)?;
-    if { let inner = state.inner.lock().map_err(|e| e.to_string())?; !inner.servers.is_empty() || inner.lan_server.is_some() } {
+    if { let inner = state.inner.lock().map_err(|e| e.to_string())?; !inner.clients.is_empty() } {
         return Err("请先停止正在运行的游戏服务，再更换资源目录。".into());
     }
     let cache = app.path().app_cache_dir().map_err(|e| e.to_string())?;
@@ -159,92 +161,96 @@ async fn prepare_game(app: tauri::AppHandle, state: State<'_, LauncherState>, se
     Ok(snapshot(&inner, &state))
 }
 
+fn start_client(prepared: &Prepared, lan: lan::PreparedLan, index: usize, log_dir: &Path,
+    remote: Arc<RwLock<serde_json::Value>>, multiplayer_server: String) -> Result<GameClient, String> {
+    let ip = lan.config.address;
+    let server = http_server::start(prepared.resources.clone(), prepared.runtime.clone(), embedded_client(), http_server::ServerConfig {
+        online_ready: true, instance_name: format!("玩家{index}"),
+        log_file: log_dir.join(format!("browser-{index}.log")), preferred_port: Some(lan.settings.port),
+        font_overrides: prepared.fonts.clone(), remote_configuration: remote, multiplayer_server,
+        lan: Some(lan.config), ..Default::default()
+    })?;
+    // 引导端口不可用时回滚 HTTPS，只有两者都成功才发布客户端。
+    let guide = lan_bootstrap::start(ip, lan.settings.http_port, server.port(), lan.ca_certificate, lan.fingerprint)?;
+    Ok(GameClient { guide, server })
+}
+
 #[tauri::command]
-fn start_game(app: tauri::AppHandle, state: State<'_, LauncherState>, additional: bool) -> Result<LauncherStatus, String> {
+async fn start_game(app: tauri::AppHandle, state: State<'_, LauncherState>, additional: bool) -> Result<LauncherStatus, String> {
     ensure_current_launcher(&state)?;
     let _guard = acquire(&state)?;
+    let (settings, address, index) = {
+        let inner = state.inner.lock().map_err(|e| e.to_string())?;
+        if !additional && !inner.clients.is_empty() { return Ok(snapshot(&inner, &state)); }
+        if inner.clients.len() >= 8 { return Err("最多同时开启 8 个客户端。".into()); }
+        inner.prepared.as_ref().ok_or("请先选择并校验游戏资源。")?;
+        let address = inner.lan_address.clone().or_else(|| inner.lan_settings.address.clone())
+            .or_else(|| lan::addresses().into_iter().next())
+            .ok_or("未检测到本机局域网 IPv4 地址，请连接局域网或在共享设置中选择本机 IP。")?;
+        let settings = if inner.clients.is_empty() { inner.lan_settings.clone() } else { lan::additional_settings()? };
+        (settings, address, inner.clients.len() + 1)
+    };
+    progress(&app, "lan", "正在使用本机局域网 IP 准备游戏服务…");
+    let lan = tauri::async_runtime::spawn_blocking(move || lan::prepare(settings, &address))
+        .await.map_err(|_| "局域网证书准备异常。".to_string())??;
+    ensure_current_launcher(&state)?;
+    let address = lan.config.address.to_string();
+    let fingerprint = lan.fingerprint.clone();
     let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
-    if !additional && !inner.servers.is_empty() { return Ok(snapshot(&inner, &state)); }
-    if inner.servers.len() >= 8 { return Err("最多同时开启 8 个测试客户端。".into()); }
-    let prepared = inner.prepared.as_ref().ok_or("请先选择并校验游戏资源。")?;
-    let index = inner.servers.len() + 1;
-    let log_file = app.path().app_log_dir().map_err(|e| e.to_string())?.join(format!("browser-{index}.log"));
-    let server = http_server::start(prepared.resources.clone(), prepared.runtime.clone(), embedded_client(), http_server::ServerConfig {
-        online_ready: true, instance_name: format!("玩家{index}"), log_file,
-        preferred_port: if index == 1 { inner.preferred_port } else { None }, font_overrides: prepared.fonts.clone(),
-        remote_configuration: state.remote.clone(),
-        multiplayer_server: configured_remote(&state).ok().and_then(|config| config.server.map(|server| server.websocket_url.unwrap_or(server.address)))
-            .unwrap_or_else(|| "183.66.27.21:47485".to_string()),
-        ..Default::default()
-    })?;
-    if index == 1 { inner.preferred_port = Some(server.port()); }
-    inner.servers.push(server);
-    save_preferences(&app, &inner)?;
+    let prepared = inner.prepared.as_ref().ok_or("游戏资源尚未就绪。")?;
+    let multiplayer_server = configured_remote(&state).ok()
+        .and_then(|config| config.server.map(|server| server.websocket_url.unwrap_or(server.address)))
+        .unwrap_or_else(|| "183.66.27.21:47485".to_string());
+    let client = start_client(prepared, lan, index, &app.path().app_log_dir().map_err(|e| e.to_string())?,
+        state.remote.clone(), multiplayer_server)?;
+    inner.clients.push(client);
+    inner.lan_address = Some(address);
+    inner.lan_fingerprint = Some(fingerprint);
+    progress(&app, "ready", "游戏服务已启动，可将客户端邀请地址发给局域网朋友。");
     Ok(snapshot(&inner, &state))
+}
+
+fn stop_clients(inner: &mut Inner) {
+    inner.clients.clear();
+    inner.lan_address = None;
+    inner.lan_fingerprint = None;
 }
 
 #[tauri::command]
 fn stop_game(state: State<'_, LauncherState>) -> Result<LauncherStatus, String> {
     let _guard = acquire(&state)?;
     let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
-    inner.servers.clear(); Ok(snapshot(&inner, &state))
-}
-
-#[tauri::command]
-fn open_game(state: State<'_, LauncherState>, index: usize) -> Result<(), String> {
-    ensure_current_launcher(&state)?;
-    let url = state.inner.lock().map_err(|e| e.to_string())?.servers.get(index).ok_or("游戏服务尚未启动。")?.url();
-    // 游戏在系统浏览器运行，避免依赖不同系统 WebView 的 WebGPU / WASM 线程支持。
-    open::that(url).map_err(|e| format!("无法打开默认浏览器，请复制游戏地址手动打开：{e}"))
-}
-
-#[tauri::command]
-async fn start_lan_share(app: tauri::AppHandle, state: State<'_, LauncherState>,
-    port: u16, http_port: u16, address: String) -> Result<LauncherStatus, String> {
-    ensure_current_launcher(&state)?;
-    let _guard = acquire(&state)?;
-    {
-        let inner = state.inner.lock().map_err(|e| e.to_string())?;
-        if inner.lan_server.is_some() { return Ok(snapshot(&inner, &state)); }
-        inner.prepared.as_ref().ok_or("请先选择并校验游戏资源。")?;
-    }
-    let settings = lan::Settings { port, http_port };
-    progress(&app, "lan", "使用内置 CA 签发本机局域网 IP 证书…");
-    let lan = tauri::async_runtime::spawn_blocking(move || lan::prepare(settings, &address))
-        .await.map_err(|_| "局域网证书准备异常。".to_string())??;
-    ensure_current_launcher(&state)?;
-    let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
-    let prepared = inner.prepared.as_ref().ok_or("游戏资源尚未就绪。")?;
-    let ip = lan.config.address;
-    let server = http_server::start(prepared.resources.clone(), prepared.runtime.clone(), embedded_client(), http_server::ServerConfig {
-        online_ready: true, instance_name: "局域网玩家".into(),
-        log_file: app.path().app_log_dir().map_err(|e| e.to_string())?.join("browser-lan.log"),
-        preferred_port: Some(lan.settings.port), font_overrides: prepared.fonts.clone(), remote_configuration: state.remote.clone(),
-        multiplayer_server: configured_remote(&state).ok().and_then(|config| config.server.map(|server| server.websocket_url.unwrap_or(server.address)))
-            .unwrap_or_default(), lan: Some(lan.config), ..Default::default()
-    })?;
-    // 两个监听器都成功才发布共享地址；引导端口冲突时自动停止刚开启的 HTTPS。
-    let guide = lan_bootstrap::start(ip, lan.settings.http_port, server.port(), lan.ca_certificate, lan.fingerprint.clone())?;
-    let previous_settings = inner.lan_settings.clone();
-    inner.lan_settings = lan.settings;
-    if let Err(error) = save_preferences(&app, &inner) {
-        inner.lan_settings = previous_settings;
-        drop(guide); drop(server); return Err(error);
-    }
-    inner.lan_address = Some(ip.to_string());
-    inner.lan_fingerprint = Some(lan.fingerprint);
-    inner.lan_server = Some(server);
-    inner.lan_guide = Some(guide);
-    progress(&app, "ready", "局域网共享已开启，朋友先打开 HTTP 安装引导地址。");
+    stop_clients(&mut inner);
     Ok(snapshot(&inner, &state))
 }
 
 #[tauri::command]
-fn stop_lan_share(state: State<'_, LauncherState>) -> Result<LauncherStatus, String> {
+fn open_game(state: State<'_, LauncherState>, index: usize, trusted: Option<bool>) -> Result<(), String> {
+    ensure_current_launcher(&state)?;
+    let inner = state.inner.lock().map_err(|e| e.to_string())?;
+    let client = inner.clients.get(index).ok_or("游戏服务尚未启动。")?;
+    // 未确认信任时先打开 HTTP 引导；引导页验证 HTTPS 后自动进入对应客户端。
+    let url = if trusted.unwrap_or(false) { client.server.url() } else { client.guide.url() };
+    drop(inner);
+    open::that(url).map_err(|e| format!("无法打开默认浏览器，请复制客户端邀请地址手动打开：{e}"))
+}
+
+#[tauri::command]
+fn save_lan_settings(app: tauri::AppHandle, state: State<'_, LauncherState>, port: u16, http_port: u16,
+    address: Option<String>) -> Result<LauncherStatus, String> {
+    ensure_current_launcher(&state)?;
     let _guard = acquire(&state)?;
+    let address = address.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty());
+    let settings = lan::Settings { port, http_port, address };
+    lan::validate_ports(&settings)?;
+    if let Some(address) = settings.address.as_ref() { lan::validate_local_settings(&settings, address)?; }
     let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
-    inner.lan_guide = None; inner.lan_server = None;
-    inner.lan_address = None; inner.lan_fingerprint = None;
+    if !inner.clients.is_empty() { return Err("请先停止游戏服务，再修改局域网 IP 或端口。".into()); }
+    let previous = std::mem::replace(&mut inner.lan_settings, settings);
+    if let Err(error) = save_preferences(&app, &inner) {
+        inner.lan_settings = previous;
+        return Err(error);
+    }
     Ok(snapshot(&inner, &state))
 }
 
@@ -374,7 +380,7 @@ pub fn run() {
                 .and_then(|bytes| serde_json::from_slice::<Preferences>(&bytes).ok()).unwrap_or_default();
             let state = app.state::<LauncherState>();
             let mut inner = state.inner.lock().unwrap();
-            inner.selected = settings.selected_directory; inner.preferred_port = settings.preferred_port;
+            inner.selected = settings.selected_directory;
             inner.lan_settings = settings.lan_settings.unwrap_or_default();
             drop(inner);
             let remote = state.remote.clone(); let busy = state.remote_busy.clone();
@@ -391,11 +397,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![launcher_status, choose_game_directory, prepare_game, start_game, stop_game, open_game,
             remote_configuration, open_update_download, open_project_website, open_game_resource_page,
-            start_lan_share, stop_lan_share, install_lan_ca, save_lan_ca_certificate])
+            save_lan_settings, install_lan_ca, save_lan_ca_certificate])
         .build(tauri::generate_context!()).expect("启动桌面界面失败")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
-                if let Ok(mut inner) = app.state::<LauncherState>().inner.lock() { inner.servers.clear(); inner.lan_guide = None; inner.lan_server = None; }
+                if let Ok(mut inner) = app.state::<LauncherState>().inner.lock() { stop_clients(&mut inner); }
             }
         });
 }

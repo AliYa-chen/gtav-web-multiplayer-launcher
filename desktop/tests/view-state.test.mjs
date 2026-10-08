@@ -110,20 +110,22 @@ test('强制更新期间禁止准备和打开新客户端，仍保留停止服�
   assert.deepEqual(launcherActions(current), { choose: false, launch: false, additional: false, stop: true, refresh: true });
   assert.deepEqual(launcherActions({ ...current, urls: [] }, true), { choose: false, launch: false, additional: false, stop: false, refresh: false });
 });
-test('局域网共享使用检测地址和独立引导、游戏端口，运行后保持已选 IP', () => {
-  assert.deepEqual(lanSettings({ settings: { port: 8443, http_port: 8442 }, addresses: ['192.168.1.5'] }), { port: 8443, httpPort: 8442, address: '192.168.1.5' });
-  assert.deepEqual(lanSettings({ settings: { port: 9443, http_port: 9442 }, host_address: '10.0.0.9', addresses: ['192.168.1.5'] }), { port: 9443, httpPort: 9442, address: '10.0.0.9' });
+test('局域网设置区分自动检测与手动指定，启动后禁止更改设置', () => {
+  assert.deepEqual(lanSettings({ settings: { port: 8443, http_port: 8442 }, addresses: ['192.168.1.5'] }), { port: 8443, httpPort: 8442, address: '' });
+  assert.deepEqual(lanSettings({ settings: { port: 9443, http_port: 9442, address: '10.0.0.9' }, host_address: '10.0.0.9' }), { port: 9443, httpPort: 9442, address: '10.0.0.9' });
   assert.deepEqual(lanSettings(null), { port: 8443, httpPort: 8442, address: '' });
-  assert.equal(lanActions({ desktop: true, selected: '/data', busy: false, updateRequired: false, lan: null }).start, true);
-  assert.equal(lanActions({ desktop: true, selected: '/data', busy: false, updateRequired: false, lan: { running_url: 'https://192.168.1.5:8443/' } }).stop, true);
-  assert.equal(lanActions({ desktop: true, selected: '/data', busy: false, updateRequired: false, lan: { running_url: 'https://192.168.1.5:8443/' } }).start, false);
-  assert.equal(lanActions({ desktop: true, selected: '/data', busy: false, updateRequired: true, lan: null }).start, false);
+  const current = { desktop: true, selected: '/data', busy: false, updateRequired: false, lan: null };
+  assert.deepEqual(lanActions(current), { configure: true, save: true });
+  assert.deepEqual(lanActions({ ...current, urls: ['https://192.168.1.5:8443/'] }), { configure: true, save: false });
+  assert.equal(lanActions({ ...current, busy: true }).save, false);
+  assert.equal(lanActions({ ...current, updateRequired: true }).save, false);
 });
-test('共享请求仅提交两个不同端口和本机局域网 IPv4', () => {
+test('共享设置请求提交不同双端口，空白 IP 表示自动检测', () => {
   assert.deepEqual(lanRequest({ port: '8443', httpPort: '8442', address: ' 192.168.31.225 ' }), { port: 8443, httpPort: 8442, address: '192.168.31.225' });
+  assert.deepEqual(lanRequest({ port: 8443, httpPort: 8442, address: ' ' }), { port: 8443, httpPort: 8442, address: null });
   const valid = { port: 8443, httpPort: 8442, address: '192.168.1.2' };
   for (const changes of [
-    { httpPort: 8443 }, { address: '' }, { address: '127.0.0.1' }, { address: '8.8.8.8' },
+    { httpPort: 8443 }, { address: '127.0.0.1' }, { address: '8.8.8.8' },
     { port: 70000 }, { httpPort: 0 }, { port: 1.5 }, { httpPort: '' },
     { address: '192.168.1.999' }, { address: '192.168.01.2' }, { address: 'https://192.168.1.2' },
   ]) assert.throws(() => lanRequest({ ...valid, ...changes }));
