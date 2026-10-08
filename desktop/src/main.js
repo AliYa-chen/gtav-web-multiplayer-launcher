@@ -1,7 +1,7 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import metadata from '../package.json';
-import { escapeHtml as html, displayDirectory, progressValue, readBackground, saveBackground, remotePresentation, launcherActions } from './view-state.js';
+import { escapeHtml as html, displayDirectory, progressValue, readBackground, saveBackground, remotePresentation, launcherActions, paginateText } from './view-state.js';
 import { backgrounds } from './backgrounds.js';
 import './style.css';
 
@@ -12,6 +12,7 @@ const state = {
   desktop: isTauri(), selected: '', resources: null, urls: [], version: metadata.version, busy: false, phase: '',
   message: '选择你的游戏资源，下一站就是洛圣都。', error: '', background: readBackground(storage, backgroundIds), settingsOpen: false,
   remote: null, remoteBusy: false, remoteError: '', platform: '',
+  announcementIndex: 0, clientPage: 0, reading: null, readingPage: 0,
 };
 const icons = {
   folder: '<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3z"/><path d="M3 10h18"/></svg>',
@@ -22,6 +23,7 @@ const icons = {
   refresh: '<svg viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6 7a7 7 0 0 1 12-1l2 6M4 12l2 6a7 7 0 0 0 12-1"/></svg>',
   download: '<svg viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/></svg>',
   bell: '<svg viewBox="0 0 24 24"><path d="M5 16h14l-2-3V9a5 5 0 0 0-10 0v4zm5 4h4"/></svg>',
+  close: '<svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg>',
 };
 function updateStatus(value) {
   state.selected = value.selected_directory || state.selected;
@@ -33,45 +35,42 @@ function updateStatus(value) {
 }
 function render() {
   const running = state.urls.length > 0, ready = Boolean(state.resources);
-  const pickerScroll = document.querySelector('.background-grid')?.scrollTop || 0;
   const focusedBackground = document.activeElement?.dataset?.background;
   const actions = launcherActions(state, state.remoteBusy), remote = remotePresentation(state.remote, state.version, state.platform);
   const background = backgrounds.find((item) => item.id === state.background) || backgrounds[0];
+  state.announcementIndex = Math.min(state.announcementIndex, Math.max(0, remote.announcements.length - 1));
+  state.clientPage = Math.min(state.clientPage, Math.max(0, Math.ceil(state.urls.length / 4) - 1));
+  const announcement = remote.announcements[state.announcementIndex];
+  const visibleClients = state.urls.slice(state.clientPage * 4, state.clientPage * 4 + 4);
+  const pages = state.reading ? paginateText(state.reading.text) : [];
+  state.readingPage = Math.min(state.readingPage, Math.max(0, pages.length - 1));
   document.documentElement.style.setProperty('--scene', `url("${background.image}")`);
   app.innerHTML = `<div class="scene" aria-hidden="true"></div><div class="shell">
-    <aside class="sidebar"><div class="brand"><span class="brand__mark">V</span><div>GTA5DATA<span>公共战局启动器</span></div></div>
-      <div class="nav-label">你的启动空间</div><div class="nav-item"><span class="nav-icon">◈</span> 游戏启动器 <span class="nav-dot"></span></div>
-      <div class="sidebar__bottom"><div class="engine-label"><span class="status-dot ${running ? 'live' : ''}"></span>${running ? '游戏服务运行中' : '随时准备出发'}</div>
-        <p>你的世界，<br>共同的战局。</p><span class="version">启动器 ${html(state.version)}</span></div>
-    </aside>
-    <main><header><span class="header-label">GTA V / 公共战局</span><div class="header-actions"><span class="pill"><span class="status-dot ${running ? 'live' : ''}"></span>${running ? `${state.urls.length} 个客户端已启动` : '启动器就绪'}</span>
+    <main><header><div class="brand"><span class="brand__mark">V<span>ONLINE</span></span><div>GTA5DATA<span>公共战局启动器</span></div></div><div class="header-actions"><span class="pill"><span class="status-dot ${running ? 'live' : ''}"></span>${running ? `${state.urls.length} 个客户端已启动` : '启动器就绪'}</span>
       <div class="settings"><button id="settings-toggle" class="settings-toggle ${state.settingsOpen ? 'is-open' : ''}" aria-expanded="${state.settingsOpen}" aria-controls="background-picker">${icons.settings} 设置 ${icons.chevron}</button>
-        ${state.settingsOpen ? `<section id="background-picker" class="background-picker" aria-label="背景设置"><div class="picker-heading"><h2>背景切换</h2><span>为你的下一站换个风景</span></div><div class="background-grid">${backgrounds.map((item) => `<button class="background-option ${item.id === state.background ? 'selected' : ''}" data-background="${item.id}" aria-pressed="${item.id === state.background}" aria-label="选择背景：${html(item.label)}"><img src="${item.image}" alt="${html(item.label)}" loading="lazy"><span>${html(item.label)}${item.id === state.background ? icons.check : ''}</span></button>`).join('')}</div></section>` : ''}
+        ${state.settingsOpen ? `<button class="picker-backdrop" id="picker-dismiss" aria-label="关闭背景设置"></button><section id="background-picker" class="background-picker" role="dialog" aria-modal="true" aria-labelledby="picker-title"><div class="picker-heading"><div><p class="eyebrow">YOUR LOS SANTOS</p><h2 id="picker-title">换一处风景</h2><span>12 个场景 · 主图完整展示</span></div><button id="picker-close" class="icon-button" aria-label="关闭背景设置">${icons.close}</button></div><div class="background-grid">${backgrounds.map((item) => `<button class="background-option ${item.id === state.background ? 'selected' : ''}" data-background="${item.id}" aria-pressed="${item.id === state.background}" aria-label="选择背景：${html(item.label)}"><img src="${item.image}" alt="${html(item.label)}" loading="lazy"><span>${html(item.label)}${item.id === state.background ? icons.check : ''}</span></button>`).join('')}</div></section>` : ''}
       </div></div></header>
-      <section class="hero"><div class="hero__copy"><p class="eyebrow">你的世界，共同的战局</p><h1>下一站，<br><em>洛圣都。</em></h1><p class="hero__description">带上你的游戏资源。<br>从单人探索到公共战局，一键出发。</p></div><span class="scene-label">${html(background.label)}</span></section>
+      <section class="hero"><div class="hero__copy"><p class="eyebrow"><span class="status-dot live"></span> 你的世界，共同的战局</p><h1>下一站，<em>洛圣都。</em></h1><p class="hero__description">带上你的游戏资源，从单人探索到公共战局。</p></div><span class="scene-label">${html(background.label)}</span></section>
       <div class="dashboard"><div class="game-column"><section class="glass setup-card"><div class="section-heading"><span class="step-number">01</span><div><h2>选择游戏资源</h2><p>选择资源文件夹，或其中的 b / data 目录。</p></div><span class="resource-badge ${ready ? 'verified' : ''}">${ready ? `${icons.check} 已通过校验` : '首次设置'}</span></div>
         <button class="directory" id="choose" ${actions.choose ? '' : 'disabled'}><span class="folder-icon">${icons.folder}</span><span class="directory__text"><small>${state.selected ? '所选目录' : '游戏资源目录'}</small><span title="${html(state.selected)}">${html(displayDirectory(state.selected))}</span></span><span class="browse">${state.selected ? '更换' : '选择'} ↗</span></button>
         ${ready ? `<div class="resource-detail"><span>${icons.check} ${Number(state.resources.manifest_file_count || 0).toLocaleString()} 项资源</span><span>资源只读，不修改游戏数据</span></div>` : '<p class="directory-note">支持原始资源包；自动识别目录，使用启动器内置游戏页面。</p>'}
       </section>
-      <section class="glass launch-card"><div class="launch-copy"><div class="section-heading"><span class="step-number">02</span><div><h2>${running ? '游戏已准备就绪' : '启动你的游戏'}</h2><p>${running ? '继续游戏，或邀请另一个客户端加入战局。' : '准备完成后，在默认浏览器中开启游戏。'}</p></div></div>
-          <div class="progress-status ${state.error ? 'has-error' : ''}" role="status" aria-live="polite"><span class="${state.busy ? 'spinner' : 'status-dot'}"></span>${html(state.error || state.message)}</div>
+      <section class="glass launch-card"><div class="launch-main"><div class="launch-copy"><div class="section-heading"><span class="step-number">02</span><div><h2>${running ? '游戏已准备就绪' : '启动你的游戏'}</h2><p>${running ? '继续游戏，或邀请另一个客户端加入战局。' : '准备完成后，在默认浏览器中开启游戏。'}</p></div></div>
+          <div class="progress-status ${state.error ? 'has-error' : ''}" role="status" aria-live="polite"><span class="${state.busy ? 'spinner' : 'status-dot'}"></span><span class="status-copy" title="${html(state.error || state.message)}">${html(state.error || state.message)}</span>${state.error ? '<button class="text-button" data-read="error">详情</button>' : ''}</div>
           ${state.busy ? `<div class="progress-track"><span style="width:${progressValue(state.phase)}%"></span></div>` : ''}</div>
         <div class="launch-actions"><button id="launch" class="primary" ${actions.launch ? '' : 'disabled'}>${running ? '打开游戏' : state.busy ? '正在准备…' : '启动游戏'}${icons.arrow}</button>
-          ${running ? `<button id="additional" class="secondary" ${actions.additional ? '' : 'disabled'}>另开一个客户端</button><button id="stop" class="text-button" ${actions.stop ? '' : 'disabled'}>停止游戏服务</button>` : `<button id="verify" class="text-button" ${actions.launch ? '' : 'disabled'}>检查资源</button>`}</div>
-      </section>
-      ${running ? `<div class="addresses">${state.urls.map((url, index) => `<button data-open="${index}" ${state.busy ? 'disabled' : ''}><span class="status-dot live"></span>客户端 ${index + 1}<code>${html(url)}</code> ↗</button>`).join('')}</div>` : ''}</div>
+          ${running ? `<button id="additional" class="secondary" ${actions.additional ? '' : 'disabled'}>另开一个客户端</button><button id="stop" class="text-button" ${actions.stop ? '' : 'disabled'}>停止游戏服务</button>` : `<button id="verify" class="text-button" ${actions.launch ? '' : 'disabled'}>检查资源</button>`}</div></div>
+      ${running ? `<div class="addresses">${visibleClients.map((url, offset) => `<button data-open="${state.clientPage * 4 + offset}" ${state.busy ? 'disabled' : ''}><span class="status-dot live"></span>客户端 ${state.clientPage * 4 + offset + 1}<code>${html(url)}</code> ↗</button>`).join('')}${state.urls.length > 4 ? `<button id="clients-next" class="client-page" aria-label="显示下一组客户端">${state.clientPage + 1} / ${Math.ceil(state.urls.length / 4)} ${icons.arrow}</button>` : ''}</div>` : ''}</section></div>
       <aside class="community-column"><section class="glass announcement-card"><div class="card-heading"><h2>${icons.bell} 战局公告</h2><span class="config-source">${html(remote.sourceText)}</span></div>
-        ${remote.announcements.length ? `<div class="announcements">${remote.announcements.map((item) => `<article><div class="announcement-heading"><h3>${html(item.title)}</h3>${item.date ? `<time>${html(item.date)}</time>` : ''}</div><p>${html(item.body)}</p></article>`).join('')}</div>` : '<p class="empty-note">暂无公告。准备好，就出发吧。</p>'}
+        ${announcement ? `<div class="announcements"><article><div class="announcement-heading"><h3 title="${html(announcement.title)}">${html(announcement.title)}</h3>${announcement.date ? `<time>${html(announcement.date)}</time>` : ''}</div><p>${html(announcement.body)}</p></article><div class="announcement-actions"><button class="text-button" data-read="announcement">查看详情 ↗</button>${remote.announcements.length > 1 ? `<div class="pager"><button id="announcement-prev" aria-label="上一条公告" ${state.announcementIndex ? '' : 'disabled'}>‹</button><span>${state.announcementIndex + 1} / ${remote.announcements.length}</span><button id="announcement-next" aria-label="下一条公告" ${state.announcementIndex < remote.announcements.length - 1 ? '' : 'disabled'}>›</button></div>` : ''}</div></div>` : '<p class="empty-note">暂无公告。准备好，就出发吧。</p>'}
         ${remote.title ? `<div class="server-info"><span>在线模式服务器状态</span><strong>${html(remote.title)}</strong>${remote.websiteAvailable && state.desktop ? '<button id="website" class="text-button">查看服务器状态 ↗</button>' : ''}</div>` : ''}
       </section><section class="glass update-card"><div class="card-heading"><h2>版本更新</h2><span class="version-chip">v${html(state.version)}</span></div><p class="update-state ${remote.update ? 'update-available' : ''}">${html(remote.versionText)}</p>
-        ${remote.releaseNotes ? `<p class="release-notes">${html(remote.releaseNotes)}</p>` : ''}
+        ${remote.releaseNotes ? `<p class="release-notes">${html(remote.releaseNotes)}</p><button class="text-button notes-link" data-read="release">版本详情 ↗</button>` : ''}
         <div class="update-actions">${remote.downloadAvailable ? `<button id="update-download" class="secondary download-button" ${state.remoteBusy || !state.desktop ? 'disabled' : ''}>${icons.download} 下载新版本</button>` : ''}<button id="check-updates" class="text-button" ${actions.refresh ? '' : 'disabled'}>${state.remoteBusy ? '<span class="spinner"></span>' : icons.refresh}${state.remoteBusy ? '正在检查…' : '检查更新'}</button></div>
         ${state.remoteError ? `<p class="remote-note" role="status">${html(state.remoteError)}</p>` : state.remote?.source === 'cache' ? '<p class="remote-note">暂时无法连接，正在显示已缓存的信息。</p>' : ''}
       </section></aside></div>
-      <footer><span>保持启动器开启，畅游洛圣都</span><span>关闭启动器会停止游戏服务</span></footer>
-    </main></div>`;
-  const picker = document.querySelector('.background-grid');
-  if (picker) picker.scrollTop = pickerScroll;
+      <footer><span>GTA V / 公共战局 <i></i> 启动器 ${html(state.version)}</span><span>保持启动器开启，畅游洛圣都</span></footer>
+    </main></div>${state.reading ? `<div class="reader-overlay"><button id="reader-dismiss" class="reader-backdrop" aria-label="关闭详情"></button><section class="glass reader" role="dialog" aria-modal="true" aria-labelledby="reader-title"><div class="reader-heading"><h2 id="reader-title">${html(state.reading.title)}</h2><button id="reader-close" class="icon-button" aria-label="关闭详情">${icons.close}</button></div><div class="reader-text">${html(pages[state.readingPage] || '')}</div><div class="reader-footer"><span>第 ${state.readingPage + 1} / ${Math.max(1, pages.length)} 页</span><div class="pager"><button id="reader-prev" ${state.readingPage ? '' : 'disabled'} aria-label="上一页">‹</button><button id="reader-next" ${state.readingPage < pages.length - 1 ? '' : 'disabled'} aria-label="下一页">›</button></div></div></section></div>` : ''}`;
   if (focusedBackground && state.settingsOpen) document.querySelector(`[data-background="${focusedBackground}"]`)?.focus({ preventScroll: true });
 }
 async function operation(work) {
@@ -98,8 +97,26 @@ async function prepare() {
 app.addEventListener('click', async (event) => {
   const target = event.target.closest('button'); if (!target || target.disabled) return;
   if (target.id === 'settings-toggle') {
-    state.settingsOpen = !state.settingsOpen; render();
+    state.settingsOpen = !state.settingsOpen; state.reading = null; render();
     if (state.settingsOpen) document.querySelector('.background-option.selected')?.focus();
+  } else if (target.id === 'picker-close' || target.id === 'picker-dismiss') {
+    state.settingsOpen = false; render(); document.querySelector('#settings-toggle')?.focus();
+  } else if (target.dataset.read) {
+    const remote = remotePresentation(state.remote, state.version, state.platform);
+    const item = remote.announcements[state.announcementIndex];
+    if (target.dataset.read === 'announcement' && item) state.reading = { title: item.title, text: `${item.date ? `${item.date}\n\n` : ''}${item.body}` };
+    else if (target.dataset.read === 'release') state.reading = { title: '版本说明', text: remote.releaseNotes };
+    else if (target.dataset.read === 'error') state.reading = { title: '启动信息', text: state.error };
+    state.readingPage = 0; state.settingsOpen = false; render(); document.querySelector('#reader-close')?.focus();
+  } else if (target.id === 'reader-close' || target.id === 'reader-dismiss') {
+    state.reading = null; render();
+  } else if (target.id === 'reader-prev' || target.id === 'reader-next') {
+    state.readingPage += target.id === 'reader-next' ? 1 : -1; render(); document.querySelector(`#${target.id}`)?.focus();
+  } else if (target.id === 'announcement-prev' || target.id === 'announcement-next') {
+    const count = remotePresentation(state.remote, state.version, state.platform).announcements.length;
+    state.announcementIndex = Math.max(0, Math.min(count - 1, state.announcementIndex + (target.id === 'announcement-next' ? 1 : -1))); render();
+  } else if (target.id === 'clients-next') {
+    state.clientPage = (state.clientPage + 1) % Math.ceil(state.urls.length / 4); render();
   } else if (target.dataset.background) {
     if (!backgroundIds.includes(target.dataset.background)) return;
     state.background = target.dataset.background; saveBackground(storage, state.background, backgroundIds); render();
@@ -131,7 +148,15 @@ document.addEventListener('click', (event) => {
   if (state.settingsOpen && !event.target.closest('.settings')) { state.settingsOpen = false; render(); }
 });
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && state.settingsOpen) { state.settingsOpen = false; render(); document.querySelector('#settings-toggle')?.focus(); }
+  if (event.key === 'Escape' && (state.settingsOpen || state.reading)) { state.settingsOpen = false; state.reading = null; render(); document.querySelector('#settings-toggle')?.focus(); }
+  if (event.key === 'Tab' && (state.settingsOpen || state.reading)) {
+    const dialog = document.querySelector('[role="dialog"]');
+    if (!dialog) return;
+    const buttons = [...dialog.querySelectorAll('button:not(:disabled)')];
+    const first = buttons[0], last = buttons.at(-1);
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+  }
 });
 render();
 if (state.desktop) {

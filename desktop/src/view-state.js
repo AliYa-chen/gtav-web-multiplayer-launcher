@@ -4,6 +4,35 @@ export function displayDirectory(value) { return value || '尚未选择游戏资
 export function canLaunch({ selected, busy, desktop }) { return Boolean(selected && !busy && desktop); }
 export function progressValue(phase) { return phases[phase]?.[1] || 0; }
 
+export function paginateText(value, { lines = 12, columns = 34 } = {}) {
+  const text = String(value ?? '');
+  if (!text) return [];
+  const limit = (value, fallback) => Number.isFinite(value) && value >= 1 ? Math.floor(value) : fallback;
+  const lineLimit = limit(lines, 12), columnLimit = limit(columns, 34);
+  const segments = typeof Intl.Segmenter === 'function'
+    ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)
+    : text.matchAll(/\r\n|./gsu);
+  const pages = [];
+  let page = '', line = 1, column = 0;
+  const finishPage = () => { if (page) pages.push(page); page = ''; line = 1; column = 0; };
+  for (const segment of segments) {
+    const char = segment.segment ?? segment[0];
+    const newline = /^(?:\r\n|[\r\n\u2028\u2029])$/.test(char);
+    // A full line wraps only when the next character needs space; its newline belongs to that same line.
+    if (!newline && column === columnLimit) {
+      if (line === lineLimit) finishPage();
+      else { line++; column = 0; }
+    }
+    page += char;
+    if (newline) {
+      if (line === lineLimit) finishPage();
+      else { line++; column = 0; }
+    } else column++;
+  }
+  finishPage();
+  return pages;
+}
+
 export const backgroundPreferenceKey = 'gta5data.launcher.background';
 export const defaultBackground = 'sunglasses';
 export function readBackground(storage, allowed) {

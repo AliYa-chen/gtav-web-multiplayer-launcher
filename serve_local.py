@@ -15,7 +15,7 @@ DEFAULT_ROOM_SERVER = '183.66.27.21:47485'
 LOG_FILE = Path(__file__).resolve().parent / 'docs' / 'snapshot' / 'browser-local.log'
 LOG_LOCK = threading.Lock()
 REMOTE_LOCK = threading.Lock()
-REMOTE_URL = 'https://oss.2t.hk/gtav/index.json'
+REMOTE_URL = 'https://oss.2t.hk/gtav/'
 REMOTE_CONFIGURATION = {'config': {'oltitle': 'https://gtav.2t.hk'}, 'source': 'default', 'stale': True}
 REMOTE_CHECKED_AT = 0
 mimetypes.add_type('application/wasm', '.wasm')

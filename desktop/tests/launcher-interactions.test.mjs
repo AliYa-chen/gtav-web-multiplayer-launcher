@@ -87,3 +87,105 @@ test('运行中的启动器每五分钟后台刷新公告配置，不重启游�
   assert.deepEqual(ui.calls.slice(before).map(call => call.command), ['remote_configuration']);
   assert.equal(ui.calls.at(-1).args.forceRefresh, true);
 });
+
+function readerPage(ui) {
+  const text = /<div class="reader-text">([\s\S]*?)<\/div>/.exec(ui.app.innerHTML);
+  const position = /第 (\d+) \/ (\d+) 页/.exec(ui.app.innerHTML);
+  assert.ok(text && position, '详情面板应包含正文和页码');
+  return { text: text[1], index: Number(position[1]), count: Number(position[2]) };
+}
+async function readEveryPage(ui) {
+  const first = readerPage(ui), pages = [first.text];
+  assert.equal(first.index, 1);
+  for (let index = 2; index <= first.count; index++) {
+    await ui.click('reader-next');
+    const page = readerPage(ui);
+    assert.equal(page.index, index);
+    assert.equal(page.count, first.count);
+    pages.push(page.text);
+  }
+  assert.match(ui.app.innerHTML, /id="reader-next" disabled/);
+  return pages.join('');
+}
+
+test('多条公告逐条切换，详情分页完整保留正文与日期且不请求后端', async () => {
+  const ui = await launcher();
+  const body = '<script>alert("公告")</script>\n' + ('长公告 e\u0301 👨‍👩‍👧‍👦 和中文。\n\n'.repeat(35));
+  ui.events.get('tauri:launcher-remote-config')({ payload: { source: 'remote', config: { announcements: [
+    { title: '第一条公告', body: '仅在第一条显示' },
+    { title: '第二条公告', date: '2026-10-08', body },
+    { title: '第三条公告', body: '仅在第三条显示' },
+  ] } } });
+  const before = ui.calls.length;
+  assert.match(ui.app.innerHTML, /第一条公告/);
+  assert.doesNotMatch(ui.app.innerHTML, /第二条公告|第三条公告/);
+  assert.match(ui.app.innerHTML, /id="announcement-prev"[^>]* disabled/);
+  await ui.click('announcement-next');
+  assert.match(ui.app.innerHTML, /第二条公告/);
+  assert.doesNotMatch(ui.app.innerHTML, /第一条公告|第三条公告/);
+  await ui.click('announcement-prev');
+  assert.match(ui.app.innerHTML, /仅在第一条显示/);
+  await ui.click('announcement-next');
+  await ui.click('', { read: 'announcement' });
+  assert.match(ui.app.innerHTML, /id="reader-title">第二条公告/);
+  assert.ok(readerPage(ui).count > 2);
+  assert.equal(await readEveryPage(ui), presentation.escapeHtml(`2026-10-08\n\n${body}`));
+  assert.doesNotMatch(ui.app.innerHTML, /<script>/);
+  await ui.click('reader-prev');
+  assert.equal(readerPage(ui).index, readerPage(ui).count - 1);
+  await ui.click('reader-close');
+  assert.doesNotMatch(ui.app.innerHTML, /class="reader-overlay"/);
+  await ui.click('announcement-next');
+  assert.match(ui.app.innerHTML, /仅在第三条显示/);
+  assert.match(ui.app.innerHTML, /id="announcement-next"[^>]* disabled/);
+  assert.deepEqual(ui.calls.slice(before), []);
+});
+
+test('长版本说明使用本地详情分页，关闭和重新打开从第一页显示', async () => {
+  const ui = await launcher();
+  const notes = '更新内容\r\n\r\n' + ('Z'.repeat(600)) + '\n' + ('<img src=x onerror="bad"> 🇨🇳\n'.repeat(30));
+  ui.events.get('tauri:launcher-remote-config')({ payload: { source: 'remote', config: { release_notes: notes } } });
+  const before = ui.calls.length;
+  await ui.click('', { read: 'release' });
+  assert.match(ui.app.innerHTML, /id="reader-title">版本说明/);
+  assert.equal(await readEveryPage(ui), presentation.escapeHtml(notes));
+  assert.doesNotMatch(ui.app.innerHTML, /<img src=x/);
+  await ui.click('reader-dismiss');
+  assert.doesNotMatch(ui.app.innerHTML, /class="reader-overlay"/);
+  await ui.click('', { read: 'release' });
+  assert.equal(readerPage(ui).index, 1);
+  ui.events.get('document:keydown')({ key: 'Escape' });
+  assert.doesNotMatch(ui.app.innerHTML, /class="reader-overlay"/);
+  assert.deepEqual(ui.calls.slice(before), []);
+});
+
+test('背景设置保留所有可选场景，关闭按钮与背景遮罩均可关闭', async () => {
+  const ui = await launcher();
+  const before = ui.calls.length;
+  await ui.click('settings-toggle');
+  assert.deepEqual([...ui.app.innerHTML.matchAll(/data-background="([^"]+)"/g)].map((match) => match[1]), ['sunglasses', 'beach']);
+  assert.match(ui.app.innerHTML, /aria-label="选择背景：海风"/);
+  assert.match(ui.app.innerHTML, /aria-label="选择背景：海滩"/);
+  await ui.click('picker-close');
+  assert.doesNotMatch(ui.app.innerHTML, /id="background-picker"/);
+  await ui.click('settings-toggle');
+  await ui.click('picker-dismiss');
+  assert.doesNotMatch(ui.app.innerHTML, /id="background-picker"/);
+  assert.deepEqual(ui.calls.slice(before), []);
+});
+
+test('超过四个客户端时分页保留全局编号，最后一页打开正确客户端', async () => {
+  const ui = await launcher();
+  await ui.click('launch');
+  for (let count = 1; count < 5; count++) await ui.click('additional');
+  const clientIndices = () => [...ui.app.innerHTML.matchAll(/data-open="(\d+)"/g)].map((match) => Number(match[1]));
+  assert.deepEqual(clientIndices(), [0, 1, 2, 3]);
+  await ui.click('clients-next');
+  assert.deepEqual(clientIndices(), [4]);
+  assert.match(ui.app.innerHTML, /客户端 5<code>http:\/\/127\.0\.0\.1:61004\//);
+  const before = ui.calls.length;
+  await ui.click('', { open: '4' });
+  assert.deepEqual(ui.calls.slice(before).map((call) => [call.command, JSON.stringify(call.args)]), [['open_game', '{"index":4}']]);
+  await ui.click('clients-next');
+  assert.deepEqual(clientIndices(), [0, 1, 2, 3]);
+});

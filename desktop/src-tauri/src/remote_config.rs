@@ -7,7 +7,7 @@ use std::{collections::BTreeMap, fs, io::{Read, Write}, path::Path,
     sync::atomic::{AtomicU64, Ordering}, time::{Duration, SystemTime, UNIX_EPOCH}};
 use url::Url;
 
-pub const CONFIG_URL: &str = "https://oss.2t.hk/gtav/index.json";
+pub const CONFIG_URL: &str = "https://oss.2t.hk/gtav/";
 pub const MAX_CONFIG_BYTES: usize = 256 * 1024;
 const CACHE_FORMAT: u32 = 1;
 static CACHE_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
