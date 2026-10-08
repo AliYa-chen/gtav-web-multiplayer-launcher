@@ -163,10 +163,21 @@ python3 -B tools/world_protocol_soak.py --jar server/multiplayer-world-experimen
 旧服务只共享玩家和基础战斗；实验版已将 NPC、交通、抢车、上下车、加入快照与断线移交接到同一实体模型。
 客户端仍参与受分配的 AI／物理模拟，环境报告只经过归属、版本、范围和下降候选校验。服务器没有地图碰撞、导航或独立 RAGE 仿真，不能把候选确认称为完全可信的服务器重算。
 
-单机仍使用原始 `game.wasm`；公共战局使用启动器 `client/runtime/game-multiplayer.wasm` 独立副本，
+浏览器单机与公共战局分别加载启动器 `client/runtime/offline/game.wasm` 和 `client/runtime/online/game.wasm`，
+原游戏目录的 `game.wasm` 仅作为只读构建输入。在线副本
 增加已核对的实体命令导出和有效脚本线程回调。原始游戏资源和 WASM 保留不变。
 原线上模式的主要数据包传输在此构建中为空实现，不能只替换私服 IP 恢复原 GTA Online。
 证据见 [原线上模式审计](docs/原线上模式审计.md) 与 [角色同步接口审计](docs/角色同步接口审计.md)。
+
+公共战局的暂停菜单接入原生 Scaleform 标题和详情，显示“公共在線戰局”、昵称、人数及连接状态。
+这项表现适配保持原网络会话判断不变；当前只读记录中同步树和网络脚本上下文仍未初始化，
+因此没有启用依赖官方会话的朋友、商城或云角色流程。实现与验证边界见
+[伪线上菜单与模式审计](docs/伪线上菜单与模式审计.md) 和 [FiveM 参考](docs/FiveM参考与浏览器实现边界.md)。
+
+拳击使用服务器确认的动作事件播放全身动画，并由原生通知显示命中、受伤及剩余战局生命值；
+动作窗口内不会被同步行走任务覆盖。远端玩家副本持续核对引擎实际位置和朝向，
+站立时取消残余移动任务，避免缓存已经收敛后被本机 NPC 行为带走。
+这些代码与协议检查不能替代实际双客户端游戏验证，能力仍标记为实验。
 
 重新构建与测试：
 
@@ -199,7 +210,7 @@ node --test tools/tests/test_world_client.cjs tools/tests/test_world_engine.cjs
 | `client/index.html` | 实际使用的中文网页入口 |
 | `client/multiplayer/` | 公共战局页面、共享快照桥和实体同步源码 |
 | `client/loader.js` | 引擎加载工作线程源码，通过服务器映射到原 URL |
-| `client/runtime/` | 本机生成的独立多人引擎及校验记录，不写入游戏目录 |
+| `client/runtime/` | 本机生成的离线与在线引擎及校验记录，浏览器唯一 WASM 入口，不写入游戏目录 |
 | `gta5data/b/8b0b5899ed/` | 引擎、工作线程、着色器及标题画面资源 |
 | `gta5data/data/` | 游戏数据，本次整理没有改动 |
 | `runtime/` | Windows x64 Python 运行环境 |

@@ -3,9 +3,11 @@
 // 原始引擎保留；只有公共战局 /play/ 选用另一个带导出和线程回调的 WASM 副本。
 self.prepareMultiplayerBridge = function (imports) {
   const MAGIC = 0x4d505442;
+  const FRONTEND_MAGIC = 0x4d505549;
   const original = imports.env.wasm_module_int_js;
-  let tick = null;
+  let tick = null, frontendTick = null;
   imports.env.wasm_module_int_js = (pointer, value) => {
+    if (value === FRONTEND_MAGIC) { if (frontendTick) frontendTick(); return 0; }
     if (value === MAGIC) { if (tick) tick(Number(pointer)); return 0; }
     return original(pointer, value);
   };
@@ -55,8 +57,13 @@ self.prepareMultiplayerBridge = function (imports) {
     let noticeBuffer = 0, lastNoticeAttempt = -Infinity, nativeHudAvailable = null;
     let shotBuffer = 0, shotSampleAt = -Infinity, weaponSample = null, pendingShots = [];
     let worldReadinessAt = -Infinity, worldReadinessSignature = '';
+    const sessionUI = self.createNativeSessionUI?.({ ex, memory });
     const worldEntities = self.createWorldEntityBridge?.({ ex, memory, post: (value) => post(value),
-      playerReplica: (id) => replicas.get(id)?.ped || 0 });
+      playerReplica: (id) => replicas.get(id)?.ped || 0,
+      onPlayerAnimation: (id, now, duration) => {
+        const replica = replicas.get(id);
+        if (replica) { replica.animationUntil = now + duration; replica.moving = false; replica.idleAt = -Infinity; }
+      } });
 
     const post = (value) => self.postMessage({ multiplayer: value });
     const validPosition = (position) => Array.isArray(position) && position.length === 3 &&
@@ -74,6 +81,19 @@ self.prepareMultiplayerBridge = function (imports) {
       const data = view();
       return [0, 8, 16].map((part) => data.getFloat32(scratch + offset + part, true));
     }
+    frontendTick = () => {
+      try {
+        if (stopped || !block) return;
+        readPacket();
+        sessionUI?.tick(performance.now(), {
+          online: Boolean(sessionId || packet?.client_id), name: packet?.members?.find((member) => member.id === packet.client_id)?.name,
+          player_count: (packet?.members || []).filter((member) => member.connected !== false).length,
+          connected: packet?.connected === true,
+          phase: !packet?.connected ? 'reconnecting' : initialPlacement && packet?.world?.ready ? 'active' : 'loading',
+          game_mode: 'public_freeroam',
+        });
+      } catch { /* 前端回调失败不能抛回 WASM，也不能从这里改动实体或脚本上下文。 */ }
+    };
     function observeWorldReadiness(now) {
       if (now - worldReadinessAt < 5000 || !ex.mpPedSyncTree || !ex.mpPlayerSyncTree || !ex.mpNetworkScriptHandler) return;
       worldReadinessAt = now;
@@ -110,7 +130,10 @@ self.prepareMultiplayerBridge = function (imports) {
       if (ex.mpGetCurrentPedWeapon) {
         const ready = ex.mpGetCurrentPedWeapon(ped, BigInt(scratch + 112), 1);
         if (ready) return { hash: view().getUint32(scratch + 112, true), ready: true };
-        return { hash: ex.mpSelectedWeapon(ped) >>> 0, ready: false };
+        const hash = ex.mpSelectedWeapon(ped) >>> 0;
+        // 空手没有 CWeapon 对象，GET_CURRENT_PED_WEAPON 可返回 false；空手状态仍已就绪。
+        // 将它误认为资源未载入会每500ms再次选武器，打断已同步的拳击动画。
+        return { hash, ready: hash === 0xa2719263 };
       }
       return { hash: ex.mpSelectedWeapon(ped) >>> 0, ready: true };
     }
@@ -416,6 +439,8 @@ self.prepareMultiplayerBridge = function (imports) {
         ex.mpBlockEvents(ped, 1);
         ex.mpSetInvincible(ped, 1);
         if (ex.mpDefaultVariation) ex.mpDefaultVariation(ped);
+        ex.mpClearTasksImmediately?.(ped);
+        ex.mpTaskStandStill?.(ped, -1);
         ex.mpFreeze(ped, 1);
         ex.mpSetCoordsNoOffset(ped, vector(72, state.position), 1, 1, 1);
         let blip = 0;
@@ -489,6 +514,13 @@ self.prepareMultiplayerBridge = function (imports) {
         ex.mpSetCanRagdoll(replica.ped, 0); replica.ragdollProtected = true;
       }
       ex.mpSetInvincible(replica.ped, 1);
+      // 远端玩家是服务器姿态的副本，不能交给本机的普通 NPC AI 自行走动。
+      // 挂接乘客跟随车辆，死亡时另行解除冻结；冻结不会取消已安装的动画任务。
+      ex.mpBlockEvents(replica.ped, 1);
+      const attachedVehicle = state.attachment ? worldEntities?.entityHandle(state.attachment.entity_id) : 0;
+      const seated = Boolean(attachedVehicle && ex.mpGetVehiclePedIsIn?.(replica.ped, 0) === attachedVehicle);
+      // 服务器已占座不代表本机车辆资源已就绪；等待实际挂接期间仍禁止自主移动。
+      ex.mpFreeze(replica.ped, seated ? 0 : 1);
       if (state.weapon) {
         const equipped = actualWeapon(replica.ped);
         // Give/Select 无成功返回，资源加载或其他任务收枪后需验证实际装备并限频重试。
@@ -509,38 +541,48 @@ self.prepareMultiplayerBridge = function (imports) {
       const distance = Math.hypot(...state.position.map((value, i) => value - replica.position[i]));
       const newMovement = Math.hypot(...state.position.map((value, i) => value - replica.target[i]));
       const actions = state.actions || {};
+      const animating = now < (replica.animationUntil ?? -Infinity);
       if (typeof actions.ducking === 'boolean' && actions.ducking !== replica.actions?.ducking && ex.mpSetDucking) ex.mpSetDucking(replica.ped, actions.ducking ? 1 : 0);
-      if (actions.jumping && !replica.actions?.jumping && ex.mpTaskJump) ex.mpTaskJump(replica.ped, 0, 0, 0);
+      if (!animating && actions.jumping && !replica.actions?.jumping && ex.mpTaskJump) ex.mpTaskJump(replica.ped, 0, 0, 0);
       const readyWeapon = replica.weapon === state.weapon;
-      if (actions.reloading && readyWeapon && !replica.reloadActive && ex.mpTaskReloadWeapon) {
+      if (!animating && actions.reloading && readyWeapon && !replica.reloadActive && ex.mpTaskReloadWeapon) {
         ex.mpTaskReloadWeapon(replica.ped, 1); replica.reloadActive = true;
       } else if (!actions.reloading) replica.reloadActive = false;
-      if (actions.aiming && readyWeapon && !actions.reloading && validPosition(state.aim_target) && ex.mpTaskAimGunAtCoord
+      if (!animating && actions.aiming && readyWeapon && !actions.reloading && validPosition(state.aim_target) && ex.mpTaskAimGunAtCoord
           && now - (replica.aimAt ?? -Infinity) >= 250) {
         ex.mpTaskAimGunAtCoord(replica.ped, vector(72, state.aim_target), 500, 0, 0); replica.aimAt = now;
-      } else if (!actions.aiming && replica.actions?.aiming && !state.shooting && !actions.reloading && ex.mpTaskStandStill) {
+      } else if (!animating && !actions.aiming && replica.actions?.aiming && !state.shooting && !actions.reloading && ex.mpTaskStandStill) {
         ex.mpTaskStandStill(replica.ped, 500);
       }
       replica.actions = { ...actions };
-      if (!state.attachment && !state.shooting && !actions.aiming && !actions.reloading && !actions.jumping
+      if (!animating && !state.attachment && !state.shooting && !actions.aiming && !actions.reloading && !actions.jumping
           && ex.mpTaskGoStraight && now - replica.behaviorAt >= 250) {
         if (newMovement > .015 || distance > .15) {
-          const speed = actions.sprinting ? 3 : Math.min(3, Math.max(1, newMovement / .05));
+          const elapsed = Math.max(.05, (now - replica.behaviorAt) / 1000);
+          const speed = actions.sprinting ? 3 : Math.min(3, Math.max(.5, newMovement / elapsed));
           ex.mpTaskGoStraight(replica.ped, vector(72, state.position), speed, 500, state.heading, .05);
           replica.moving = true; replica.behaviorAt = now;
-        } else if (replica.moving && ex.mpTaskStandStill) {
-          ex.mpTaskStandStill(replica.ped, 1000); replica.moving = false; replica.behaviorAt = now;
+        } else if (ex.mpTaskStandStill && (replica.moving || now - (replica.idleAt ?? -Infinity) >= 1000)) {
+          ex.mpTaskStandStill(replica.ped, -1); replica.moving = false; replica.behaviorAt = now; replica.idleAt = now;
         }
         replica.target = [...state.position];
       }
       const amount = distance > 20 ? 1 : Math.min(1, delta / 100);
       replica.position = state.position.map((value, i) => replica.position[i] + (value - replica.position[i]) * amount);
-      if (!state.attachment && distance > .002) {
-        // 常规移动保留任务和物理状态；只有大范围纠正才执行完整瞬移。
-        ex.mpSetCoordsNoOffset(replica.ped, vector(72, replica.position), 1, 1, distance > 20 ? 1 : 0);
-      }
-      if (!state.attachment && Math.abs(((state.heading - replica.heading + 540) % 360) - 180) > .1) {
-        ex.mpSetHeading(replica.ped, state.heading); replica.heading = state.heading;
+      if (!state.attachment) {
+        // 缓存收敛后仍核对真实实体。残余任务、动画根运动或碰撞不能把副本带离战局坐标。
+        ex.mpGetEntityCoords(BigInt(scratch + 72), replica.ped, 1);
+        const actual = readVector(72);
+        const drift = Math.hypot(...replica.position.map((value, index) => value - actual[index]));
+        if (!validPosition(actual) || drift > .002) {
+          ex.mpSetCoordsNoOffset(replica.ped, vector(72, replica.position), 1, 1, drift > 20 ? 1 : 0);
+        }
+        ex.mpSetVelocity?.(replica.ped, vector(72, [0, 0, 0]));
+        const actualHeading = ex.mpHeading(replica.ped);
+        if (!Number.isFinite(actualHeading) || Math.abs(((state.heading - actualHeading + 540) % 360) - 180) > .1) {
+          ex.mpSetHeading(replica.ped, state.heading);
+        }
+        replica.heading = state.heading;
       }
       const nativeHealth = state.server_authority ? nativeCombatHealth(state.health) : state.health;
       if (ex.mpSetHealth && Number.isInteger(state.health) && ex.mpGetHealth(replica.ped) !== nativeHealth) {

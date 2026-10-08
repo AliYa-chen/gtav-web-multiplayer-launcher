@@ -38,7 +38,7 @@ def inspect_game_resources(game_dir=ROOT, runtime_dir=RUNTIME_ROOT, *, require_r
     root = resolve_game_directory(game_dir)
     runtime = Path(runtime_dir).expanduser().resolve()
     if runtime.is_relative_to(root):
-        raise ValueError('多人运行副本目录不能位于游戏资源目录内，请选择启动器 client/runtime 或其它外部目录。')
+        raise ValueError('运行副本目录不能位于游戏资源目录内，请选择启动器 client/runtime 或其它外部目录。')
     manifest_path = root / 'data/manifest.json'
     required = [manifest_path, *[root / ('b/' + BUILD_ID + '/' + name)
         for name in ('game.wasm', 'game.js', 'io_worker.js', 'wgpu_worker.js')]]
@@ -69,43 +69,83 @@ def inspect_game_resources(game_dir=ROOT, runtime_dir=RUNTIME_ROOT, *, require_r
     digest = file_sha256(original)
     if digest != ORIGINAL_WASM_SHA256:
         raise ValueError('原游戏引擎版本不兼容，不能使用此版本的多人适配器。请提供已支持的原 game.wasm；原文件未修改。')
-    fork = runtime / 'game-multiplayer.wasm'
-    evidence_path = runtime / 'game-multiplayer.json'
-    runtime_ready = fork.is_file() and evidence_path.is_file()
-    if runtime_ready:
+    build_command = ('python3 tools/build_multiplayer_client.py --game-dir "' + str(root)
+                     + '" --runtime-dir "' + str(runtime) + '"')
+    ready = {}
+    for mode in ('offline', 'online'):
+        engine = runtime / mode / 'game.wasm'
+        evidence_path = runtime / mode / 'game.json'
+        if (not engine.resolve().is_relative_to(runtime) or not evidence_path.resolve().is_relative_to(runtime)
+                or engine.resolve().is_relative_to(root) or evidence_path.resolve().is_relative_to(root)):
+            raise ValueError('运行副本不能通过符号链接指向游戏资源目录或运行目录之外。')
+        ready[mode] = engine.is_file() and evidence_path.is_file()
+        if not ready[mode]:
+            if mode == 'offline' or require_runtime:
+                raise ValueError('缺少隔离的' + ('离线' if mode == 'offline' else '在线')
+                                 + '运行副本或校验记录，请先运行 ' + build_command
+                                 + '。生成物只放在启动器目录，游戏资源未修改。')
+            continue
         try:
             evidence = json.loads(evidence_path.read_text(encoding='utf-8'))
             if (evidence.get('original', {}).get('sha256') != digest
-                    or evidence.get('prototype', {}).get('sha256') != file_sha256(fork)):
-                raise ValueError('多人适配器校验记录与原引擎或生成副本不一致')
+                    or evidence.get('prototype', {}).get('sha256') != file_sha256(engine)
+                    or evidence.get('deployment', {}).get('mode') != mode):
+                raise ValueError('运行副本校验记录与模式、原引擎或生成副本不一致')
+            if mode == 'offline' and file_sha256(engine) != digest:
+                raise ValueError('离线运行副本必须与玩家原引擎完全一致')
         except (OSError, ValueError) as error:
-            raise ValueError('多人适配器校验失败：' + str(error) + '。请重新构建隔离的运行副本；游戏资源未修改。') from error
-    elif require_runtime:
-        raise ValueError('缺少隔离的多人运行副本，请先运行 python3 tools/build_multiplayer_client.py --game-dir "'
-                         + str(root) + '" --runtime-dir "' + str(runtime) + '"。生成物只放在启动器目录。')
+            raise ValueError(mode + ' 运行副本校验失败：' + str(error) + '。请运行 ' + build_command
+                             + ' 重新构建；游戏资源未修改。') from error
     return {'root': root, 'data_root': root / 'data', 'runtime_root': runtime,
-            'manifest_version': manifest.get('version', ''), 'original_sha256': digest, 'multiplayer_ready': runtime_ready}
+            'manifest_version': manifest.get('version', ''), 'original_sha256': digest,
+            'offline_ready': ready['offline'], 'multiplayer_ready': ready['online']}
+
+
+class RetiredEnginePath(ValueError):
+    """旧引擎入口永久停用；不能回退加载玩家目录中的引擎。"""
+
+
+def normalized_resource_path(url_path):
+    raw = urlsplit(url_path).path
+    # 重复转义或路径规范化不能重新启用旧入口，包括大小写不敏感的文件系统。
+    for _ in range(8):
+        decoded = unquote(raw)
+        if decoded == raw:
+            break
+        raw = decoded
+    canonical = posixpath.normpath(raw.replace('\\', '/')).lstrip('/')
+    retired = {'b/' + BUILD_ID + '/game.wasm', 'b/' + BUILD_ID + '/game-multiplayer.wasm',
+               'game.wasm', 'game-multiplayer.wasm'}
+    if canonical.casefold() in retired:
+        raise RetiredEnginePath('旧引擎入口已停用；请使用 /engine/offline/game.wasm 或 /engine/online/game.wasm。')
+    if '\\' in raw or '..' in raw.split('/'):
+        raise ValueError('资源路径不能越过已选择目录')
+    return canonical
 
 
 def resource_path(url_path, game_root=None, runtime_root=None):
-    """源码与资源分目录存放，对外仍使用原有浏览器 URL。"""
+    """网页来自 client，游戏数据只读挂载，引擎仅来自隔离的运行目录。"""
     root = Path(game_root) if game_root is not None else ROOT
     runtime = Path(runtime_root) if runtime_root is not None else RUNTIME_ROOT
-    raw = unquote(urlsplit(url_path).path)
-    if '\\' in raw or '..' in raw.split('/'):
-        raise ValueError('资源路径不能越过已选择目录')
-    path = posixpath.normpath(raw).lstrip('/')
+    path = normalized_resource_path(url_path)
     if path in ('', '.', 'index.html', 'play'):
         return CLIENT / 'index.html'
     if path == 'b/8b0b5899ed/loader.js':
         return CLIENT / 'loader.js'
-    if path == 'b/8b0b5899ed/game-multiplayer.wasm':
-        return runtime / 'game-multiplayer.wasm'
+    if path in ('engine/offline/game.wasm', 'engine/online/game.wasm'):
+        selected = runtime / path.removeprefix('engine/')
+        if not selected.resolve().is_relative_to(runtime.resolve()) or selected.resolve().is_relative_to(root.resolve()):
+            raise ValueError('运行引擎不能指向游戏资源目录或运行目录之外')
+        return selected
+    if path == 'engine' or path.startswith('engine/'):
+        raise ValueError('引擎只允许通过 /engine/offline/game.wasm 或 /engine/online/game.wasm 读取')
     if path == 'multiplayer' or path.startswith('multiplayer/'):
         return CLIENT / path
     selected = root / path
     if not selected.resolve().is_relative_to(root.resolve()):
         raise ValueError('资源链接不能越过已选择目录')
+    if selected.suffix.casefold() == '.wasm' or selected.resolve().suffix.casefold() == '.wasm':
+        raise RetiredEnginePath('游戏目录中的 WASM 不作为运行入口；请使用 /engine/offline/game.wasm 或 /engine/online/game.wasm。')
     return selected
 
 class ChineseHelpFormatter(argparse.HelpFormatter):
@@ -141,6 +181,7 @@ class Handler(SimpleHTTPRequestHandler):
             400: '请求参数或数据格式无效。',
             403: '没有权限访问此文件。',
             404: '未找到请求的文件或接口。',
+            410: '旧引擎入口已永久停用，请刷新页面使用启动器的隔离引擎。',
             413: '请求数据超过服务器允许的大小。',
             416: '请求的文件读取范围无效。',
             500: '服务器处理请求时出现错误。',
@@ -171,6 +212,9 @@ class Handler(SimpleHTTPRequestHandler):
         route = urlsplit(self.path)
         try:
             resource_path(self.path, self.server.game_root, self.server.runtime_root)
+        except RetiredEnginePath as error:
+            self.send_error(410, explain=str(error))
+            return None
         except ValueError as error:
             self.send_error(403, explain=str(error))
             return None
@@ -446,7 +490,7 @@ def main(argv=None):
     args.add_argument('--host', default='0.0.0.0', help='监听地址，默认 0.0.0.0，允许局域网访问；127.0.0.1 仅本机')
     args.add_argument('--instances', type=int, default=1, help='同时启动 1～8 个本地实例，使用不同端口模拟用户')
     args.add_argument('--game-dir', type=Path, default=ROOT, help='玩家自行准备的资源总目录（含 data 与 b），也可选其 data 子目录；只读使用')
-    args.add_argument('--runtime-dir', type=Path, default=RUNTIME_ROOT, help='启动器生成的隔离多人适配器目录，默认 client/runtime；不读取游戏目录内旧适配器')
+    args.add_argument('--runtime-dir', type=Path, default=RUNTIME_ROOT, help='启动器生成的离线/在线运行目录，默认 client/runtime；浏览器不读取游戏目录内任何 WASM')
     args.add_argument('--multiplayer', action='store_true', help='打开轻量多人大厅；多实例时自动启用')
     args.add_argument('--room-server', default=DEFAULT_ROOM_SERVER,
                       help='远程公共战局 IP:端口，默认 ' + DEFAULT_ROOM_SERVER + '；客户端无需本地 WebSocket 服务')

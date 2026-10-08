@@ -2,7 +2,7 @@
 """制作非生产的 native 探针 WASM 副本，不覆盖游戏引擎。
 
 默认增加只读玩家/坐标/脚本上下文与分配器导出；--entity-probe 增加隔离实体实验导出。
---entity-probe --public-client 另生成公共战局副本，屏蔽单机脚本的角色模型切换。
+--entity-probe --public-client 另生成公共战局副本，屏蔽单机脚本角色模型切换并增加暂停菜单前端回调。
 在脚本线程安装活动上下文后插入回调。
 此工具不会运行 WASM；生成文件仍需浏览器实际验证，不能据此声明多人同步可用。
 """
@@ -24,6 +24,10 @@ HOOK_FUNCTION = 16953
 HOOK_INSTRUCTION_START = 9966559
 HOOK_INSTRUCTION_OFFSET = 108
 MAGIC = 0x4D505442
+FRONTEND_MAGIC = 0x4D505549
+FRONTEND_FUNCTION = 36291
+FRONTEND_BODY_SHA256 = '77649c56f6a2303de1a31efd373ae4757fde6a95bf6e77d3cf33f8f1e6df3c63'
+FRONTEND_TAIL = bytes.fromhex('20064280047c24000b')
 CALLBACK_IMPORT = 11
 PUBLIC_MODEL_WRAPPER = 58868
 PUBLIC_MODEL_WRAPPER_NAME = "player_commands::SetupScriptCommands()::scrWrapped_SET_PLAYER_MODEL::Call(rage::scrThread::Info&)"
@@ -232,6 +236,17 @@ def checked_public_wrapper(audit: WasmAudit):
     return start, end
 
 
+def checked_frontend_tail(audit: WasmAudit):
+    descriptor = audit.descriptor(FRONTEND_FUNCTION)
+    start, end = audit.bodies[FRONTEND_FUNCTION]
+    if (descriptor['name'] != 'CPauseMenu::Update()' or descriptor['signature'] != {'parameters': [], 'results': []}
+            or hashlib.sha256(audit.data[start:end]).hexdigest() != FRONTEND_BODY_SHA256
+            or audit.data[end - len(FRONTEND_TAIL):end] != FRONTEND_TAIL):
+        raise ValueError('暂停菜单更新函数或正常尾部字节不同，拒绝插入前端回调')
+    # 已完成原 Scaleform 更新且恢复栈指针之前，无对象指针作为回调参数。
+    return end - len(FRONTEND_TAIL)
+
+
 def checked_audit(path: Path, entity_probe: bool = False, public_client: bool = False) -> WasmAudit:
     if public_client and not entity_probe:
         raise ValueError("公共战局副本必须同时启用实体实验接口")
@@ -261,6 +276,7 @@ def checked_audit(path: Path, entity_probe: bool = False, public_client: bool = 
         raise ValueError("hook 前后的 TLS 写入和指令边界不匹配")
     if public_client:
         checked_public_wrapper(audit)
+        checked_frontend_tail(audit)
     return audit
 
 
@@ -269,11 +285,13 @@ def build(audit: WasmAudit, entity_probe: bool = False, public_client: bool = Fa
         raise ValueError("公共战局副本必须同时启用实体实验接口")
     if public_client:
         checked_public_wrapper(audit)
+        frontend_position = checked_frontend_tail(audit)
     data = audit.data
     exports = export_map(entity_probe)
     hook_position = HOOK_INSTRUCTION_START + HOOK_INSTRUCTION_OFFSET
     # local.get 0；i32.const MAGIC；call 11；drop。沿用已有导入，不移动函数索引。
     hook_bytes = b"\x20\x00\x41" + signed_leb(MAGIC) + b"\x10" + unsigned_leb(CALLBACK_IMPORT) + b"\x1a"
+    frontend_bytes = b'\x42\x00\x41' + signed_leb(FRONTEND_MAGIC) + b'\x10' + unsigned_leb(CALLBACK_IMPORT) + b'\x1a'
     source = Reader(data, 8)
     output = bytearray(data[:8])
     export_section_seen, code_section_seen, patched_bodies = False, False, 0
@@ -320,6 +338,10 @@ def build(audit: WasmAudit, entity_probe: bool = False, public_client: bool = Fa
                         raise ValueError("单机角色包装器体长度不匹配")
                     result.extend(data[entry_start:body_start] + body)
                     patched_bodies += 1
+                elif public_client and index == FRONTEND_FUNCTION:
+                    body = data[body_start:frontend_position] + frontend_bytes + data[frontend_position:body_end]
+                    result.extend(unsigned_leb(len(body)) + body)
+                    patched_bodies += 1
                 else:
                     result.extend(data[entry_start:body_end])
                 reader.take(body_size)
@@ -333,11 +355,11 @@ def build(audit: WasmAudit, entity_probe: bool = False, public_client: bool = Fa
         else:
             output.extend(data[section_start:payload_end])
         source.take(size)
-    expected_patch_count = 2 if public_client else 1
+    expected_patch_count = 3 if public_client else 1
     if not export_section_seen or not code_section_seen or patched_bodies != expected_patch_count:
         raise ValueError("预期导出节/代码节/目标函数体未全部匹配")
     evidence = {
-        "purpose": ("公共战局引擎副本：增加实体接口，单独屏蔽单机脚本的 SET_PLAYER_MODEL 包装器；保留桥接接口直接设置角色。" if public_client else "非生产实体复制实验：增加本地角色创建/属性/坐标/销毁接口，尚未证明实际游戏操作成功。" if entity_probe else "非生产只读探针：读取本地玩家、坐标和活动脚本上下文；未加入创建角色或写入实体的接口。"),
+        "purpose": ("公共战局引擎副本：增加实体接口、隔离单机脚本 SET_PLAYER_MODEL 包装器与原生暂停菜单前端回调；不伪造原网络会话。" if public_client else "非生产实体复制实验：增加本地角色创建/属性/坐标/销毁接口，尚未证明实际游戏操作成功。" if entity_probe else "非生产只读探针：读取本地玩家、坐标和活动脚本上下文；未加入创建角色或写入实体的接口。"),
         "entity_probe": entity_probe,
         "public_client": public_client,
         "original": {"path": str(audit.path.resolve()), "sha256": ORIGINAL_SHA256, "bytes": len(data)},
@@ -356,6 +378,10 @@ def build(audit: WasmAudit, entity_probe: bool = False, public_client: bool = Fa
         "runtime_status": "尚未在实际游戏中验证；编译成功也不代表脚本上下文、生命周期或多人同步可用。",
     }
     if public_client:
+        evidence['frontend_hook'] = {'function_index': FRONTEND_FUNCTION, 'function_name': 'CPauseMenu::Update()',
+            'original_file_offset': frontend_position, 'original_body_sha256': FRONTEND_BODY_SHA256,
+            'magic_i32': FRONTEND_MAGIC, 'inserted_bytes_hex': frontend_bytes.hex(),
+            'scope': '正常前端更新尾部仅调用自有菜单标题/详情；0为无语义payload，绝不作为游戏对象指针，绝不操作实体或伪造脚本上下文。'}
         wrapper_start, _ = audit.bodies[PUBLIC_MODEL_WRAPPER]
         replacement = b"\x00" + b"\x01" * (len(EXPECTED_MODEL_WRAPPER) - 2) + b"\x0b"
         evidence["public_model_patch"] = {

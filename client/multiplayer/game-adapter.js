@@ -59,15 +59,28 @@ export function installGameAdapter(worker, network = null) {
     };
     const lines = data.accepted === false ? (rejected[data.reason] || ['服务器未接受这次射击。', '伺服器未接受這次射擊。'])
       : data.hit ? (data.health === 0 ? ['击杀已由服务器确认。', '擊殺已由伺服器確認。']
-        : ['命中玩家' + (Number.isInteger(data.damage) ? ' · 伤害 ' + data.damage : ''),
-          '命中玩家' + (Number.isInteger(data.damage) ? ' · 傷害 ' + data.damage : '')]) : null;
+        : [(data.action === 'melee' ? '拳击命中' : '命中玩家') + (Number.isInteger(data.damage) ? ' · 伤害 ' + data.damage : ''),
+          (data.action === 'melee' ? '拳擊命中' : '命中玩家') + (Number.isInteger(data.damage) ? ' · 傷害 ' + data.damage : '')]) : null;
     // 未命中仍由连接模块记录判定，但不让原生通知盖满整个战局。
     if (!lines) return;
     gameMessage = lines[0]; renderHud();
-    const key = data.accepted === false ? 'reject:' + (data.reason || '') : data.health === 0 ? 'kill' : 'hit';
+    const key = data.accepted === false ? 'reject:' + (data.reason || '') : data.health === 0 ? 'kill' : (data.action || 'shot') + ':hit';
     const now = performance.now();
     if (key !== lastCombatNotice || now - lastCombatNoticeAt >= 1500) {
       lastCombatNotice = key; lastCombatNoticeAt = now; notify(lines[1]);
+    }
+  }
+  function meleeFeedback(data) {
+    // 仅采用连接模块校验、服务端确认的命中事件；本地挥拳或动作播放不产生提示/伤害。
+    if (data.accepted !== true || data.hit !== true || !Number.isInteger(data.damage) || data.damage <= 0
+      || data.damage > 20 || !Number.isInteger(data.health) || data.health < 0 || data.health > 200) return;
+    if (data.attacker_id === session.client_id) {
+      combatFeedback({ ...data, action: 'melee' });
+    } else if (world.entities.some((entity) => entity.entity_id === data.target_entity_id
+      && entity.player_id === session.client_id && entity.generation === data.target_generation)) {
+      gameMessage = '受到拳击 · 生命 ' + data.health + '/200'; renderHud();
+      // 生命值以每次命中的服务器结果显示，避免挥拳动作存在而扣血结果不可见。
+      notify(data.health === 0 ? '拳擊致死，等待伺服器重生' : '受到拳擊 · 傷害 ' + data.damage + ' · 生命 ' + data.health + '/200');
     }
   }
   function renderHud() {
@@ -141,6 +154,7 @@ export function installGameAdapter(worker, network = null) {
       seenWorldEvents.add(data.event_id);
       if (seenWorldEvents.size > 256) seenWorldEvents.delete(seenWorldEvents.values().next().value);
       worldEvents.push({ id: ++nextWorldEventId, event: data });
+      meleeFeedback(data);
     } else if (data.type === 'interaction_result') {
       if (data.accepted === false) notify('互動尚未完成，請稍後重試');
       return;

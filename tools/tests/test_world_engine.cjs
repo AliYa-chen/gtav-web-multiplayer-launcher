@@ -23,7 +23,7 @@ const npc = (changes = {}) => ({ entity_id: 'n1', kind: 'ped', player_id: null, 
   components: { transform: pose(720), combat: life(200), ped: { weapon: 0xa2719263, shooting: false, actions: idle() } }, ...changes });
 const packet = entities => ({ connected: true, client_id: 'LOCAL', world: { ready: true, world_epoch: 'epoch1', entities, tombstones: [] } });
 function harness() {
-  const memory = { buffer: new SharedArrayBuffer(8192) }, entities = new Map(), calls = [], messages = [];
+  const memory = { buffer: new SharedArrayBuffer(8192) }, entities = new Map(), calls = [], messages = [], animationWindows = [];
   const local = { position: [711, -1088, 22.4], health: 200, arrested: false, dead: false, vehicle: 0 };
   entities.set(7, local); entities.set(8, { position: [713, -1088, 22.4], health: 200 });
   let allocated = 256, next = 100, loaded = true, melee = false, meleeTarget = 8, trying = 0;
@@ -89,8 +89,9 @@ function harness() {
   }]));
   const self = {}, context = vm.createContext({ self, DataView, Uint8Array, BigInt, TextEncoder });
   vm.runInContext(source, context);
-  const bridge = self.createWorldEntityBridge({ ex, memory, post: value => messages.push(copy(value)), playerReplica: id => id === 'REMOTE' ? 8 : 0 });
-  return { bridge, memory, entities, calls, messages, local, setLoaded: value => { loaded = value; },
+  const bridge = self.createWorldEntityBridge({ ex, memory, post: value => messages.push(copy(value)), playerReplica: id => id === 'REMOTE' ? 8 : 0,
+    onPlayerAnimation: (...args) => animationWindows.push(args) });
+  return { bridge, memory, entities, calls, messages, animationWindows, local, setLoaded: value => { loaded = value; },
     setMelee: (value, target = 8) => { melee = value; meleeTarget = target; }, setTrying: value => { trying = value; },
     setAttackInput: value => { attackInput = value; }, setAnimationLoaded: value => { animationLoaded = value; },
     setAnimationFailure: value => { animationFailure = value; }, playing };
@@ -201,7 +202,10 @@ test('远端挥拳由服务器事件播放安全动画，成功确认后同ID不
   assert.equal(h.calls.filter(c => c.name === 'mpTaskPlayAnim').length, 1);
   const animation = h.calls.find(c => c.name === 'mpTaskPlayAnim');
   assert.equal(animation.arguments[0], 8);
-  assert.deepEqual(animation.arguments.slice(3), [8, -8, 700, 48, 0, 0, 0, 0]);
+  assert.deepEqual(animation.arguments.slice(3), [8, -8, 700, 0, 0, 0, 0, 0]);
+  assert.deepEqual(h.animationWindows, [['REMOTE', 100, 750]]);
+  const clear = h.calls.findIndex(c => c.name === 'mpClearTasksImmediately' && c.arguments[0] === 8);
+  assert.ok(clear >= 0 && clear < h.calls.findIndex(c => c.name === 'mpTaskPlayAnim'));
   const text = pointer => {
     const bytes = new Uint8Array(h.memory.buffer, Number(pointer), 64);
     const nul = bytes.indexOf(0); assert.ok(nul > 0);

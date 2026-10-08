@@ -6,7 +6,7 @@ self.onmessage = (ev) => {
 	if (started) return;
 	started = true;
 	const m = ev.data;
-	if (m.multiplayer) importScripts('/multiplayer/world-engine-bridge.js', '/multiplayer/engine-bridge.js');
+	if (m.multiplayer) importScripts('/multiplayer/native-session-ui.js', '/multiplayer/world-engine-bridge.js', '/multiplayer/engine-bridge.js');
 	// ?cores=N (debug): pretend to be a machine with N logical cores; the engine sizes its worker pools from it
 	if (m.cores) Object.defineProperty(navigator, 'hardwareConcurrency', { value: m.cores });
 	// The GPU worker must be up before the engine blocks this thread: Chrome fetches the script of a worker nested in a worker through
@@ -20,6 +20,7 @@ self.onmessage = (ev) => {
 	if (m.shotRt) gq.set('shotrt', '1');		// ?shotrt=1 (with ?shot=N): every render target of one frame after the world is shown goes to the dev server (diagnosis)
 	if (m.gpuLimits) gq.set('limits', m.gpuLimits);		// ?limits=name:value,...: a smaller device (diagnosis of weaker GPUs)
 	const B = m.base || '';		// the page's URL prefix for everything it loads (index.html BASE): /b/<build> on the PHP host, empty otherwise
+	const engineUrl = m.multiplayer ? '/engine/online/game.wasm?v=public-session-replica-9' : '/engine/offline/game.wasm';
 	const gpu = new Worker(B + '/wgpu_worker.js' + (gq.toString() ? '?' + gq : ''));
 	const io = new Worker(B + '/io_worker.js');
 	io.postMessage({ init: true, base: self.location.origin + '/data/', noStore: !!m.noStore, record: !!m.record, trace: !!m.trace, log: !!m.remoteLog, noHints: !!m.noHints, bootset: m.lowMemory ? 'bootset_low.json' : 'bootset.json' });		// starts the prefetch of the boot read set at once		// HTTP reads of all engine threads (platform/file/httpfs_wasm.cpp); same reason to create it up front
@@ -32,7 +33,7 @@ self.onmessage = (ev) => {
 	const fetchWasm = async () => {
 		for (let attempt = 0; ; attempt++) {
 			let res = null, err = null;
-			try { res = await fetch(B + (m.multiplayer ? '/game-multiplayer.wasm?v=melee-intent-animation-8' : '/game.wasm')); } catch (e) { err = e; }
+			try { res = await fetch(engineUrl); } catch (e) { err = e; }
 			if (res && res.ok) return res;
 			if (attempt >= 7) { if (res) throw new Error('HTTP ' + res.status + ' for game.wasm'); throw err; }
 			bc0.postMessage({ label: 'The server is busy, retrying (' + (attempt + 1) + ')' });
@@ -110,7 +111,7 @@ self.onmessage = (ev) => {
 			wgpuShotEvery: m.shotEvery,
 			keepThreads: m.keepThreads|0,		// bit mask of engine thread groups that are NOT skipped (1 replay, 2 net, 4 bink), see ipc_wasm.cpp
 			mainScriptUrlOrBlob: B + '/game.js' + ((m.fullConsole || m.remoteLog) ? '?' + [m.fullConsole ? 'console=1' : '', m.remoteLog ? 'log=1' : ''].filter(Boolean).join('&') : ''),		// pthreads read both from it, and take game.wasm's folder from it
-			locateFile: (p) => B + '/' + p,
+			locateFile: (p) => p.endsWith('.wasm') ? engineUrl : B + '/' + p,
 			onExit: (code) => { console.error('EXIT ' + code); self.__log('EXIT ' + code); self.__logFlush(); if (code) self.__crash('exit', 'EXIT ' + code); },
 			onAbort: (what) => { console.error('ABORT ' + what); self.__log('ABORT ' + what); self.__logFlush(); self.__crash('abort', 'ABORT ' + what); },
 			// Savegames and settings kept in IndexedDB by io_worker.js (platform/file/userdata_wasm.cpp sends them): put them back into the in-memory /userdata before the engine looks at it. The run

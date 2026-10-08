@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'tools'))
 import serve_local
 import build_launcher_zip
+import build_multiplayer_client
 
 
 class LauncherIsolationTests(unittest.TestCase):
@@ -38,11 +39,14 @@ class LauncherIsolationTests(unittest.TestCase):
                               'io_worker.js': b'original-io', 'wgpu_worker.js': b'original-gpu'}.items():
             (original / name).write_bytes(content)
         (original / 'game-multiplayer.wasm').write_bytes(b'old-game-copy-do-not-use')
-        (self.runtime / 'game-multiplayer.wasm').write_bytes(b'isolated-adapter')
+        (original / 'engine-alias.bin').symlink_to(original / 'game.wasm')
         self.digest = hashlib.sha256(b'fixture-original-wasm').hexdigest()
-        (self.runtime / 'game-multiplayer.json').write_text(json.dumps({
-            'original': {'sha256': self.digest},
-            'prototype': {'sha256': hashlib.sha256(b'isolated-adapter').hexdigest()}}), encoding='utf-8')
+        for mode, content in {'offline': b'fixture-original-wasm', 'online': b'isolated-adapter'}.items():
+            directory = self.runtime / mode; directory.mkdir()
+            (directory / 'game.wasm').write_bytes(content)
+            (directory / 'game.json').write_text(json.dumps({
+                'original': {'sha256': self.digest}, 'deployment': {'mode': mode},
+                'prototype': {'sha256': hashlib.sha256(content).hexdigest()}}), encoding='utf-8')
         self.before = self.inventory(self.game)
 
     def tearDown(self):
@@ -63,8 +67,11 @@ class LauncherIsolationTests(unittest.TestCase):
         self.assertEqual(status['root'], self.game.resolve()); self.assertTrue(status['multiplayer_ready'])
         self.assertEqual(serve_local.resolve_game_directory(self.game / 'data'), self.game.resolve())
         self.assertEqual(serve_local.resource_path('/data/sample.bin', self.game, self.runtime), self.game / 'data/sample.bin')
-        self.assertEqual(serve_local.resource_path('/b/8b0b5899ed/game-multiplayer.wasm', self.game, self.runtime),
-                         self.runtime / 'game-multiplayer.wasm')
+        for mode in ('offline', 'online'):
+            self.assertEqual(serve_local.resource_path('/engine/' + mode + '/game.wasm', self.game, self.runtime),
+                             self.runtime / mode / 'game.wasm')
+        with self.assertRaises(serve_local.RetiredEnginePath):
+            serve_local.resource_path('/b/8b0b5899ed/game-multiplayer.wasm', self.game, self.runtime)
 
     def test_missing_resources_and_wrong_original_or_adapter_hash_fail_clearly(self):
         with self.assertRaisesRegex(ValueError, '游戏资源不完整'):
@@ -77,12 +84,48 @@ class LauncherIsolationTests(unittest.TestCase):
             serve_local.inspect_game_resources(self.game, self.runtime)
         with self.assertRaisesRegex(ValueError, '不能位于游戏资源目录内'):
             serve_local.inspect_game_resources(self.game, self.game / 'data/runtime')
-        (self.runtime / 'game-multiplayer.wasm').write_bytes(b'corrupted')
+        (self.runtime / 'online/game.wasm').write_bytes(b'corrupted')
         with self.assertRaisesRegex(ValueError, '校验失败'):
             self.inspect(require_runtime=True)
-        (self.runtime / 'game-multiplayer.wasm').unlink()
+        (self.runtime / 'online/game.wasm').unlink()
         with self.assertRaisesRegex(ValueError, '缺少隔离'):
             self.inspect(require_runtime=True)
+        self.assertFalse(self.inspect()['multiplayer_ready'], '离线启动可以不安装在线副本')
+        (self.runtime / 'offline/game.wasm').unlink()
+        with self.assertRaisesRegex(ValueError, '离线运行副本.*build_multiplayer_client.py'):
+            self.inspect()
+
+    def test_builds_both_modes_outside_game_directory(self):
+        def build_online(arguments, **kwargs):
+            target = Path(arguments[arguments.index('--output') + 1])
+            self.assertEqual(target, (self.runtime / 'online/game.wasm').resolve())
+            target.write_bytes(b'new-audited-online')
+            target.with_suffix('.json').write_text(json.dumps({
+                'original': {'sha256': self.digest},
+                'prototype': {'sha256': hashlib.sha256(target.read_bytes()).hexdigest()}}), encoding='utf-8')
+        with patch.object(build_multiplayer_client, 'ORIGINAL_WASM_SHA256', self.digest), \
+                patch.object(build_multiplayer_client.subprocess, 'run', side_effect=build_online):
+            build_multiplayer_client.main(['--game-dir', str(self.game), '--runtime-dir', str(self.runtime)])
+        self.assertEqual((self.runtime / 'offline/game.wasm').read_bytes(), b'fixture-original-wasm')
+        self.assertTrue(self.inspect(require_runtime=True)['multiplayer_ready'])
+        for mode in ('offline', 'online'):
+            record = json.loads((self.runtime / mode / 'game.json').read_text(encoding='utf-8'))
+            self.assertEqual(record['deployment']['path'], '/engine/' + mode + '/game.wasm')
+            self.assertFalse(record['deployment']['game_resources_changed'])
+
+    def test_runtime_symlinks_cannot_read_or_write_game_engine(self):
+        target = self.runtime / 'offline/game.wasm'
+        target.unlink()
+        target.symlink_to(self.game / ('b/' + serve_local.BUILD_ID + '/game.wasm'))
+        with self.assertRaisesRegex(ValueError, '符号链接'):
+            self.inspect()
+        with self.assertRaisesRegex(ValueError, '运行引擎不能指向'):
+            serve_local.resource_path('/engine/offline/game.wasm', self.game, self.runtime)
+        with patch.object(build_multiplayer_client, 'ORIGINAL_WASM_SHA256', self.digest), \
+                patch.object(build_multiplayer_client.subprocess, 'run') as build:
+            with self.assertRaises(SystemExit):
+                build_multiplayer_client.main(['--game-dir', str(self.game), '--runtime-dir', str(self.runtime)])
+            build.assert_not_called()
 
     def test_http_reads_selected_resources_and_isolated_fork_and_rejects_escape_or_game_logs(self):
         status = self.inspect(require_runtime=True)
@@ -96,7 +139,7 @@ class LauncherIsolationTests(unittest.TestCase):
                 self.assertEqual(response.headers['Cross-Origin-Opener-Policy'], 'same-origin')
             with urlopen(Request(base + '/data/sample.bin', headers={'Range': 'bytes=1-3'})) as response:
                 self.assertEqual(response.status, 206); self.assertEqual(response.read(), b'bcd')
-            fork_url = base + '/b/8b0b5899ed/game-multiplayer.wasm?v=melee-intent-animation-8'
+            fork_url = base + '/engine/online/game.wasm?v=melee-intent-animation-8'
             with urlopen(fork_url) as response:
                 self.assertEqual(response.status, 200)
                 self.assertEqual(response.headers.get_content_type(), 'application/wasm')
@@ -104,6 +147,22 @@ class LauncherIsolationTests(unittest.TestCase):
             with urlopen(Request(fork_url, headers={'Range': 'bytes=0-7'})) as response:
                 self.assertEqual(response.status, 206)
                 self.assertEqual(response.read(), b'isolated')
+            with urlopen(base + '/engine/offline/game.wasm') as response:
+                self.assertEqual(response.read(), b'fixture-original-wasm')
+            for old_path in ('/b/8b0b5899ed/game.wasm', '/b/8b0b5899ed/game-multiplayer.wasm?v=old',
+                             '/b//8b0b5899ed/./game.wasm?nocache=1',
+                             '/b/8b0b5899ed/temp/../game.wasm',
+                             '/b/8b0b5899ed/%67ame.wasm',
+                             '/b%2f8b0b5899ed%2fgame-multiplayer.wasm',
+                             '/b/8b0b5899ed/%2567ame.wasm',
+                             '/b%5c8b0b5899ed%5cgame.wasm',
+                             '/B/8B0B5899ED/GAME.WASM', '/game-multiplayer.wasm',
+                             '/b/8b0b5899ed/engine-alias.bin'):
+                for headers in ({}, {'Range': 'bytes=0-7'}):
+                    with self.subTest(path=old_path, headers=headers), self.assertRaises(HTTPError) as caught:
+                        urlopen(Request(base + old_path, headers=headers))
+                    self.assertEqual(caught.exception.code, 410)
+                    caught.exception.close()
             with urlopen(Request(base + '/data/batch', data=json.dumps([['sample.bin', 1, 3]]).encode(), method='POST')) as response:
                 self.assertEqual(response.read(), b'bcd')
             with urlopen(base + '/api/local-config') as response:

@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 from build_native_probe import (
     DEFAULT_WASM, EXPECTED_MODEL_WRAPPER, HOOK_FUNCTION, ORIGINAL_SHA256,
     PUBLIC_MODEL_WRAPPER, build, checked_audit, export_map,
+    FRONTEND_FUNCTION, FRONTEND_TAIL, FRONTEND_MAGIC,
 )
 from inspect_native_bridge import WasmAudit
 
@@ -111,7 +112,7 @@ class PublicEnginePatchTests(unittest.TestCase):
 
     def test_only_expected_function_bodies_change(self):
         for name, expected in (("probe", {HOOK_FUNCTION}), ("replica", {HOOK_FUNCTION}),
-                               ("public", {HOOK_FUNCTION, PUBLIC_MODEL_WRAPPER})):
+                               ("public", {HOOK_FUNCTION, PUBLIC_MODEL_WRAPPER, FRONTEND_FUNCTION})):
             result = self.audits[name]
             changed = {index for index in self.original.bodies
                        if self.body(self.original, index) != self.body(result, index)}
@@ -127,6 +128,17 @@ class PublicEnginePatchTests(unittest.TestCase):
         # 直接桥设置模型和另一种玩家切换路径均保留原始函数体。
         for index in (58625, 58869, 47995, 45486):
             self.assertEqual(self.body(self.original, index), self.body(self.audits["public"], index))
+
+    def test_public_frontend_callback_runs_only_at_verified_normal_tail(self):
+        from build_native_probe import signed_leb, CALLBACK_IMPORT
+        callback = b'\x42\x00\x41' + signed_leb(FRONTEND_MAGIC) + b'\x10' + bytes([CALLBACK_IMPORT]) + b'\x1a'
+        original = self.body(self.original, FRONTEND_FUNCTION)
+        result = self.body(self.audits['public'], FRONTEND_FUNCTION)
+        self.assertEqual(result, original[:-len(FRONTEND_TAIL)] + callback + FRONTEND_TAIL)
+        self.assertEqual(self.body(self.audits['probe'], FRONTEND_FUNCTION), original)
+        self.assertEqual(self.body(self.audits['replica'], FRONTEND_FUNCTION), original)
+        self.assertEqual(self.reports['public']['frontend_hook']['function_index'], FRONTEND_FUNCTION)
+        self.assertTrue(self.audits['public'].instructions(FRONTEND_FUNCTION)['decode_complete'])
 
     def test_all_other_sections_and_export_abis_are_preserved(self):
         result = self.audits["public"]

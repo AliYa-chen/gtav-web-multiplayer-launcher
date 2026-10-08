@@ -6,9 +6,16 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(ROOT))
-from serve_local import resource_path
+from serve_local import resource_path, ROOT as GAME_ROOT
 PREFIX = 'playgta5-offline'
 OUTPUT = ROOT / 'archive/packages/playgta5-offline-中文整理版.zip'
+
+
+def packaging_resource_path(path):
+    # 历史完整快照打包只读来源文件；HTTP 旧引擎入口停用不能被打包工具重新启用。
+    if path == '/b/8b0b5899ed/game.wasm':
+        return GAME_ROOT / path.lstrip('/')
+    return resource_path(path)
 
 class HashWriter:
     """不可回退的 ZIP 输出：每个写入字节恰好参与一次哈希计算。"""
@@ -42,13 +49,13 @@ def collect_files(root=ROOT):
 
 
 def main():
-    expected = {resource_path(r['path']).relative_to(ROOT).as_posix(): r['sha256']
+    expected = {packaging_resource_path(r['path']).relative_to(ROOT).as_posix(): r['sha256']
                 for r in json.loads((ROOT / 'docs/snapshot/manifest-sha256.json').read_text(encoding='utf-8'))}
     fix_path = ROOT / 'docs/snapshot/local-scaleform-fix.json'
     if fix_path.exists():
         fix = json.loads(fix_path.read_text(encoding='utf-8'))
         for rec in [fix['manifest_override'], fix['loader_override'], *fix['files']]:
-            expected[resource_path(rec['path']).relative_to(ROOT).as_posix()] = rec['sha256']
+            expected[packaging_resource_path(rec['path']).relative_to(ROOT).as_posix()] = rec['sha256']
         for rec in [fix['original_manifest'], fix['original_loader']]:
             expected[rec['path']] = rec['sha256']
     expected.update({r['path']: r['sha256'] for r in
@@ -57,7 +64,7 @@ def main():
     overrides_path = ROOT / 'docs/snapshot/local-overrides.json'
     if overrides_path.exists():
         for rec in json.loads(overrides_path.read_text(encoding='utf-8'))['files']:
-            expected[resource_path(rec['path']).relative_to(ROOT).as_posix()] = rec['sha256']
+            expected[packaging_resource_path(rec['path']).relative_to(ROOT).as_posix()] = rec['sha256']
     files = collect_files()
     total = sum(p.stat().st_size for p in files)
     processed = 0

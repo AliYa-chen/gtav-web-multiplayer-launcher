@@ -1,6 +1,6 @@
 'use strict';
 // 统一实体适配器：只创建服务器登记对象，所有者代算 GTA 物理，其他端应用已确认组件。
-self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica }) {
+self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPlayerAnimation }) {
   const replicas = new Map();
   const requestedModels = new Map();
   let epoch = null, buffer = 0, requestNumber = 0, lastInteractionAt = -Infinity;
@@ -72,6 +72,14 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica }) {
     }
     return { dict: BigInt(animationBuffer), clips: meleeClips.map((_clip, index) => BigInt(animationBuffer + 64 + index * 48)) };
   }
+  function prepareMeleeAnimation(now) {
+    if (!ex.mpTaskPlayAnim || !ex.mpHasAnimDictLoaded) return;
+    const pointers = animationPointers();
+    if (!pointers || (ex.mpAnimDictExists && !ex.mpAnimDictExists(pointers.dict))) return;
+    if (!ex.mpHasAnimDictLoaded(pointers.dict) && now - animationRequestedAt >= 1000) {
+      ex.mpRequestAnimDict?.(pointers.dict); animationRequestedAt = now;
+    }
+  }
   function sampleMelee(packet, now, localPed, { localReady = true } = {}) {
     if (now - lastMeleeSampleAt < 5 || !packet?.connected || !packet.world?.ready || !localReady || !localPed) return;
     lastMeleeSampleAt = now;
@@ -139,8 +147,11 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica }) {
               consumedWorldEvents.add(item.id); acknowledge.push(item.id); animationEvents.delete(item.id); continue;
             }
             if (now - state.playedAt >= 400 && state.attempts < 3) {
-              // 纯脚本动画：不会创建战斗任务、实弹或本地伤害。
-              ex.mpTaskPlayAnim(handle, pointers.dict, pointers.clips[0], 8, -8, 700, 48, 0, 0, 0, 0);
+              // 拳击需要全身姿态；上半身叠加会被原移动任务覆盖。位置仍由服务器姿态约束。
+              // 纯脚本动画不会创建近战伤害任务，生命变化只采用服务器裁决。
+              ex.mpClearTasksImmediately?.(handle);
+              if (actor.player_id) onPlayerAnimation?.(actor.player_id, now, 750);
+              ex.mpTaskPlayAnim(handle, pointers.dict, pointers.clips[0], 8, -8, 700, 0, 0, 0, 0, 0);
               state.playedAt = now; state.attempts++;
             }
             if (!ex.mpIsPlayingAnim || ex.mpIsPlayingAnim(handle, pointers.dict, pointers.clips[0], 3)) {
@@ -166,6 +177,7 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica }) {
       return { active: false };
     }
     if (epoch !== world.world_epoch) { clear(); epoch = world.world_epoch; }
+    prepareMeleeAnimation(now);
     const entities = new Map(world.entities.map((entity) => [entity.entity_id, entity]));
     const local = world.entities.find((entity) => entity.player_id === packet.client_id);
     if (localPed && ex.mpPopulationType && now - lastPopulationCleanup >= 1000) {

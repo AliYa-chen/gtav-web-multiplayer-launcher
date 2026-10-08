@@ -245,7 +245,8 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
       target_entity_id: message.target_entity_id, target_generation: message.target_generation,
       accepted: true, hit: message.hit, damage: message.damage, health: message.health, revision: message.revision, world_tick: message.world_tick };
     logMelee({ stage: 'event', request_id: event.request_id, event_id: event.event_id,
-      attacker_entity_id: event.attacker_entity_id, target_entity_id: event.target_entity_id, hit: event.hit, reason: '' });
+      attacker_entity_id: event.attacker_entity_id, target_entity_id: event.target_entity_id,
+      hit: event.hit, damage: event.damage, health: event.health, revision: event.revision, reason: '' });
     emit(event);
   }
   function clearPendingMelee() { pendingMelee = null; clearTimeout(meleeTimer); meleeTimer = 0; }

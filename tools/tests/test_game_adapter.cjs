@@ -12,6 +12,8 @@ const root = path.resolve(__dirname, '../..');
 const engineSource = fs.readFileSync(path.join(root, 'client/multiplayer/engine-bridge.js'), 'utf8');
 const adapterSource = fs.readFileSync(path.join(root, 'client/multiplayer/game-adapter.js'), 'utf8');
 const appearanceSource = fs.readFileSync(path.join(root, 'client/multiplayer/appearance.js'), 'utf8');
+const worldSource = fs.readFileSync(path.join(root, 'client/multiplayer/world-engine-bridge.js'), 'utf8');
+const uiSource = fs.readFileSync(path.join(root, 'client/multiplayer/native-session-ui.js'), 'utf8');
 const appearanceModule = import('data:text/javascript;base64,' + Buffer.from(appearanceSource).toString('base64'));
 // 始终读取当前构建器定义，避免旧隔离探针缓存掩盖新增导出；无需游戏二进制。
 const builderManifest = spawnSync(process.env.PYTHON || 'python3', ['-B', '-c',
@@ -45,6 +47,9 @@ function engine(options = {}) {
   const alive = new Set([7]), blips = new Map();
   const health = new Map([[7, options.localHealth ?? 200]]), invincible = new Set(), dead = new Set();
   const ragdoll = new Set(), ragdollAllowed = new Map();
+  const remotePositions = new Map(), remoteHeadings = new Map(), frozen = new Map(), tasks = new Map(), animations = new Map();
+  const occupiedVehicles = new Map();
+  const uiCalls = [];
   let remoteRecoveryBlocked = false;
   let now = 100, allocated = 4096, nextPed = 100, localPosition = [...(options.localPosition || [711.5, -1088, 22.41])];
   let localPed = options.localPed ?? 7, localModel = options.localModel ?? 0x705e61f2;
@@ -82,7 +87,7 @@ function engine(options = {}) {
     mpNetworkScriptHandler: () => options.networkScriptHandler || 0n,
     mpGetPlayerPed: () => localPed,
     mpAlloc: (size) => { const pointer = allocated; allocated += Number(size); return BigInt(pointer); },
-    mpGetEntityCoords: (pointer) => vector(pointer, localPosition),
+    mpGetEntityCoords: (pointer, ped) => vector(pointer, ped === localPed ? localPosition : remotePositions.get(ped) || [0, 0, 0]),
     mpGetModel: () => localModel,
     mpPlayerId: () => 0,
     mpSetPlayerModel: (_player, model) => {
@@ -102,12 +107,13 @@ function engine(options = {}) {
     mpDrawableCount: () => 100, mpTextureCount: () => 10,
     mpHeadOverlayCount: () => options.overlayCount ?? 10,
     mpSetHeadOverlay: () => {}, mpSetOverlayTint: () => {}, mpSetHairTint: () => {},
-    mpHeading: () => localHeading,
+    mpHeading: (ped) => ped === localPed ? localHeading : remoteHeadings.get(ped) || 0,
     mpGetHealth: (ped) => health.get(ped) ?? 200,
     mpIsShooting: (ped) => ped === localPed ? localShooting : false,
     mpSelectedWeapon: (ped) => ped === localPed ? localWeapon : equippedWeapons.get(ped) || 0,
     mpGetCurrentPedWeapon: (ped, pointer) => {
       if (ped === localPed && !weaponReady) return 0;
+      if (options.unarmedNoWeapon && (ped === localPed ? localWeapon : equippedWeapons.get(ped)) === 0xa2719263) return 0;
       new DataView(memory.buffer).setUint32(Number(pointer), ped === localPed ? localWeapon : equippedWeapons.get(ped) || 0, true);
       return 1;
     },
@@ -128,15 +134,24 @@ function engine(options = {}) {
     mpTaskAimGunAtCoord: () => {}, mpTaskReloadWeapon: () => {}, mpTaskJump: () => {}, mpSetDucking: () => {},
     mpHasModel: (hash) => !unavailableModels.has(hash >>> 0),
     mpRequestModel: () => {},
-    mpCreatePed: () => { alive.add(++nextPed); health.set(nextPed, 200); return nextPed; },
+    mpCreatePed: (_type, _model, pointer, heading) => {
+      alive.add(++nextPed); health.set(nextPed, 200);
+      remotePositions.set(nextPed, readNativeVector(pointer)); remoteHeadings.set(nextPed, heading); return nextPed;
+    },
     mpExists: (ped) => alive.has(ped) ? 1 : 0,
     mpDeletePed: (pointer) => {
       const data = new DataView(memory.buffer), ped = data.getInt32(Number(pointer), true);
       alive.delete(ped); data.setInt32(Number(pointer), 0, true);
     },
-    mpSetCoordsNoOffset: (ped, pointer) => { if (ped === localPed) localPosition = readNativeVector(pointer); },
-    mpBlockEvents: () => {}, mpFreeze: () => {},
-    mpSetHeading: (ped, heading) => { if (ped === localPed) localHeading = heading; },
+    mpSetCoordsNoOffset: (ped, pointer) => {
+      if (ped === localPed) localPosition = readNativeVector(pointer); else remotePositions.set(ped, readNativeVector(pointer));
+    },
+    mpBlockEvents: () => {}, mpFreeze: (ped, value) => frozen.set(ped, Boolean(value)),
+    mpGetVehiclePedIsIn: (ped) => occupiedVehicles.get(ped) || 0,
+    mpSetVelocity: () => {},
+    mpTaskGoStraight: (ped, pointer, speed, timeout) => tasks.set(ped, { kind: 'move', target: readNativeVector(pointer), speed, timeout }),
+    mpTaskStandStill: (ped, timeout) => tasks.set(ped, { kind: 'idle', timeout }),
+    mpSetHeading: (ped, heading) => { if (ped === localPed) localHeading = heading; else remoteHeadings.set(ped, heading); },
     mpGiveWeapon: (ped, weapon) => {
       if (ped === localPed) localWeapon = weapon >>> 0;
       else if (!remoteEquipBlocked) equippedWeapons.set(ped, weapon >>> 0);
@@ -160,7 +175,11 @@ function engine(options = {}) {
     mpShootBullet: () => {}, mpHasWeaponAsset: () => weaponAssetReady ? 1 : 0, mpRequestWeaponAsset: () => {},
     mpResurrect: (ped) => { if (ped !== localPed && !remoteRecoveryBlocked) dead.delete(ped); },
     mpRevive: (ped) => { if (ped === localPed ? !localRecoveryBlocked : !remoteRecoveryBlocked) dead.delete(ped); },
-    mpClearTasksImmediately: () => {},
+    mpClearTasksImmediately: (ped) => { tasks.delete(ped); animations.delete(ped); },
+    mpAnimDictExists: () => 1, mpHasAnimDictLoaded: () => 1, mpRequestAnimDict: () => {},
+    mpTaskPlayAnim: (ped, dict, clip) => { animations.set(ped, { dict, clip }); tasks.set(ped, { kind: 'punch' }); },
+    mpIsPlayingAnim: (ped, dict, clip) => animations.get(ped)?.dict === dict && animations.get(ped)?.clip === clip ? 1 : 0,
+    mpAnimTime: () => .4,
     // PED 复活只能恢复实体；本地玩家复活还需要恢复玩家状态和摄像机。
     mpResurrectLocalPlayer: (pointer) => {
       if (localRecoveryBlocked) return;
@@ -184,6 +203,12 @@ function engine(options = {}) {
       data.setInt32(Number(pointer), 0, true);
     },
     mpBeginSetBlipName: () => {}, mpEndSetBlipName: () => {},
+    mpPauseMenuActive: () => state.pauseActive ? 1 : 0,
+    mpFrontendReady: () => state.pauseActive ? 1 : 0,
+    mpBeginPauseHeader: (pointer) => { uiCalls.push({ method: readString(pointer).text, parameters: [] }); return 1; },
+    mpScaleformString: (pointer) => uiCalls.at(-1).parameters.push(readString(pointer).text),
+    mpScaleformBool: (value) => uiCalls.at(-1).parameters.push(Boolean(value)),
+    mpEndScaleform: () => {},
     mpAddTextPlayerSubstring: (pointer) => {
       if (currentNotification) {
         if (noticeThrows) throw new Error('受控原生文字添加失败');
@@ -212,6 +237,10 @@ function engine(options = {}) {
   const self = { postMessage(value) { if (options.throwPost) throw new Error('页面已关闭'); messages.push(value); } };
   const context = vm.createContext({ self, performance: { now: () => now }, TextDecoder: BrowserTextDecoder, TextEncoder, Atomics,
     Int32Array, Uint8Array, DataView, BigInt, SharedArrayBuffer });
+  if (options.worldBridge) vm.runInContext(worldSource, context, { filename: 'world-engine-bridge.js' });
+  else if (options.vehicleHandles) self.createWorldEntityBridge = () => ({ entityHandle: id => options.vehicleHandles.get(id) || 0,
+    suppressPopulation() {}, sampleMelee() {}, update() { return { active: false }; }, clear() {} });
+  if (options.sessionUI) vm.runInContext(uiSource, context, { filename: 'native-session-ui.js' });
   vm.runInContext(engineSource, context, { filename: 'engine-bridge.js' });
   const imports = { env: { memory, wasm_module_int_js: () => 0 } };
   self.prepareMultiplayerBridge(imports)({ exports: ex });
@@ -241,6 +270,8 @@ function engine(options = {}) {
     for (let index = 0; index < 13; index++) tick();
   };
   return { memory, calls, messages, state, tick, setup, publish, connect, alive, blips, health, invincible, dead, ragdoll, ragdollAllowed, notifications,
+    remotePositions, remoteHeadings, frozen, tasks, animations, uiCalls, occupiedVehicles,
+    frontendTick: (at = now + 100) => { now = at; return imports.env.wasm_module_int_js(0n, 0x4d505549); },
     now: () => now, setLocalModel: (model) => { localModel = model >>> 0; },
     localPed: () => localPed, position: () => [...localPosition],
     setLocalPed: (ped) => { alive.delete(localPed); localPed = ped; if (ped) alive.add(ped); },
@@ -951,6 +982,7 @@ test('本地生命值遵从服务端权威且只在不同值时写入，死亡�
 test('远端死亡以 combat 权威覆盖客户端健康，解除冻结后不持续瞬移尸体，复活恢复同一实体一次', () => {
   const bridge = engine(); bridge.connect();
   const ped = bridge.calls.find((call) => call.name === 'mpFreeze').arguments[0];
+  const flushesAtCreation = bridge.calls.filter((call) => call.name === 'mpClearTasksImmediately').length;
   const movesBefore = bridge.calls.filter((call) => call.name === 'mpSetCoordsNoOffset' && call.arguments[0] === ped).length;
   bridge.publish(packet({ peers: [{ player_id: 'REMOTE', state: peerState({ health: 200, position: [713, -1080, 22] }) }],
     combat: [{ id: 'REMOTE', health: 0, alive: false }] })); bridge.tick();
@@ -963,9 +995,10 @@ test('远端死亡以 combat 权威覆盖客户端健康，解除冻结后不持
     combat: [{ id: 'REMOTE', health: 200, alive: true }] })); bridge.tick();
   assert.equal(bridge.health.get(ped), 200); assert.ok(bridge.invincible.has(ped));
   assert.equal(bridge.calls.filter((call) => call.name === 'mpCreatePed').length, 1);
-  for (const name of ['mpResurrect', 'mpRevive', 'mpClearTasksImmediately']) {
+  for (const name of ['mpResurrect', 'mpRevive']) {
     assert.deepEqual(bridge.calls.filter((call) => call.name === name).map((call) => call.arguments), [[ped]]);
   }
+  assert.equal(bridge.calls.filter((call) => call.name === 'mpClearTasksImmediately').length, flushesAtCreation + 1);
   for (let index = 0; index < 8; index++) bridge.tick();
   assert.equal(bridge.calls.filter((call) => call.name === 'mpResurrect').length, 1);
 });
@@ -1462,4 +1495,91 @@ test('原生 HUD 可用后隐藏网页浮层，原生失败保留网页提示且
   page.api.onWorkerMessage({ multiplayer: { type: 'native_hud', available: false } });
   assert.notEqual(page.hud.style.display, 'none');
   assert.ok(page.hud.textContent.includes('自动重连'));
+});
+
+test('远端缓存坐标收敛后仍纠正引擎实际漂移及转身，保持静止和同一模型', () => {
+  const bridge = engine(); bridge.connect();
+  const ped = bridge.calls.find(c => c.name === 'mpCreatePed') ? 101 : 0;
+  assert.ok(ped);
+  bridge.remotePositions.set(ped, [715, -1070, 22]); bridge.remoteHeadings.set(ped, 10);
+  bridge.frozen.set(ped, false);
+  const clears = bridge.calls.filter(c => c.name === 'mpClearTasksImmediately').length;
+  bridge.tick();
+  assert.deepEqual(bridge.remotePositions.get(ped), [710, -1080, 22]);
+  assert.equal(bridge.remoteHeadings.get(ped), 120);
+  assert.equal(bridge.frozen.get(ped), true);
+  assert.equal(bridge.tasks.get(ped).kind, 'idle');
+  assert.equal(bridge.tasks.get(ped).timeout, -1);
+  assert.equal(bridge.calls.filter(c => c.name === 'mpClearTasksImmediately').length, clears, '纠偏不能取消已排入的动作');
+  assert.equal(bridge.calls.filter(c => c.name === 'mpCreatePed').length, 1);
+});
+
+test('远端移动按真实间隔估算速度，停止后取消走动任务且挂接不独立瞬移', () => {
+  const bridge = engine(); bridge.connect(); const ped = 101;
+  bridge.publish(packet({ peers: [{ player_id: 'REMOTE', state: peerState({ position: [710.25, -1080, 22] }) }] }));
+  bridge.tick(bridge.now() + 250);
+  assert.equal(bridge.tasks.get(ped).kind, 'move');
+  assert.ok(bridge.tasks.get(ped).speed <= 1.1, '250ms走0.25米不能被当作每秒3米');
+  for (let i = 0; i < 15; i++) bridge.tick();
+  assert.equal(bridge.tasks.get(ped).kind, 'idle');
+  bridge.remotePositions.set(ped, [800, -1080, 22]);
+  bridge.publish(packet({ peers: [{ player_id: 'REMOTE', state: peerState({ attachment: { entity_id: 'car', seat: 'driver' } }) }] }));
+  bridge.tick();
+  assert.deepEqual(bridge.remotePositions.get(ped), [800, -1080, 22]);
+  assert.equal(bridge.frozen.get(ped), true, '车尚未加载和实际入座时不解冻');
+});
+
+test('真实两层桥的远端拳击使用全身动画，静止与移动更新不能覆盖动作窗口', () => {
+  const bridge = engine({ worldBridge: true });
+  const entity = (id, playerId, x) => ({ entity_id: id, kind: 'ped', player_id: playerId, generation: 1,
+    revision: 1, model: 0x705e61f2, owner_epoch: 1, owner_id: playerId, ownership: 'active',
+    components: { transform: { position: [x, -1080, 22], rotation: [0, 0, 0, 1], velocity: [0, 0, 0], angular_velocity: [0, 0, 0] },
+      combat: { health: 200, alive: true }, ped: { weapon: 0xa2719263, actions: {} } } });
+  const state = packet({ world: { ready: true, world_epoch: 'TEST', entities: [entity('SELF', 'LOCAL', 711), entity('OTHER', 'REMOTE', 710)] }, world_events: [] });
+  bridge.connect(state);
+  state.world_events = [{ id: 1, event: { world_epoch: 'TEST', attacker_entity_id: 'OTHER', attacker_generation: 1, hit: false } }];
+  bridge.publish(state); bridge.tick();
+  assert.equal(bridge.tasks.get(101).kind, 'punch');
+  const play = bridge.calls.filter(c => c.name === 'mpTaskPlayAnim').at(-1);
+  assert.equal(play.arguments[6], 0, '拳击使用完整身体动作');
+  const afterPunch = bridge.calls.length;
+  for (let i = 0; i < 6; i++) bridge.tick();
+  assert.equal(bridge.tasks.get(101).kind, 'punch');
+  assert.equal(bridge.calls.slice(afterPunch).filter(c => ['mpTaskGoStraight', 'mpTaskStandStill', 'mpClearTasksImmediately'].includes(c.name) && c.arguments[0] === 101).length, 0);
+  bridge.tick(bridge.now() + 800);
+  assert.equal(bridge.tasks.get(101).kind, 'idle');
+});
+
+test('空手native无武器对象时仍视为就绪，不反复装备空手打断拳击', () => {
+  const bridge = engine({ localWeapon: 0xa2719263, unarmedNoWeapon: true }); bridge.setWeaponReady(false);
+  bridge.connect(packet({ peers: [{ player_id: 'REMOTE', state: peerState({ weapon: 0xa2719263 }) }] }));
+  const initialEquip = bridge.calls.filter(c => c.name === 'mpSetCurrentWeapon' && c.arguments[0] === 101).length;
+  for (let i = 0; i < 20; i++) bridge.tick();
+  assert.equal(bridge.calls.filter(c => c.name === 'mpSetCurrentWeapon' && c.arguments[0] === 101).length, initialEquip);
+  const status = bridge.messages.filter(m => m.multiplayer?.type === 'game_status' && m.multiplayer.weapon === 0xa2719263).at(-1);
+  assert.equal(status.multiplayer.weapon_ready, true);
+});
+
+test('暂停无脚本owner回调时由独立前端尾部刷新公共战局菜单，只调用UI不操作角色', () => {
+  const bridge = engine({ sessionUI: true });
+  bridge.connect(packet({ members: [{ id: 'LOCAL', name: '测试玩家' }, { id: 'REMOTE' }] }));
+  bridge.state.active = 0n; bridge.state.handler = 0n; bridge.state.pauseActive = true;
+  const start = bridge.calls.length;
+  bridge.frontendTick();
+  assert.deepEqual(bridge.uiCalls.map(c => c.method), ['SET_HEADER_TITLE', 'SET_HEADING_DETAILS']);
+  assert.equal(bridge.uiCalls[0].parameters[0], 'GTA V · 公共在線戰局');
+  assert.equal(bridge.uiCalls[1].parameters[0], '测试玩家');
+  assert.equal(bridge.calls.slice(start).some(c => /^mp(?:GetPlayerPed|SetCoords|CreatePed|SetHealth|GetActiveThread|GetCurrentHandler)/.test(c.name)), false);
+  bridge.publish(packet({ connected: false, members: [] })); bridge.frontendTick(bridge.now() + 300);
+  assert.ok(bridge.uiCalls.at(-1).parameters.includes('正在重新連線'));
+});
+
+test('服务器挂接待本机车辆就绪并实际入座后才解除冻结，不用过期坐标拉动乘客', () => {
+  const vehicles = new Map(); const bridge = engine({ vehicleHandles: vehicles }); bridge.connect();
+  const value = packet({ peers: [{ player_id: 'REMOTE', state: peerState({ attachment: { entity_id: 'car', seat: 'passenger:0' } }) }] });
+  bridge.publish(value); bridge.tick(); assert.equal(bridge.frozen.get(101), true);
+  vehicles.set('car', 501); bridge.tick(); assert.equal(bridge.frozen.get(101), true);
+  bridge.occupiedVehicles.set(101, 501); bridge.remotePositions.set(101, [780, -1088, 22]);
+  bridge.tick(); assert.equal(bridge.frozen.get(101), false);
+  assert.deepEqual(bridge.remotePositions.get(101), [780, -1088, 22]);
 });
