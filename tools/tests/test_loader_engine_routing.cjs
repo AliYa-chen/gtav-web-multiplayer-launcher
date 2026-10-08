@@ -36,7 +36,7 @@ async function load(multiplayer) {
 
 for (const online of [false, true]) test((online ? '在线' : '离线') + '流式及缓冲回落只加载client运行副本，locateFile不回退旧引擎', async () => {
   const h = await load(online);
-  const expected = online ? '/engine/online/game.wasm?v=public-session-replica-9' : '/engine/offline/game.wasm';
+  const expected = online ? '/engine/online/game.wasm?v=shot-blip-recovery-10' : '/engine/offline/game.wasm';
   assert.deepEqual(h.requested, [expected, expected]);
   assert.equal(h.self.Module.locateFile('game.wasm'), expected);
   assert.equal(h.self.Module.locateFile('audio-worklet.js'), '/b/8b0b5899ed/audio-worklet.js');

@@ -31,6 +31,7 @@ self.prepareMultiplayerBridge = function (imports) {
     const retryAfter = new Map();
     const requested = new Map();
     const consumedShots = new Set();
+    const visualShots = new Map();
     const consumedControls = new Set();
     const consumedNotices = new Set();
     const authorityStates = new Map();
@@ -57,6 +58,8 @@ self.prepareMultiplayerBridge = function (imports) {
     let noticeBuffer = 0, lastNoticeAttempt = -Infinity, nativeHudAvailable = null;
     let shotBuffer = 0, shotSampleAt = -Infinity, weaponSample = null, pendingShots = [];
     let worldReadinessAt = -Infinity, worldReadinessSignature = '';
+    let muzzleNameBuffer = 0;
+    let visualReportAt = -Infinity, visualPlayed = 0, visualExpired = 0, visualSignature = '';
     const sessionUI = self.createNativeSessionUI?.({ ex, memory });
     const worldEntities = self.createWorldEntityBridge?.({ ex, memory, post: (value) => post(value),
       playerReplica: (id) => replicas.get(id)?.ped || 0,
@@ -143,6 +146,33 @@ self.prepareMultiplayerBridge = function (imports) {
       const pitch = rotation[0] * Math.PI / 180, yaw = rotation[2] * Math.PI / 180;
       const direction = [-Math.sin(yaw) * Math.cos(pitch), Math.cos(yaw) * Math.cos(pitch), Math.sin(pitch)];
       return { origin, target: origin.map((value, index) => value + 100 * direction[index]) };
+    }
+    function replicaMuzzle(replica, fallback) {
+      const nearPed = (point) => validPosition(point) && Math.hypot(...point.map((part, index) => part - replica.position[index])) <= 3;
+      if (ex.mpCurrentWeaponEntity && ex.mpEntityBoneCount && ex.mpEntityBoneIndexByName && ex.mpWorldPositionOfEntityBone) {
+        const weaponEntity = ex.mpCurrentWeaponEntity(replica.ped, 0);
+        if (weaponEntity && ex.mpExists(weaponEntity) && ex.mpEntityBoneCount(weaponEntity) > 0) {
+          if (!muzzleNameBuffer) {
+            muzzleNameBuffer = Number(ex.mpAlloc(16n));
+            if (muzzleNameBuffer) {
+              const bytes = new Uint8Array(memory.buffer, muzzleNameBuffer, 16); bytes.fill(0);
+              bytes.set(new TextEncoder().encode('gun_muzzle'));
+            }
+          }
+          if (muzzleNameBuffer) {
+            const bone = ex.mpEntityBoneIndexByName(weaponEntity, BigInt(muzzleNameBuffer));
+            if (bone >= 0) {
+              ex.mpWorldPositionOfEntityBone(BigInt(scratch + 24), weaponEntity, bone);
+              const point = readVector(24); if (nearPed(point)) return point;
+            }
+          }
+        }
+      }
+      if (ex.mpPedBoneCoords) {
+        ex.mpPedBoneCoords(BigInt(scratch + 24), replica.ped, 57005, vector(72, [0, 0, 0]));
+        const point = readVector(24); if (nearPed(point)) return point;
+      }
+      return fallback;
     }
     function actionsFor(ped) {
       return { aiming: Boolean(ex.mpIsAiming?.(ex.mpPlayerId())), reloading: Boolean(ex.mpIsReloading?.(ped)),
@@ -396,7 +426,7 @@ self.prepareMultiplayerBridge = function (imports) {
         role_recovering: recovering, peer_count: replicas.size });
     }
     function erase(replica, reason = 'leave') {
-      if (replica?.blip && ex.mpRemoveBlip) {
+      if (replica?.blip && ex.mpRemoveBlip && (!ex.mpDoesBlipExist || ex.mpDoesBlipExist(replica.blip))) {
         view().setInt32(scratch + 124, replica.blip, true);
         ex.mpRemoveBlip(BigInt(scratch + 124));
       }
@@ -405,6 +435,27 @@ self.prepareMultiplayerBridge = function (imports) {
         ex.mpDeletePed(BigInt(scratch + 120));
       }
       if (replica) { replicaRemovals++; lifecycle(reason); }
+    }
+    function ensureReplicaBlip(id, replica, now) {
+      if (!ex.mpAddBlipForEntity || now - (replica.blipCheckedAt ?? -Infinity) < 500) return;
+      replica.blipCheckedAt = now;
+      // Blip 属于脚本资源；换脚本、HUD 初始化或刷新恢复可清掉标记而保留角色实体。
+      if (replica.blip && ex.mpDoesBlipExist && !ex.mpDoesBlipExist(replica.blip)) replica.blip = 0;
+      if (!replica.blip) replica.blip = ex.mpAddBlipForEntity(replica.ped);
+      if (!replica.blip) return; // 雷达尚未就绪，下一次重试，不重建角色。
+      const blip = replica.blip;
+      ex.mpSetBlipColour(blip, 3); ex.mpSetBlipSprite(blip, 1); ex.mpSetBlipScale(blip, .85);
+      ex.mpSetBlipAsShortRange(blip, 0); ex.mpSetBlipDisplay?.(blip, 4); ex.mpSetBlipAlpha?.(blip, 255);
+      const name = packet.members?.find((member) => member.id === id)?.name;
+      if (replica.blipNamed === blip + ':' + name || !name || !ex.mpBeginSetBlipName || !ex.mpAddTextPlayerSubstring || !ex.mpEndSetBlipName) return;
+      if (!nameBuffer) nameBuffer = Number(ex.mpAlloc(256n));
+      if (nameBuffer) {
+        const bytes = new Uint8Array(memory.buffer, nameBuffer, 256); bytes.fill(0);
+        bytes.set(new TextEncoder().encode('STRING'), 0);
+        bytes.set(new TextEncoder().encode(Array.from(String(name).replace(/~[^~]*~/g, '').replace(/[~\u0000-\u001f]/g, '')).slice(0, 24).join('')), 32);
+        ex.mpBeginSetBlipName(BigInt(nameBuffer)); ex.mpAddTextPlayerSubstring(BigInt(nameBuffer + 32)); ex.mpEndSetBlipName(blip);
+        replica.blipNamed = blip + ':' + name;
+      }
     }
     function updateReplica(id, state, now, delta) {
       if (!validPosition(state?.position) || !Number.isInteger(state.model) || !Number.isFinite(state.heading)) return;
@@ -443,36 +494,14 @@ self.prepareMultiplayerBridge = function (imports) {
         ex.mpTaskStandStill?.(ped, -1);
         ex.mpFreeze(ped, 1);
         ex.mpSetCoordsNoOffset(ped, vector(72, state.position), 1, 1, 1);
-        let blip = 0;
-        if (ex.mpAddBlipForEntity) {
-          blip = ex.mpAddBlipForEntity(ped);
-          if (blip) {
-            ex.mpSetBlipColour(blip, 3);
-            ex.mpSetBlipSprite(blip, 1);
-            ex.mpSetBlipScale(blip, .85);
-            ex.mpSetBlipAsShortRange(blip, 0);
-            const name = packet.members?.find((member) => member.id === id)?.name;
-            if (name && ex.mpBeginSetBlipName && ex.mpAddTextPlayerSubstring && ex.mpEndSetBlipName) {
-              if (!nameBuffer) nameBuffer = Number(ex.mpAlloc(256n));
-              if (nameBuffer) {
-                const buffer = new Uint8Array(memory.buffer, nameBuffer, 256);
-                buffer.fill(0);
-                buffer.set(new TextEncoder().encode('STRING'), 0);
-                buffer.set(new TextEncoder().encode(String(name).slice(0, 24)), 32);
-                ex.mpBeginSetBlipName(BigInt(nameBuffer));
-                ex.mpAddTextPlayerSubstring(BigInt(nameBuffer + 32));
-                ex.mpEndSetBlipName(blip);
-              }
-            }
-          }
-        }
         replica = { ped, model: state.model, position: [...state.position], heading: state.heading,
-          health: null, weapon: 0, seen: now, blip, missingSince: null, pendingModel: null,
+          health: null, weapon: 0, seen: now, blip: 0, missingSince: null, pendingModel: null,
           moving: false, behaviorAt: 0, target: [...state.position] };
         replicas.set(id, replica);
         replicaCreates++; lifecycle('create');
       }
       replica.seen = now;
+      ensureReplicaBlip(id, replica, now);
       if (state.appearance) {
         const signature = JSON.stringify(state.appearance);
         if (replica.appearance !== signature && applyAppearance(replica.ped, state.appearance, state.model)) replica.appearance = signature;
@@ -615,30 +644,51 @@ self.prepareMultiplayerBridge = function (imports) {
         updateReplica(peer.player_id, !packet.world?.ready && combat ? { ...peer.state, health: combat.health, alive: combat.alive,
           revision: combat.revision, server_authority: true } : peer.state, now, delta);
       }
-      for (const shot of packet.shots || []) {
-        if (consumedShots.has(shot.id)) continue;
-        consumedShots.add(shot.id);
+      const shotAcknowledged = new Set();
+      const finishShot = (id) => {
+        visualShots.delete(id); consumedShots.add(id); shotAcknowledged.add(id);
         if (consumedShots.size > 128) consumedShots.delete(consumedShots.values().next().value);
-        const replica = replicas.get(shot.player_id);
-        if (replica && !replica.dead && validPosition(shot.event?.origin) && validPosition(shot.event?.target)) {
-          const weapon = shot.event.weapon >>> 0;
-          if (VISUAL_WEAPONS.has(weapon) && ex.mpShootBullet && ex.mpHasWeaponAsset) {
-            if (!ex.mpHasWeaponAsset(weapon | 0)) {
-              if (now - (weaponRequests.get(weapon) ?? -Infinity) >= 1000) {
-                ex.mpRequestWeaponAsset(weapon | 0, 31, 0); weaponRequests.set(weapon, now);
-              }
-            } else {
-              // 服务端已确认伤害，转播只产生轨迹/枪声，不再次独立扣血。
-              ex.mpShootBullet(vector(24, shot.event.origin), vector(72, shot.event.target),
-                0, 1, weapon | 0, replica.ped, 1, 0, -1);
-              // TASK_SHOOT_AT_COORD 会再产生默认伤害实弹；姿态仅使用不射击的瞄准任务。
-              if (ex.mpTaskAimGunAtCoord) ex.mpTaskAimGunAtCoord(replica.ped, vector(72, shot.event.target), 250, 0, 0);
-            }
-          }
-        }
+      };
+      for (const shot of packet.shots || []) {
+        if (consumedShots.has(shot.id)) { shotAcknowledged.add(shot.id); continue; }
+        if (!visualShots.has(shot.id)) visualShots.set(shot.id, { shot, receivedAt: now });
       }
-      if (packet.shots?.length) post({ type: 'shot_ack', ids: packet.shots.map((shot) => shot.id) });
-      packet.shots = [];
+      let waitingReplica = 0, waitingAsset = 0;
+      for (const [id, pending] of visualShots) {
+        const shot = pending.shot, weapon = shot.event?.weapon >>> 0;
+        const replica = replicas.get(shot.player_id);
+        if (!members.has(shot.player_id) || !validPosition(shot.event?.origin) || !validPosition(shot.event?.target)
+            || !VISUAL_WEAPONS.has(weapon) || !ex.mpShootBullet || !ex.mpHasWeaponAsset || replica?.dead) {
+          finishShot(id); continue;
+        }
+        if (now - pending.receivedAt > 2000) { visualExpired++; finishShot(id); continue; }
+        if (!replica || !ex.mpExists(replica.ped)) { waitingReplica++; continue; }
+        if (!ex.mpHasWeaponAsset(weapon | 0)) {
+          waitingAsset++;
+          if (now - (weaponRequests.get(weapon) ?? -Infinity) >= 1000) {
+            ex.mpRequestWeaponAsset(weapon | 0, 31, 0); weaponRequests.set(weapon, now);
+          }
+          continue; // 资源未就绪不能确认；页面队列和本机等待队列均保留本次弹道。
+        }
+        // damage=0 是本构建明确的零伤害覆盖；开启原生 trace VFX，不能再下发实弹任务。
+        try {
+          const origin = replicaMuzzle(replica, shot.event.origin);
+          ex.mpShootBullet(vector(24, origin), vector(72, shot.event.target),
+            0, 1, weapon | 0, replica.ped, 1, 0, -1);
+        } catch { continue; } // 可视接口暂不可用，不能永久停止整个实体桥。
+        visualPlayed++; finishShot(id);
+        // 弹道已经完成；姿态接口失败不得重播同一发弹道。
+        try { ex.mpTaskAimGunAtCoord?.(replica.ped, vector(72, shot.event.target), 250, 0, 0); } catch {}
+      }
+      while (visualShots.size > 32) { visualExpired++; finishShot(visualShots.keys().next().value); }
+      if (shotAcknowledged.size) post({ type: 'shot_ack', ids: [...shotAcknowledged] });
+      packet.shots = (packet.shots || []).filter((shot) => !consumedShots.has(shot.id));
+      if (now - visualReportAt >= 1000) {
+        const report = { type: 'shot_visual', played: visualPlayed, expired: visualExpired,
+          pending: visualShots.size, waiting_replica: waitingReplica, waiting_asset: waitingAsset };
+        const signature = JSON.stringify(report);
+        if (signature !== visualSignature) { visualSignature = signature; visualReportAt = now; post(report); }
+      }
     }
     tick = (thread) => {
       try {
@@ -670,6 +720,7 @@ self.prepareMultiplayerBridge = function (imports) {
         if (!packet?.connected) {
           for (const replica of replicas.values()) erase(replica);
           replicas.clear();
+          visualShots.clear();
           worldEntities?.clear();
           // 断线恢复同一身份时保留本地角色和位置，不重复随机换模/出生。
           return;
@@ -678,6 +729,7 @@ self.prepareMultiplayerBridge = function (imports) {
           for (const replica of replicas.values()) erase(replica, 'new_session');
           replicas.clear(); retryAfter.clear();
           sessionId = packet.client_id; initialPlacement = false;
+          visualShots.clear(); consumedShots.clear();
           avatarInitialized = false; avatarChangeRequested = false; avatarTarget = 0;
           avatarRequestedAt = 0; avatarAttempts = 0; avatarChangedAt = 0;
           appearancePed = 0; localAppearance = null;

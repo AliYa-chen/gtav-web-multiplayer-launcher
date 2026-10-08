@@ -4,7 +4,7 @@ import { escapeHtml as html, displayDirectory, progressValue } from './view-stat
 import './style.css';
 
 const app = document.querySelector('#app');
-const state = { desktop: isTauri(), selected: '', resources: null, urls: [], version: '0.1.0', busy: false, phase: '',
+const state = { desktop: isTauri(), selected: '', resources: null, urls: [], version: '0.1.1', busy: false, phase: '',
   message: '选择你自己的游戏资源包，即可开始。', error: '', copied: false };
 const icons = {
   folder: '<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3z"/><path d="M3 10h18"/></svg>',

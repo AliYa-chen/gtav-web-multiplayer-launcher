@@ -3,8 +3,8 @@
   "purpose": "玩家提供原引擎；启动器仅在外部缓存生成离线和公共战局运行副本。",
   "original_sha256": "11ca8d2c04c5e843d18ff4aea4899d72c86973c6b031df334e67c446b2ae83e0",
   "original_bytes": 63201802,
-  "online_sha256": "292c78fba39b55b1923fedb6d57d617b2126521b9781e30741f3542d7f92ead5",
-  "online_bytes": 63204630,
+  "online_sha256": "30bae25d72d6f44764cb773b0ee319b98a6647833f850d762f2b28296c733ca2",
+  "online_bytes": 63204818,
   "imported_functions": 85,
   "callback_import": 11,
   "exports": [
@@ -827,6 +827,59 @@
       ]
     },
     {
+      "name": "mpCurrentWeaponEntity",
+      "function_index": 62919,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpEntityBoneCount",
+      "function_index": 50191,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpEntityBoneIndexByName",
+      "function_index": 50098,
+      "parameters": [
+        "i32",
+        "i64"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpWorldPositionOfEntityBone",
+      "function_index": 50053,
+      "parameters": [
+        "i64",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpPedBoneCoords",
+      "function_index": 57514,
+      "parameters": [
+        "i64",
+        "i32",
+        "i32",
+        "i64"
+      ],
+      "results": []
+    },
+    {
       "name": "mpLastWeaponImpact",
       "function_index": 62953,
       "parameters": [
@@ -1005,6 +1058,34 @@
       "results": [
         "i32"
       ]
+    },
+    {
+      "name": "mpDoesBlipExist",
+      "function_index": 51693,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpSetBlipDisplay",
+      "function_index": 51661,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetBlipAlpha",
+      "function_index": 51625,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
     },
     {
       "name": "mpSetBlipColour",

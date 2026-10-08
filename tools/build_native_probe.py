@@ -126,6 +126,13 @@ ENTITY_EXPORTS = {
     "mpSelectedWeapon": (62955, "weapon_commands::CommandGetSelectedPedWeapon(int)", ["i32"], ["i32"]),
     "mpGetCurrentPedWeapon": (62918, "weapon_commands::CommandGetCurrentPedWeapon(int, int&, bool)", ["i32", "i64", "i32"], ["i32"]),
     "mpGetAmmoInClip": (62942, "weapon_commands::CommandGetAmmoInClip(int, int, int&)", ["i32", "i32", "i64"], ["i32"]),
+    # 视觉弹起点沿真实武器对象的 gun_muzzle 获取；名字查询前须确认 BoneCount > 0。
+    # 未就绪返回 0/-1/零向量；输出和 PedBoneCoords 的偏移都是 0/8/16 的 scrVector。
+    "mpCurrentWeaponEntity": (62919, "weapon_commands::CommandGetCurrentPedWeaponEntityIndex(int, bool)", ["i32", "i32"], ["i32"]),
+    "mpEntityBoneCount": (50191, "entity_commands::CommandGetEntityBoneCount(int)", ["i32"], ["i32"]),
+    "mpEntityBoneIndexByName": (50098, "entity_commands::CommandGetEntityBoneIndexByName(int, char const*)", ["i32", "i64"], ["i32"]),
+    "mpWorldPositionOfEntityBone": (50053, "entity_commands::CommandGetWorldPositionOfEntityBone(int, int)", ["i64", "i32", "i32"], []),
+    "mpPedBoneCoords": (57514, "ped_commands::CommandGetPedBoneCoords(int, int, rage::scrVector const&)", ["i64", "i32", "i32", "i64"], []),
     # 此接口输出 rage::Vector3（f32 位于 0/4/8），不能按 scrVector 的 0/8/16 读取。
     "mpLastWeaponImpact": (62953, "weapon_commands::CommandGetPedLastWeaponImpactCoord(int, rage::Vector3&)", ["i32", "i64"], ["i32"]),
     "mpIsAiming": (58689, "player_commands::CommandIsPlayerFreeAiming(int)", ["i32"], ["i32"]),
@@ -146,6 +153,11 @@ ENTITY_EXPORTS = {
     "mpRequestModel": (60322, "streaming_commands::CommandRequestModel(int)", ["i32"], []),
     "mpHasModel": (60324, "streaming_commands::HasModelLoaded(int)", ["i32"], ["i32"]),
     "mpAddBlipForEntity": (51603, "hud_commands::AddBlipForEntity(int)", ["i32"], ["i32"]),
+    # 句柄可能被脚本清理；先验证仍存在，再恢复地图/雷达显示与透明度。
+    # 仅传入 AddBlip 返回的真实句柄；调用仍限于已就绪的游戏/脚本 tick。
+    "mpDoesBlipExist": (51693, "hud_commands::CommandDoesBlipExist(int)", ["i32"], ["i32"]),
+    "mpSetBlipDisplay": (51661, "hud_commands::CommandChangeBlipDisplay(int, int)", ["i32", "i32"], []),
+    "mpSetBlipAlpha": (51625, "hud_commands::ChangeBlipAlpha(int, int)", ["i32", "i32"], []),
     "mpSetBlipColour": (51623, "hud_commands::ChangeBlipColour(int, int)", ["i32", "i32"], []),
     "mpSetBlipSprite": (51664, "hud_commands::CommandSetBlipSprite(int, int)", ["i32", "i32"], []),
     "mpSetBlipScale": (51659, "hud_commands::CommandChangeBlipScale(int, float)", ["i32", "f32"], []),

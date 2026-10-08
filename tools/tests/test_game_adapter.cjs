@@ -45,6 +45,7 @@ function engine(options = {}) {
   const calls = [];
   const messages = [];
   const alive = new Set([7]), blips = new Map();
+  const blipStyles = new Map();
   const health = new Map([[7, options.localHealth ?? 200]]), invincible = new Set(), dead = new Set();
   const ragdoll = new Set(), ragdollAllowed = new Map();
   const remotePositions = new Map(), remoteHeadings = new Map(), frozen = new Map(), tasks = new Map(), animations = new Map();
@@ -64,6 +65,8 @@ function engine(options = {}) {
   const unavailableModels = new Set(options.unavailableModels || []), notifications = [];
   let currentNotification = null;
   let weaponAssetReady = options.weaponAssetReady ?? true;
+  let blipReady = options.blipReady ?? true, nextBlip = 1000, shootThrows = false;
+  const visualVectors = [];
   let localRecoveryBlocked = options.localRecoveryBlocked ?? false;
   const state = { active: 11n, handler: 12n, fadedOut: false, controlsEnabled: true,
     deathState: false, deathRestartPaused: false, gamePlaying: true };
@@ -172,7 +175,10 @@ function engine(options = {}) {
     mpIsRagdoll: (ped) => ragdoll.has(ped) ? 1 : 0,
     mpSetCanRagdoll: (ped, enabled) => { ragdollAllowed.set(ped, Boolean(enabled)); if (!enabled) ragdoll.delete(ped); },
     mpSetInvincible: (ped, enabled) => { if (enabled) invincible.add(ped); else invincible.delete(ped); },
-    mpShootBullet: () => {}, mpHasWeaponAsset: () => weaponAssetReady ? 1 : 0, mpRequestWeaponAsset: () => {},
+    mpShootBullet: (origin, target) => {
+      if (shootThrows) throw new Error('视觉接口临时失败');
+      visualVectors.push({ origin: readNativeVector(origin), target: readNativeVector(target) });
+    }, mpHasWeaponAsset: () => weaponAssetReady ? 1 : 0, mpRequestWeaponAsset: () => {},
     mpResurrect: (ped) => { if (ped !== localPed && !remoteRecoveryBlocked) dead.delete(ped); },
     mpRevive: (ped) => { if (ped === localPed ? !localRecoveryBlocked : !remoteRecoveryBlocked) dead.delete(ped); },
     mpClearTasksImmediately: (ped) => { tasks.delete(ped); animations.delete(ped); },
@@ -196,7 +202,10 @@ function engine(options = {}) {
     mpSetPlayerControl: (_player, enabled) => { state.controlsEnabled = Boolean(enabled); },
     mpForcePlaying: () => { state.gamePlaying = true; },
     mpCamCoords: (pointer) => vector(pointer, [700, -1000, 25]), mpCamRot: (pointer) => vector(pointer, [0, 0, 0]),
-    mpAddBlipForEntity: (ped) => { const blip = 1000 + ped; blips.set(blip, ped); return blip; },
+    mpAddBlipForEntity: (ped) => { if (!blipReady) return 0; const blip = ++nextBlip; blips.set(blip, ped); return blip; },
+    mpDoesBlipExist: (blip) => blips.has(blip) ? 1 : 0,
+    mpSetBlipDisplay: (blip, value) => { blipStyles.set(blip, { ...blipStyles.get(blip), display: value }); },
+    mpSetBlipAlpha: (blip, value) => { blipStyles.set(blip, { ...blipStyles.get(blip), alpha: value }); },
     mpSetBlipColour: () => {}, mpSetBlipSprite: () => {}, mpSetBlipScale: () => {}, mpSetBlipAsShortRange: () => {},
     mpRemoveBlip: (pointer) => {
       const data = new DataView(memory.buffer); blips.delete(data.getInt32(Number(pointer), true));
@@ -232,6 +241,14 @@ function engine(options = {}) {
     calls.push({ name, arguments: arguments_ });
     return implementation(...arguments_);
   };
+  if (options.muzzle) {
+    ex.mpCurrentWeaponEntity = () => 500;
+    alive.add(500);
+    ex.mpEntityBoneCount = () => options.noWeaponSkeleton ? 0 : 4;
+    ex.mpEntityBoneIndexByName = (...args) => { calls.push({ name: 'mpEntityBoneIndexByName', arguments: args }); return 2; };
+    ex.mpWorldPositionOfEntityBone = (out) => vector(out, options.muzzle);
+  }
+  if (options.hand) ex.mpPedBoneCoords = (out) => vector(out, options.hand);
   if (options.noLocalPlayerResurrection) delete ex.mpResurrectLocalPlayer;
   if (options.noNativeNotices) { delete ex.mpBeginTheFeedPost; delete ex.mpEndTheFeedPostTicker; }
   const self = { postMessage(value) { if (options.throwPost) throw new Error('页面已关闭'); messages.push(value); } };
@@ -270,7 +287,8 @@ function engine(options = {}) {
     for (let index = 0; index < 13; index++) tick();
   };
   return { memory, calls, messages, state, tick, setup, publish, connect, alive, blips, health, invincible, dead, ragdoll, ragdollAllowed, notifications,
-    remotePositions, remoteHeadings, frozen, tasks, animations, uiCalls, occupiedVehicles,
+    remotePositions, remoteHeadings, frozen, tasks, animations, uiCalls, occupiedVehicles, visualVectors, blipStyles,
+    setBlipReady: (value) => { blipReady = value; }, setShootThrows: (value) => { shootThrows = value; },
     frontendTick: (at = now + 100) => { now = at; return imports.env.wasm_module_int_js(0n, 0x4d505549); },
     now: () => now, setLocalModel: (model) => { localModel = model >>> 0; },
     localPed: () => localPed, position: () => [...localPosition],
@@ -944,7 +962,7 @@ test('零伤害可视枪击仅允许普通枪，火箭、手雷和未知武器�
   }
 });
 
-test('普通枪资源未就绪时请求资源并跳过轨迹，资源就绪后的新射击才播放', () => {
+test('普通枪资源未就绪时保留本次轨迹且不确认，资源就绪后播放同一发并确认', () => {
   const bridge = engine({ weaponAssetReady: false });
   const event = { origin: [710, -1080, 22], target: [715, -1080, 22], weapon: 0x1b06d571 };
   bridge.connect(packet({ peers: [{ player_id: 'REMOTE', state: peerState({ weapon: 0 }) }],
@@ -952,8 +970,12 @@ test('普通枪资源未就绪时请求资源并跳过轨迹，资源就绪后�
   assert.equal(bridge.calls.filter((call) => call.name === 'mpShootBullet').length, 0);
   assert.deepEqual(bridge.calls.filter((call) => call.name === 'mpRequestWeaponAsset').map((call) => call.arguments),
     [[0x1b06d571 | 0, 31, 0]]);
+  assert.equal(bridge.messages.filter(m => m.multiplayer?.type === 'shot_ack').length, 0);
   bridge.setWeaponAssetReady(true);
-  bridge.publish(packet({ shots: [{ id: 2, player_id: 'REMOTE', event }] })); bridge.tick();
+  bridge.tick();
+  assert.equal(bridge.calls.filter((call) => call.name === 'mpShootBullet').length, 1);
+  assert.ok(bridge.messages.some(m => m.multiplayer?.type === 'shot_ack' && m.multiplayer.ids.includes(1)));
+  bridge.publish(packet({ shots: [{ id: 1, player_id: 'REMOTE', event }] })); bridge.tick();
   assert.equal(bridge.calls.filter((call) => call.name === 'mpShootBullet').length, 1);
 });
 
@@ -1582,4 +1604,61 @@ test('服务器挂接待本机车辆就绪并实际入座后才解除冻结，�
   bridge.occupiedVehicles.set(101, 501); bridge.remotePositions.set(101, [780, -1088, 22]);
   bridge.tick(); assert.equal(bridge.frozen.get(101), false);
   assert.deepEqual(bridge.remotePositions.get(101), [780, -1088, 22]);
+});
+
+test('刷新恢复时雷达清掉标记也会补建，不重建角色且恢复地图可见属性', () => {
+  const bridge = engine();
+  const value = packet({ resumed: true, resume_state_ready: true, resume_state: peerState(),
+    members: [{ id: 'LOCAL' }, { id: 'REMOTE', name: '测试队友' }] });
+  bridge.connect(value); const beforePed = bridge.calls.filter(c => c.name === 'mpCreatePed').length;
+  const old = [...bridge.blips.keys()][0]; assert.ok(old);
+  bridge.blips.delete(old); bridge.tick(bridge.now() + 500);
+  assert.equal(bridge.calls.filter(c => c.name === 'mpCreatePed').length, beforePed);
+  assert.equal(bridge.blips.size, 1); const replacement = [...bridge.blips.keys()][0]; assert.notEqual(replacement, old);
+  assert.deepEqual(bridge.blipStyles.get(replacement), { display: 4, alpha: 255 });
+  const named = bridge.calls.filter(c => c.name === 'mpEndSetBlipName').at(-1); assert.equal(named.arguments[0], replacement);
+  for (let i = 0; i < 10; i++) bridge.tick();
+  assert.equal(bridge.blips.size, 1); assert.equal(bridge.calls.filter(c => c.name === 'mpCreatePed').length, beforePed);
+});
+
+test('雷达尚未就绪首次返回0时重试建标记，死亡也可补建标记', () => {
+  const bridge = engine({ blipReady: false }); bridge.connect(); assert.equal(bridge.blips.size, 0);
+  bridge.setBlipReady(true); bridge.tick(bridge.now() + 500); assert.equal(bridge.blips.size, 1);
+  bridge.blips.clear(); bridge.publish(packet({ combat: [{ id: 'REMOTE', alive: false, health: 0, revision: 10 }] }));
+  bridge.tick(bridge.now() + 500); assert.equal(bridge.blips.size, 1);
+  assert.equal(bridge.calls.filter(c => c.name === 'mpCreatePed').length, 1);
+});
+
+test('射击到达时远端模型未载入则等待同一事件，创建角色后播放且不重复', () => {
+  const bridge = engine({ unavailableModels: [0x9c9effd8] });
+  const shot = { id: 20, player_id: 'REMOTE', event: { origin: [710, -1080, 22], target: [715, -1080, 22], weapon: 0x1b06d571 } };
+  const value = packet({ peers: [{ player_id: 'REMOTE', state: peerState({ model: 0x9c9effd8 }) }], shots: [shot] });
+  bridge.connect(value); assert.equal(bridge.calls.filter(c => c.name === 'mpShootBullet').length, 0);
+  assert.equal(bridge.messages.filter(m => m.multiplayer?.type === 'shot_ack').length, 0);
+  bridge.setModelAvailable(0x9c9effd8, true); bridge.tick();
+  assert.equal(bridge.calls.filter(c => c.name === 'mpShootBullet').length, 1);
+  bridge.publish(value); bridge.tick(); assert.equal(bridge.calls.filter(c => c.name === 'mpShootBullet').length, 1);
+});
+
+test('视觉资源迟迟不就绪时有界过期，不补播旧弹道，短暂native失败仍重试', () => {
+  const shot = { id: 21, player_id: 'REMOTE', event: { origin: [710, -1080, 22], target: [715, -1080, 22], weapon: 0x1b06d571 } };
+  const expired = engine({ weaponAssetReady: false }); expired.connect(packet({ shots: [shot] }));
+  expired.tick(expired.now() + 2100); expired.setWeaponAssetReady(true); expired.tick();
+  assert.equal(expired.calls.filter(c => c.name === 'mpShootBullet').length, 0);
+  assert.ok(expired.messages.some(m => m.multiplayer?.type === 'shot_ack' && m.multiplayer.ids.includes(21)));
+  const recover = engine(); recover.connect(); recover.setShootThrows(true);
+  recover.publish(packet({ shots: [shot] })); recover.tick();
+  assert.ok(!recover.messages.some(m => m.multiplayer?.type === 'shot_ack' && m.multiplayer.ids.includes(21)));
+  recover.setShootThrows(false); recover.tick();
+  assert.equal(recover.visualVectors.length, 1);
+});
+
+test('远端弹道优先从真实枪口播放，缺骨架时只使用安全右手位置且伤害仍为0', () => {
+  const shot = { id: 22, player_id: 'REMOTE', event: { origin: [704, -1083, 24], target: [715, -1080, 22], weapon: 0x1b06d571 } };
+  const muzzle = engine({ muzzle: [710.5, -1080, 23] }); muzzle.connect(packet({ shots: [shot] }));
+  assert.deepEqual(muzzle.visualVectors[0].origin, [710.5, -1080, 23]);
+  assert.equal(muzzle.calls.find(c => c.name === 'mpShootBullet').arguments[2], 0);
+  const hand = engine({ muzzle: [710.5, -1080, 23], noWeaponSkeleton: true, hand: [710.25, -1080, 23] });
+  hand.connect(packet({ shots: [shot] })); assert.deepEqual(hand.visualVectors[0].origin, [710.25, -1080, 23]);
+  assert.equal(hand.calls.filter(c => c.name === 'mpEntityBoneIndexByName').length, 0, '不能查询空骨架');
 });

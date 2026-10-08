@@ -266,6 +266,8 @@ export function installGameAdapter(worker, network = null) {
       reportStatus({ phase: 'life_reconcile', ...message });
     } else if (message.type === 'world_readiness') {
       reportStatus({ phase: 'world_readiness', ...message });
+    } else if (message.type === 'shot_visual') {
+      reportStatus({ phase: 'shot_visual', ...message });
     } else if (message.type === 'world_entity_status') {
       reportStatus({ phase: 'world_entity', entity_id: message.entity_id,
         kind: message.kind, state: message.phase });

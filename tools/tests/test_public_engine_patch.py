@@ -229,6 +229,103 @@ class PublicEnginePatchTests(unittest.TestCase):
         self.assertEqual(decoded["instructions"][3]["target"]["signature"],
                          {"parameters": ["i32", "i32", "i32"], "results": ["i32"]})
 
+    def test_blip_recovery_exports_validate_real_handles_and_preserve_original_bodies(self):
+        expected = {
+            "mpDoesBlipExist": (51693, "hud_commands::CommandDoesBlipExist(int)", ["i32"], ["i32"]),
+            "mpSetBlipDisplay": (51661, "hud_commands::CommandChangeBlipDisplay(int, int)", ["i32", "i32"], []),
+            "mpSetBlipAlpha": (51625, "hud_commands::ChangeBlipAlpha(int, int)", ["i32", "i32"], []),
+        }
+        for name, (index, expected_name, parameters, results) in expected.items():
+            self.assertEqual(export_map(True)[name], (index, expected_name, parameters, results))
+            descriptor = self.original.descriptor(index)
+            self.assertEqual(descriptor["name"], expected_name, name)
+            self.assertEqual(descriptor["signature"], {"parameters": parameters, "results": results}, name)
+            self.assertNotIn(name, self.audits["probe"].exports.get(index, []))
+            for result in (self.audits["replica"], self.audits["public"]):
+                self.assertIn(name, result.exports[index])
+                self.assertEqual(self.body(self.original, index), self.body(result, index), name)
+
+        # DOES_BLIP_EXIST 先拒绝零句柄，再用原生管理器核对槽位与代次。
+        exists = self.original.instructions(51693)
+        self.assertTrue(exists["decode_complete"])
+        self.assertEqual([item["operation"] for item in exists["instructions"]],
+                         ["local.get", "i32.eqz", "if", "i32.const", "return", "end",
+                          "local.get", "call", "end"])
+        self.assertEqual(exists["instructions"][3]["value"], 0)
+        self.assertEqual(exists["instructions"][7]["target"]["function_index"], 35323)
+        lookup = self.original.instructions(35323)
+        self.assertTrue(lookup["decode_complete"])
+        self.assertTrue(any(item["operation"] == "i32.load16_u" and item["memory"]["offset"] == 8
+                            for item in lookup["instructions"]))
+        self.assertTrue(any(item["operation"] == "i32.const" and item["value"] == 16
+                            for item in lookup["instructions"]))
+
+        # Display 是句柄与枚举值，不能把引擎内部 CMiniMapBlip* 当作参数。
+        display = self.original.instructions(51661)
+        self.assertTrue(display["decode_complete"])
+        self.assertEqual([item["operation"] for item in display["instructions"]],
+                         ["local.get", "if", "i32.const", "local.get", "local.get", "call", "end", "end"])
+        self.assertEqual(display["instructions"][2]["value"], 1)
+        self.assertEqual(display["instructions"][5]["target"]["function_index"], 35317)
+        alpha = self.original.instructions(51625)
+        self.assertTrue(alpha["decode_complete"])
+        calls = [item["target"]["function_index"] for item in alpha["instructions"] if item["operation"] == "call"]
+        self.assertIn(35317, calls)
+
+    def test_visual_shot_muzzle_exports_preserve_original_abis_and_resource_guards(self):
+        expected = {
+            "mpCurrentWeaponEntity": (62919, "weapon_commands::CommandGetCurrentPedWeaponEntityIndex(int, bool)", ["i32", "i32"], ["i32"]),
+            "mpEntityBoneCount": (50191, "entity_commands::CommandGetEntityBoneCount(int)", ["i32"], ["i32"]),
+            "mpEntityBoneIndexByName": (50098, "entity_commands::CommandGetEntityBoneIndexByName(int, char const*)", ["i32", "i64"], ["i32"]),
+            "mpWorldPositionOfEntityBone": (50053, "entity_commands::CommandGetWorldPositionOfEntityBone(int, int)", ["i64", "i32", "i32"], []),
+            "mpPedBoneCoords": (57514, "ped_commands::CommandGetPedBoneCoords(int, int, rage::scrVector const&)", ["i64", "i32", "i32", "i64"], []),
+        }
+        for name, (index, expected_name, parameters, results) in expected.items():
+            self.assertEqual(export_map(True)[name], (index, expected_name, parameters, results))
+            descriptor = self.original.descriptor(index)
+            self.assertEqual(descriptor["name"], expected_name, name)
+            self.assertEqual(descriptor["signature"], {"parameters": parameters, "results": results}, name)
+            self.assertNotIn(name, self.audits["probe"].exports.get(index, []))
+            for result in (self.audits["replica"], self.audits["public"]):
+                self.assertIn(name, result.exports[index])
+                self.assertEqual(self.body(self.original, index), self.body(result, index), name)
+
+        # 武器查询验证角色、manager 和真实武器后才创建脚本 GUID；未就绪返回 0。
+        weapon = self.original.instructions(62919)
+        self.assertTrue(weapon["decode_complete"])
+        calls = [item["target"]["function_index"] for item in weapon["instructions"] if item["operation"] == "call"]
+        self.assertEqual(calls, [8693, 8689])
+        self.assertGreaterEqual(sum(item["operation"] == "i64.eqz" for item in weapon["instructions"]), 2)
+        self.assertTrue(any(item["operation"] == "i32.const" and item["value"] == 0
+                            for item in weapon["instructions"]))
+
+        # BoneCount 自身逐层判空；名字查询可能在无 skeleton 分支解引用，调用方必须先确认 >0。
+        count = self.original.instructions(50191)
+        self.assertTrue(count["decode_complete"])
+        self.assertEqual([item["target"]["function_index"] for item in count["instructions"] if item["operation"] == "call"], [8693])
+        self.assertGreaterEqual(sum(item["operation"] == "i64.eqz" for item in count["instructions"]), 5)
+        self.assertTrue(any(item["operation"] == "i32.load" and item["memory"]["offset"] == 32
+                            for item in count["instructions"]))
+        bone_index = self.original.instructions(50098)
+        self.assertTrue(bone_index["decode_complete"])
+        calls = [item["target"]["function_index"] for item in bone_index["instructions"] if item["operation"] == "call"]
+        self.assertEqual(calls, [650, 8693, 9209])
+        self.assertTrue(any(item["operation"] == "i32.const" and item["value"] == -1
+                            for item in bone_index["instructions"]))
+
+        # 世界骨骼查询检查负索引与 skeleton 骨骼数，再写入带 8 字节间隔的 scrVector。
+        position = self.original.instructions(50053)
+        self.assertTrue(position["decode_complete"])
+        self.assertIn("i32.lt_s", [item["operation"] for item in position["instructions"]])
+        self.assertIn("i32.ge_u", [item["operation"] for item in position["instructions"]])
+        self.assertEqual([item["memory"]["offset"] for item in position["instructions"] if item["operation"] == "f32.store"], [16, 8, 0])
+        self.assertIn(9233, [item["target"]["function_index"] for item in position["instructions"] if item["operation"] == "call"])
+        # 右手 tag 的 fallback 由原生 GetBoneMatrix 处理；输入偏移同样按 0/8/16 读取。
+        ped_bone = self.original.instructions(57514)
+        self.assertTrue(ped_bone["decode_complete"])
+        self.assertIn(45840, [item["target"]["function_index"] for item in ped_bone["instructions"] if item["operation"] == "call"])
+        self.assertEqual([item["memory"]["offset"] for item in ped_bone["instructions"] if item["operation"] == "f32.load"][:3], [16, 8, 0])
+
     def test_native_notification_construction_retains_memory_contract(self):
         # Begin 保存文字标签指针供 End 读取，因此调用方的 UTF-8 缓冲至少应活到 End 返回。
         begin = self.original.instructions(64096)
