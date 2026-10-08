@@ -35,6 +35,7 @@ def main():
     files = [source / name for name in ['multiplayer-server.jar', 'README.md', 'Start-Server.cmd',
                                        'Start-Server.command', 'Start-Server.sh']]
     files += sorted((source / 'src').rglob('*.java'))
+    files += sorted(path for path in (source / 'deploy').rglob('*') if path.is_file())
     manifest = {
         'version': version.group(1), 'protocol': 1, 'world_protocol': 2,
         'launcher_minimum': '0.2.0', 'java_minimum': 17,

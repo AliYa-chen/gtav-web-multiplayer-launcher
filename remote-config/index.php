@@ -128,11 +128,12 @@ $site = 'https://gtav.2t.hk';
 $latestVersion = '0.2.1';
 $releaseNotes = "远程配置入口统一为 https://oss.2t.hk/gtav/。\nmacOS Apple Silicon 测试包已构建；使用开发签名，尚未公证。";
 $servers = [
-    ['id' => 'main', 'name' => '公共战局', 'role' => '主线路', 'address' => '183.66.27.21:47485'],
-    ['id' => 'experimental', 'name' => '实验战局', 'role' => '实验线路', 'address' => '183.66.27.21:47486'],
+    ['id' => 'main', 'name' => '公共战局', 'role' => '主线路', 'address' => '183.66.27.21:47485',
+        'health_url' => 'https://gtaserver.2t.hk:47485/47485/health'],
+    ['id' => 'experimental', 'name' => '实验战局', 'role' => '实验线路', 'address' => '183.66.27.21:47486',
+        'health_url' => 'https://gtaserver.2t.hk:47486/47486/health'],
 ];
-// 可以添加 health_url 指向实际部署的 HTTPS 健康接口；status_url 是网页，不是健康接口。
-// 不填 health_url 时，状态页使用该线路的 http://IP:端口/health；HTTPS 页面需另配 HTTPS 代理。
+// health_url 使用游戏服务器域名的 HTTPS 反向代理；status_url 是网页，不是健康接口。
 $announcements = [
     [
         'title' => '欢迎来到 GTA V 公共战局',
@@ -209,7 +210,8 @@ try {
         'oltitle' => $site,
         'website' => $site,
         // server 保持单对象，兼容现有桌面启动器；servers 提供完整线路目录。
-        'server' => ['address' => $servers[0]['address'], 'name' => $servers[0]['name'], 'status_url' => $site],
+        'server' => ['address' => $servers[0]['address'], 'name' => $servers[0]['name'], 'status_url' => $site,
+            'health_url' => $servers[0]['health_url']],
         'servers' => $servers,
         'announcements' => $announcements,
         'update' => ['latest_version' => $latestVersion, 'release_notes' => $releaseNotes,

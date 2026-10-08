@@ -1,4 +1,8 @@
-# GTA V 统一世界实验服务端 0.3.2-world-experimental
+# GTA V 统一世界实验服务端 0.3.3-world-experimental
+
+## 0.3.3 状态页入口
+
+直接访问任意该 JAR 监听端口的 HTTP 根路径 `/`，会返回 `302 Found`，跳转到 `https://gtav.2t.hk/`。跳转目标固定，不受 `Host` 或查询参数影响；响应不缓存。健康接口 `/health`、`/api/multiplayer`、世界快照 `/world` 和 WebSocket `/ws` 保持原协议。
 
 ## 0.3.2 共同世界规则
 
@@ -17,7 +21,7 @@ AI 枪械本地扣血被抑制，服务端确认活动警员报告后统一提�
 
 本版将 `WorldRegistry` 作为玩家、车辆与 NPC 的唯一实体事实；`CombatWorld` 保留输入序号、移动预算和枪械冷却，规则结果直接提交到注册表，旧 v1 消息也从同一状态产生。已删除广播后的独立玩家镜像。服务端仍是轻量 Java 协调器，NPC AI、道路选择、车辆物理和环境损伤来自指定 GTA 客户端的受限候选，服务器没有 RAGE 物理运行时或地图碰撞。
 
-当前开发测试版最多八位玩家，公网 47485 和 47486 均已更新 0.3.2，原构建仍保留备份。客户端需要启动器 0.2.0 或更新版本。独立部署可使用 47486 等测试端口。实际游戏内的车辆、NPC 和生命事件需两台 GTA 客户端继续验证，协议测试不能代替这项验收。`game_sync: false` 和 `native_clone_transport: false` 保留；`shared_population` 表示已有统一人口实体登记，不能据此认定原 GTA Online 网络层或完整 AI 已实现。
+当前开发测试版最多八位玩家，公网 47485 和 47486 均已更新 0.3.3，原构建仍保留备份。两端口同时支持 HTTP/WebSocket 和 HTTPS/WSS；TLS 部署见 [部署说明](deploy/README.md)。客户端需要启动器 0.2.0 或更新版本。独立部署可使用 47486 等测试端口。实际游戏内的车辆、NPC 和生命事件需两台 GTA 客户端继续验证，协议测试不能代替这项验收。`game_sync: false` 和 `native_clone_transport: false` 保留；`shared_population` 表示已有统一人口实体登记，不能据此认定原 GTA Online 网络层或完整 AI 已实现。
 
 所有玩家连接同一台服务器后，输入昵称就会自动进入唯一的 `PUBLIC` 公共战局。战局常驻，即使没有玩家也保留；无需创建房间、输入房间码、准备或等待房主开始。地图固定为 GTA V，游戏使用沙盒模式。
 
@@ -100,13 +104,13 @@ runtime\python.exe serve_local.py --start-room-server --room-server 127.0.0.1:87
 
 `--start-room-server` 只启动 `localhost` 或 `127.0.0.1` 上的本机服务；远程 JAR 需要在远程机器独立运行。可以用 `--java` 指定 Java 可执行文件路径。
 
-游戏资源仍由每位玩家的本地 `serve_local.py` 读取。远程 JAR 的 HTTP 首页是服务状态页，不能提供游戏资源。浏览器连接原生服务使用 `ws://服务器IP:8787/ws`；通过 HTTPS 托管页面时需要用支持 WebSocket 升级的 TLS 反向代理提供 `wss://`。服务端当前未提供 WebRTC 信令或 TURN。
+游戏资源仍由每位玩家的本地 `serve_local.py` 读取。远程 JAR 的 HTTP 首页跳转到 `https://gtav.2t.hk/`，不能提供游戏资源。浏览器连接原生服务使用 `ws://服务器IP:8787/ws`；通过 HTTPS 托管页面时需要用支持 WebSocket 升级的 TLS 反向代理提供 `wss://`。服务端当前未提供 WebRTC 信令或 TURN。
 
 ## HTTP 与 WebSocket 接口
 
 | 路径 | 返回内容 |
 | --- | --- |
-| `GET /` | 中文服务状态页面 |
+| `GET /` | `302 Found`，`Location: https://gtav.2t.hk/` |
 | `GET /health`、`GET /api/multiplayer` | 健康统计和能力 |
 | `GET /world` | 统一实体的一致只读快照，含 epoch、版本、组件、租约和删除记录 |
 | `GET /ws` | RFC 6455 WebSocket，UTF-8 JSON 文本协议版本 1 |

@@ -35,7 +35,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** 独立公共战局服务：鉴权恢复、权威移动校验、伤害、死亡、重生及状态分发。 */
 public final class Main {
-    private static final String VERSION = "0.3.2-world-experimental";
+    private static final String VERSION = "0.3.3-world-experimental";
     private static final List<String> CAPABILITIES = List.of("public_session", "chat", "player_state", "shoot_events", "appearance", "combat", "resume", "heartbeat", "snapshot", "actions", "combat_feedback", "weapon_rules", "world_registry", "world_v2", "entity_batch", "melee_events", "world_environment", "shared_law");
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final int MAX_MESSAGE_BYTES = 64 * 1024;
@@ -186,11 +186,8 @@ public final class Main {
                     return;
                 }
                 if (path.equals("/")) {
-                    http(socket, 200, "OK", "text/html; charset=utf-8", "<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\">"
-                        + "<meta name=\"viewport\" content=\"width=device-width\"><title>GTA V 多人大厅服务</title>"
-                        + "<body><h1>GTA V 公共战局服务正在运行</h1><p>请在游戏页面的“多人”中输入本服务器地址。"
-                        + "</p><p>输入昵称后自动加入唯一公共战局，支持状态同步、枪械伤害、击杀及断线恢复。射击检测暂不包含地图遮挡。"
-                        + "</p><p>WebSocket 接口：/ws；<a href=\"/health\">服务状态</a></p></body></html>", Map.of());
+                    http(socket, 302, "Found", "text/plain; charset=utf-8", "请访问 https://gtav.2t.hk/\n",
+                        Map.of("Location", "https://gtav.2t.hk/"));
                     return;
                 }
                 if (!path.equals("/ws")) {
