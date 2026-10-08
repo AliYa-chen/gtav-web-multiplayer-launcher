@@ -150,8 +150,9 @@ mod platform {
         // 交由 Security.framework 处理用户/管理员信任域、SSL policy 和显式拒绝。
         // 不指定 -r：传入公共 CA 不能把它当作临时信任锚，必须已在系统中受信任。
         let output = Command::new("/usr/bin/security")
-            .args(["verify-cert", "-p", "ssl", "-L", "-l", "-c", "-k"])
+            .args(["verify-cert", "-p", "ssl", "-L", "-l", "-k"])
             .arg(keychain)
+            .arg("-c")
             .arg(path).output().map_err(|error| format!("无法验证 CA 的系统信任：{error}"))?;
         if output.status.success() { Ok(()) } else { Err(command_diagnostic(&output)) }
     }
@@ -281,6 +282,7 @@ mod platform {
             let keychain = default_user_keychain().unwrap();
             let error = verify_certificate(certificate.path(), &keychain).unwrap_err();
             assert!(!error.is_empty());
+            assert!(!error.contains("Usage:") && !error.contains("option requires"), "invalid verification command: {error}");
             assert!(trusted_exact_certificate(certificate.path(), &keychain, &der).is_err());
         }
 
