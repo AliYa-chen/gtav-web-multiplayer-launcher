@@ -125,8 +125,8 @@ function publishedDownloads(array $candidates): stdClass
 
 // ── 配置内容：维护者只需要修改这一段 ──
 $site = 'https://gtav.2t.hk';
-$latestVersion = '0.2.6';
-$releaseNotes = "新增全屏强制更新和游戏资源页面入口。Windows x64 与 macOS Apple Silicon 测试包已构建。";
+$latestVersion = '0.2.7';
+$releaseNotes = "新增局域网 HTTPS 共享：内置固定 CA 为本机 IP 签发证书，提供证书安装引导、指纹核对和本机自动安装。修复线上页文案闪烁，资源选择卡片不再显示滚动条。";
 $servers = [
     ['id' => 'main', 'name' => '公共战局', 'role' => '主线路', 'address' => 'gtaserver.2t.hk:47485',
         'health_url' => 'https://gtaserver.2t.hk:47485/47485/health'],
@@ -150,12 +150,12 @@ $announcements = [
 ];
 $downloadCandidates = [
     'macos_arm64' => [
-        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-macOS-arm64-v0.2.6.zip',
-        'sha256' => '83a5983636ed4e09547294580036bb2fe14eeffc457e5951248ec9c0b5d47184',
+        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-macOS-arm64-v0.2.7.zip',
+        'sha256' => '57a62f5deb78fd1d9b08484c41dfb45d0aa4e15f5198d8b54b20cc6cdaa4b860',
     ],
     'windows_x64' => [
-        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-Windows-x64-v0.2.6.exe',
-        'sha256' => '607a7a58d5cc093d42cac30feeb49bfacdb6989c12b9b098a604bb712e9d13c7',
+        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-Windows-x64-v0.2.7.exe',
+        'sha256' => 'c0ac73bb66f9ec7368402b38e7636a833fdd8ad79d99001e5037439fd967e6ff',
     ],
 ];
 // ── 配置内容结束 ──

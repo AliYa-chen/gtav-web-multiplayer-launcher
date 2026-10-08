@@ -9,6 +9,7 @@
     "tauri": "tauri",
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build",
+    "desktop:build:mac": "node scripts/build-macos.mjs",
     "test": "node --test tests/*.test.mjs"
   },
   "dependencies": { "@tauri-apps/api": "2.12.1" },

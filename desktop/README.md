@@ -146,7 +146,7 @@ npm run desktop:dev
 macOS App：
 
 ```sh
-npm run tauri -- build --bundles app
+npm run desktop:build:mac
 ```
 
 Windows 便携 EXE（在 Windows 构建）：
@@ -155,13 +155,15 @@ Windows 便携 EXE（在 Windows 构建）：
 npm run tauri -- build --no-bundle
 ```
 
-产物位于 `desktop/src-tauri/target/release/`。GitHub 的“构建桌面启动器”工作流仅允许手动触发，普通提交和标签不会自动编译；需要用户明确要求构建后才运行。它可分别构建 Windows x64 和 macOS ARM64，只 checkout 源码，不能访问维护者的本地游戏目录。首次流程运行前需提交 `Cargo.lock` 和 `package-lock.json`，以固定依赖。
+本机 macOS 命令优先使用 PATH 中的 Cargo；找不到时检查用户 Rust 目录和项目 `archive/cache/toolchains/rust`，自动补齐工具链环境，无需管理员权限。
+
+产物位于 `desktop/src-tauri/target/release/`。GitHub 的“构建 macOS 启动器”和“构建 Windows 启动器”是两个独立工作流，仅允许手动触发，普通提交和标签不会自动编译。它们只 checkout 源码，不能访问维护者的本地游戏目录。首次流程运行前需提交 `Cargo.lock` 和 `package-lock.json`，以固定依赖。
 
 固定 CA 内容已作为源码常量内置，构建不需要额外设置证书路径或 Secrets。
 运行用户不需要上传证书；朋友仅从 HTTP 引导页下载公共 CA 并手动安装信任。
 工作流只上传构建 Artifact，不创建 GitHub Releases。
 
-构建工作流使用中文步骤名称，保留快速界面测试、编译缓存和签名校验。打包时不运行 `cargo test --locked`，也不单独重复执行前端构建；Tauri 的 `beforeBuildCommand` 会自动构建前端。Rust 测试仍可在本地按需运行。
+构建工作流使用中文步骤名称，只保留环境准备、依赖安装、编译缓存和产物打包上传，以及 macOS 签名校验。打包时不运行 `npm test` 或 `cargo test --locked`，也不单独重复执行前端构建；Tauri 的 `beforeBuildCommand` 会自动构建前端。测试可在本地按需运行。
 
 维护者更新已支持的引擎适配描述：
 
