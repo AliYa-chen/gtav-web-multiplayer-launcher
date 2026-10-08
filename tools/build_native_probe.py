@@ -154,6 +154,15 @@ ENTITY_EXPORTS = {
     # 两个字符串均为当前 WASM 内存中 NUL 结尾的 UTF-8，三个调用须在同一有效脚本上下文完成。
     "mpBeginTheFeedPost": (51457, "hud_commands::CommandBeginTheFeedPost(char const*)", ["i64"], []),
     "mpEndTheFeedPostTicker": (51464, "hud_commands::CommandEndTheFeedPostTicker(bool, bool)", ["i32", "i32"], ["i32"]),
+    # 仅覆盖已打开的原生暂停菜单表现，不伪造原网络 flag/session 或切换到原 MP 菜单。
+    # Begin 返回 true 后同一脚本 tick 连续 Add/End；字符串为 NUL 结尾 UTF-8。
+    "mpPauseMenuActive": (51840, "hud_commands::CommandIsPauseMenuActive()", [], ["i32"]),
+    "mpFrontendReady": (51856, "hud_commands::CommandIsFrontendReadyForControl()", [], ["i32"]),
+    "mpBeginPauseHeader": (50805, "graphics_commands::CommandBeginScaleformMovieMethodOnFrontendHeader(char const*)", ["i64"], ["i32"]),
+    "mpScaleformString": (50818, "graphics_commands::CommandScaleformMovieMethodAddParamLiteralString(char const*)", ["i64"], []),
+    "mpScaleformBool": (50814, "graphics_commands::CommandScaleformMovieMethodAddParamBool(bool)", ["i32"], []),
+    "mpScaleformInt": (50812, "graphics_commands::CommandScaleformMovieMethodAddParamInt(int)", ["i32"], []),
+    "mpEndScaleform": (50806, "graphics_commands::CommandEndScaleformMovieMethod()", [], []),
     "mpSetPlayerModel": (58625, "player_commands::CommandChangePlayerModel(int, int)", ["i32", "i32"], []),
     "mpPlayerId": (58714, "player_commands::CommandPlayerId()", [], ["i32"]),
     "mpDefaultVariation": (57395, "ped_commands::CommandSetPedDefaultComponentVariation(int)", ["i32"], []),

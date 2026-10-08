@@ -374,6 +374,79 @@ class PublicEnginePatchTests(unittest.TestCase):
                 self.assertIn(name, result.exports[index])
                 self.assertEqual(self.body(self.original, index), self.body(result, index), name)
 
+    def test_pause_header_presentation_exports_preserve_abis_and_original_bodies(self):
+        expected = {
+            "mpPauseMenuActive": (51840, "hud_commands::CommandIsPauseMenuActive()", [], ["i32"]),
+            "mpFrontendReady": (51856, "hud_commands::CommandIsFrontendReadyForControl()", [], ["i32"]),
+            "mpBeginPauseHeader": (50805, "graphics_commands::CommandBeginScaleformMovieMethodOnFrontendHeader(char const*)", ["i64"], ["i32"]),
+            "mpScaleformString": (50818, "graphics_commands::CommandScaleformMovieMethodAddParamLiteralString(char const*)", ["i64"], []),
+            "mpScaleformBool": (50814, "graphics_commands::CommandScaleformMovieMethodAddParamBool(bool)", ["i32"], []),
+            "mpScaleformInt": (50812, "graphics_commands::CommandScaleformMovieMethodAddParamInt(int)", ["i32"], []),
+            "mpEndScaleform": (50806, "graphics_commands::CommandEndScaleformMovieMethod()", [], []),
+        }
+        for name, (index, native_name, parameters, results) in expected.items():
+            self.assertEqual(export_map(True)[name], (index, native_name, parameters, results))
+            self.assertEqual(self.original.descriptor(index)["signature"], {"parameters": parameters, "results": results})
+            self.assertNotIn(name, self.audits["probe"].exports.get(index, []))
+            for result in (self.audits["replica"], self.audits["public"]):
+                self.assertIn(name, result.exports[index])
+                self.assertEqual(self.body(self.original, index), self.body(result, index), name)
+        # 表现层不能用真假在线返回值替换原引擎会话，保留 C++ 与脚本包装器原体。
+        for index in (54706, 54707, 54708, 54711, 55538, 55539, 55540, 55545, 82912, 83019, 36288):
+            self.assertEqual(self.body(self.original, index), self.body(self.audits["public"], index))
+
+    def test_pause_header_begin_checks_active_and_valid_movie_before_call(self):
+        decoded = self.original.instructions(50805)
+        self.assertTrue(decoded["decode_complete"])
+        items = decoded["instructions"]
+        active = next(index for index, item in enumerate(items) if item["operation"] == "call"
+                      and item["target"]["function_index"] == 36254)
+        begin = next(index for index, item in enumerate(items) if item["operation"] == "call"
+                     and item["target"]["function_index"] == 37248)
+        self.assertLess(active, begin)
+        self.assertEqual([item["operation"] for item in items[active + 1:active + 3]], ["i32.eqz", "br_if"])
+        movie_check = [item for item in items[active + 3:begin] if item["instruction_offset"] <= 36]
+        self.assertEqual([item["operation"] for item in movie_check[-3:]], ["i32.const", "i32.lt_s", "br_if"])
+        self.assertEqual(movie_check[-3]["value"], 0)
+        self.assertTrue(any(item["operation"] == "i64.const" and item["value"] == 19566964 for item in items))
+        ready = self.original.instructions(51856)
+        self.assertTrue(ready["decode_complete"])
+        self.assertEqual([item["target"]["function_index"] for item in ready["instructions"] if item["operation"] == "call"],
+                         [36254, 36038])
+
+    def test_scaleform_literal_strings_do_not_require_gxt_labels(self):
+        literal = self.original.instructions(50818)
+        self.assertTrue(literal["decode_complete"])
+        items = literal["instructions"]
+        add = next(index for index, item in enumerate(items) if item["operation"] == "call"
+                   and item["target"]["function_index"] == 36056)
+        self.assertEqual(items[add - 1]["operation"], "i32.const")
+        self.assertEqual(items[add - 1]["value"], 1, "literal API 以文字转换模式传入原字串")
+        string = self.original.instructions(36056)
+        self.assertTrue(string["decode_complete"])
+        targets = {item["target"]["function_index"] for item in string["instructions"] if item["operation"] == "call"}
+        self.assertIn(77557, targets, "字符串先 TextToHtml 再给 GFx")
+        self.assertFalse(targets & {77479, 77480, 77481}, "literal-string 不能偷偷把公共文案当 GXT label")
+        for index, target in ((50812, 36053), (50814, 36051), (50806, 36050)):
+            decoded = self.original.instructions(index)
+            self.assertTrue(decoded["decode_complete"])
+            self.assertEqual([item["target"]["function_index"] for item in decoded["instructions"] if item["operation"] == "call"], [target])
+
+    def test_pause_game_label_static_position_is_not_assumed_to_be_online_content(self):
+        path = ROOT / "gta5data/data/common/data/ui/pausemenu.XML"
+        tree = ET.parse(path)
+        header = next(item for item in tree.iter("Item") if item.findtext("MenuScreen") == "MENU_UNIQUE_ID_HEADER")
+        tabs = list(header.find("MenuItems"))
+        game = next(index for index, item in enumerate(tabs) if item.findtext("cTextId") == "PM_SCR_GAM")
+        self.assertEqual(game, 4, "XML 原始顺序里游戏页在第5个，但运行 context 可能过滤其他页")
+        game_page = next(item for item in tree.iter("Item") if item.findtext("MenuScreen") == "MENU_UNIQUE_ID_GAME")
+        self.assertEqual(game_page.findtext("runtime/params/data"), "PauseMenu_SP_Repeat")
+        self.assertTrue(any(item.findtext("cTextId") == "PM_PANE_NEW" for item in game_page.find("MenuItems")))
+        setup = self.original.instructions(36277)
+        self.assertTrue(setup["decode_complete"])
+        self.assertTrue(any(item["operation"] == "call" and item["target"]["function_index"] == 36205 for item in setup["instructions"]),
+                        "原 header 按 UIContextList 过滤，不能把原 XML 索引直接当可见索引")
+
     def test_script_animation_wrapper_preserves_string_order_and_secondary_flags(self):
         wrapper = self.original.instructions(60617)
         self.assertTrue(wrapper["decode_complete"])
