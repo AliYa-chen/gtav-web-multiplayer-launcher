@@ -14,8 +14,35 @@ ORIGINAL_WASM_SHA256 = '11ca8d2c04c5e843d18ff4aea4899d72c86973c6b031df334e67c446
 DEFAULT_ROOM_SERVER = '183.66.27.21:47485'
 LOG_FILE = Path(__file__).resolve().parent / 'docs' / 'snapshot' / 'browser-local.log'
 LOG_LOCK = threading.Lock()
+REMOTE_LOCK = threading.Lock()
+REMOTE_URL = 'https://oss.2t.hk/gtav/index.json'
+REMOTE_CONFIGURATION = {'config': {'oltitle': 'https://gtav.2t.hk'}, 'source': 'default', 'stale': True}
+REMOTE_CHECKED_AT = 0
 mimetypes.add_type('application/wasm', '.wasm')
 mimetypes.add_type('text/javascript', '.js')
+
+def online_remote_configuration():
+    """脚本启动入口只代理游戏菜单所需URL；完整公告/更新配置由桌面启动器校验。"""
+    global REMOTE_CONFIGURATION, REMOTE_CHECKED_AT
+    with REMOTE_LOCK:
+        now = time.monotonic()
+        if now - REMOTE_CHECKED_AT < 60:
+            return REMOTE_CONFIGURATION
+        REMOTE_CHECKED_AT = now
+        try:
+            with urlopen(REMOTE_URL, timeout=4) as response:
+                payload = response.read(256 * 1024 + 1)
+                if len(payload) > 256 * 1024:
+                    raise ValueError('远程配置过大')
+                raw = json.loads(payload)
+            title = raw.get('oltitle')
+            url = urlsplit(title) if isinstance(title, str) and len(title) <= 256 else None
+            if not url or url.scheme != 'https' or not url.hostname or url.username or url.password:
+                raise ValueError('在线模式状态地址无效')
+            REMOTE_CONFIGURATION = {'config': {'oltitle': title}, 'source': 'remote', 'stale': False}
+        except (OSError, ValueError):
+            REMOTE_CONFIGURATION = {**REMOTE_CONFIGURATION, 'stale': True}
+        return REMOTE_CONFIGURATION
 
 def resolve_game_directory(value):
     """接受资源总目录或其 data 子目录，只定位，不创建、移动或修改资源。"""
@@ -250,6 +277,14 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-Type', 'application/json; charset=utf-8')
             self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            return io.BytesIO(body)
+        if route.path == '/api/remote-config':
+            body = json.dumps(online_remote_configuration(), ensure_ascii=False).encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-store')
             self.end_headers()
             return io.BytesIO(body)
         # 多人游戏入口只允许固定 GTA V 沙盒，不传递任何查询/调试参数。

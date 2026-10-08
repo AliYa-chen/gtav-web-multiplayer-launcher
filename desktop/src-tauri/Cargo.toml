@@ -1,6 +1,6 @@
 [package]
 name = "gta5data-launcher"
-version = "0.1.1"
+version = "0.1.2"
 description = "只读挂载玩家资源的 GTA V 浏览器启动器"
 edition = "2021"
 rust-version = "1.85"
@@ -28,6 +28,8 @@ rfd = "0.16"
 open = "5"
 aes = "0.8"
 cipher = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+semver = "1"
 
 [dev-dependencies]
 tempfile = "3"

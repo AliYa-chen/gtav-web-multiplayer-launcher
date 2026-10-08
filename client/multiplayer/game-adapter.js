@@ -1,5 +1,5 @@
 // 游戏页直接持有公共战局连接；引擎线程通过共享内存读取最新快照，避免阻塞帧循环。
-export function installGameAdapter(worker, network = null) {
+export function installGameAdapter(worker, network = null, { watchOnlineConfiguration } = {}) {
   // 正常在线游戏直接连接本页网络会话，避免同一端口多个标签页串用身份和外观。
   // 广播频道仅保留给独立探针或旧测试入口。
   const channel = network ? null : new BroadcastChannel('gta5-public-bridge-v1');
@@ -23,6 +23,8 @@ export function installGameAdapter(worker, network = null) {
   let lastReport = '';
   let networkMessage = '', gameMessage = '';
   let lastCombatNotice = '', lastCombatNoticeAt = -Infinity;
+  let remoteConfig = { oltitle: 'https://gtav.2t.hk', source: 'default', stale: true };
+  const stopRemoteConfiguration = watchOnlineConfiguration?.((value) => { remoteConfig = value; schedule(); });
   function mergeCombat(value) {
     if (!value || typeof value.id !== 'string') return;
     const revision = Number.isSafeInteger(value.revision) ? value.revision : 0;
@@ -113,7 +115,8 @@ export function installGameAdapter(worker, network = null) {
   function publish() {
     timer = 0;
     if (!shared || closed) return;
-    const packet = { ...session, peers: [...peers.values()], shots, combat, controls, notices, world, world_events: worldEvents };
+    const packet = { ...session, peers: [...peers.values()], shots, combat, controls, notices, world, world_events: worldEvents,
+      remote_config: remoteConfig };
     const bytes = new TextEncoder().encode(JSON.stringify(packet));
     if (bytes.length > shared.capacity) return;
     const header = new Int32Array(shared.memory.buffer, shared.block, 4);
@@ -285,6 +288,7 @@ export function installGameAdapter(worker, network = null) {
   sendLocal({ type: 'bridge_ready' });
   addEventListener('pagehide', () => {
     closed = true;
+    stopRemoteConfiguration?.();
     clearTimeout(timer);
     sendLocal({ type: 'game_closed' });
     channel?.close();

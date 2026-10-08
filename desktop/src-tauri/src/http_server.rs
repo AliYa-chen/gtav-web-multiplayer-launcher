@@ -8,7 +8,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::{atomic::{AtomicBool, Ordering}, mpsc, Arc, Mutex};
+use std::sync::{atomic::{AtomicBool, Ordering}, mpsc, Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
@@ -27,6 +27,8 @@ pub struct ServerConfig {
     pub preferred_port: Option<u16>,
     /// Relative data names mapped to read-only extracted font caches outside game data.
     pub font_overrides: HashMap<String, PathBuf>,
+    /// Validated launcher metadata shared with the UI and all local game clients.
+    pub remote_configuration: Arc<RwLock<Value>>,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -37,6 +39,8 @@ impl Default for ServerConfig {
             online_ready: false,
             preferred_port: None,
             font_overrides: HashMap::new(),
+            remote_configuration: Arc::new(RwLock::new(json!({ "config": { "oltitle": "https://gtav.2t.hk" },
+                "source": "default", "stale": true }))),
         }
     }
 }
@@ -238,6 +242,11 @@ fn handle(request: Request, state: &State) {
             "resources_ready": true, "multiplayer_ready": state.config.online_ready,
             "resource_version": state.resources.manifest_version,
         });
+        return reply(request, 200, serde_json::to_vec(&body).unwrap(), "application/json; charset=utf-8", &[]);
+    }
+    if path == "/api/remote-config" {
+        let body = state.config.remote_configuration.read().map(|value| value.clone())
+            .unwrap_or_else(|_| json!({ "config": { "oltitle": "https://gtav.2t.hk" }, "source": "default", "stale": true }));
         return reply(request, 200, serde_json::to_vec(&body).unwrap(), "application/json; charset=utf-8", &[]);
     }
     let client_path = if path == "/" || path == "/play" { "/index.html" } else { &path };
@@ -497,6 +506,8 @@ mod tests {
         assert!(headers.to_lowercase().contains("location: /?online=1&name=test&server=example%3a1234"));
         let body = request(&server, "GET", "/api/local-config", "", b"").1;
         let config: Value = serde_json::from_slice(&body).unwrap(); assert_eq!(config["debug"], false); assert_eq!(config["map"], "gta5");
+        let body = request(&server, "GET", "/api/remote-config", "", b"").1;
+        let remote: Value = serde_json::from_slice(&body).unwrap(); assert_eq!(remote["config"]["oltitle"], "https://gtav.2t.hk");
         let port = server.port(); drop(server);
         assert!(TcpStream::connect(("127.0.0.1", port)).is_err(), "dropping launcher must stop its HTTP listener");
     }
@@ -530,5 +541,15 @@ mod tests {
         drop(first);
         let restarted = start(info, runtime, client(), ServerConfig { preferred_port, ..config }).unwrap();
         assert_eq!(Some(restarted.port()), preferred_port);
+    }
+    #[test]
+    fn updated_remote_metadata_reaches_running_game_without_restart() {
+        let (temp, info, runtime) = fixture();
+        let remote = Arc::new(RwLock::new(json!({"config":{"oltitle":"https://gtav.2t.hk"},"source":"remote","stale":false})));
+        let server = start(info, runtime, client(), ServerConfig { remote_configuration: remote.clone(),
+            log_file: temp.path().join("log.txt"), ..Default::default() }).unwrap();
+        *remote.write().unwrap() = json!({"config":{"oltitle":"维护公告"},"source":"remote","stale":false});
+        let body = request(&server, "GET", "/api/remote-config", "", b"").1;
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["config"]["oltitle"], "维护公告");
     }
 }

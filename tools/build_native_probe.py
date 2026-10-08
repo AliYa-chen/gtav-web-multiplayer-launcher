@@ -175,6 +175,11 @@ ENTITY_EXPORTS = {
     "mpPauseMenuActive": (51840, "hud_commands::CommandIsPauseMenuActive()", [], ["i32"]),
     "mpFrontendReady": (51856, "hud_commands::CommandIsFrontendReadyForControl()", [], ["i32"]),
     "mpBeginPauseHeader": (50805, "graphics_commands::CommandBeginScaleformMovieMethodOnFrontendHeader(char const*)", ["i64"], ["i32"]),
+    # MenuScreenId 是四字节返回结构，首 i64 指向本调用者分配的输出槽；不得传假 CMenuScreen*。
+    # 先确认菜单就绪，再读取真实当前 pane 名，只给 XML 的 PauseMenu_Multiplayer 页写正文。
+    "mpGetPausePanel": (36266, "CPauseMenu::GetCurrentActivePanel()", ["i64"], []),
+    "mpPausePanelName": (35600, "MenuScreenId::GetParserName() const", ["i64"], ["i64"]),
+    "mpBeginPauseContent": (50804, "graphics_commands::CommandBeginScaleformMovieMethodOnFrontend(char const*)", ["i64"], ["i32"]),
     "mpScaleformString": (50818, "graphics_commands::CommandScaleformMovieMethodAddParamLiteralString(char const*)", ["i64"], []),
     "mpScaleformBool": (50814, "graphics_commands::CommandScaleformMovieMethodAddParamBool(bool)", ["i32"], []),
     "mpScaleformInt": (50812, "graphics_commands::CommandScaleformMovieMethodAddParamInt(int)", ["i32"], []),

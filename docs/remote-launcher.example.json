@@ -1,0 +1,31 @@
+{
+  "oltitle": "https://gtav.2t.hk",
+  "website": "https://gtav.2t.hk",
+  "server": {
+    "address": "183.66.27.21:47485",
+    "name": "GTA V 公共战局",
+    "status_url": "https://gtav.2t.hk"
+  },
+  "announcements": [
+    {
+      "title": "欢迎来到公共战局",
+      "body": "选择自己的游戏资源目录后即可启动。\n此示例的更新链接和哈希需要替换为真实发布文件。",
+      "date": "2026-10-08",
+      "url": "https://gtav.2t.hk"
+    }
+  ],
+  "update": {
+    "latest_version": "0.1.2",
+    "release_notes": "新增背景切换、远程公告和版本提示。",
+    "downloads": {
+      "windows_x64": {
+        "url": "https://oss.2t.hk/gtav/releases/0.1.2/gta5data-launcher.exe",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "macos_arm64": {
+        "url": "https://oss.2t.hk/gtav/releases/0.1.2/GTA5Data-Launcher-macOS-arm64-v0.1.2-development.zip",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    }
+  }
+}

@@ -3,8 +3,8 @@
   "purpose": "玩家提供原引擎；启动器仅在外部缓存生成离线和公共战局运行副本。",
   "original_sha256": "11ca8d2c04c5e843d18ff4aea4899d72c86973c6b031df334e67c446b2ae83e0",
   "original_bytes": 63201802,
-  "online_sha256": "30bae25d72d6f44764cb773b0ee319b98a6647833f850d762f2b28296c733ca2",
-  "online_bytes": 63204818,
+  "online_sha256": "fd3d41d48770af2ea3004a2189cd2c106076a1616237ffa3acc4826fe26ebef4",
+  "online_bytes": 63204883,
   "imported_functions": 85,
   "callback_import": 11,
   "exports": [
@@ -1193,6 +1193,34 @@
     {
       "name": "mpBeginPauseHeader",
       "function_index": 50805,
+      "parameters": [
+        "i64"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpGetPausePanel",
+      "function_index": 36266,
+      "parameters": [
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpPausePanelName",
+      "function_index": 35600,
+      "parameters": [
+        "i64"
+      ],
+      "results": [
+        "i64"
+      ]
+    },
+    {
+      "name": "mpBeginPauseContent",
+      "function_index": 50804,
       "parameters": [
         "i64"
       ],

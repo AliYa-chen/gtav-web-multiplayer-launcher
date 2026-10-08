@@ -2,10 +2,11 @@ mod engine;
 mod fonts;
 mod http_server;
 mod resources;
+mod remote_config;
 
 use include_dir::{include_dir, Dir};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs, path::{Path, PathBuf}, sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}};
+use std::{collections::HashMap, fs, path::{Path, PathBuf}, sync::{Arc, Mutex, RwLock, atomic::{AtomicBool, Ordering}}};
 use tauri::{Emitter, Manager, State};
 
 static CLIENT: Dir<'_> = include_dir!("$OUT_DIR/embedded-client");
@@ -15,8 +16,16 @@ struct Preferences { selected_directory: Option<String>, preferred_port: Option<
 struct Prepared { resources: resources::ResourceInfo, runtime: PathBuf, fonts: HashMap<String, PathBuf> }
 #[derive(Default)]
 struct Inner { selected: Option<String>, preferred_port: Option<u16>, prepared: Option<Prepared>, servers: Vec<http_server::ServerHandle> }
-#[derive(Default)]
-struct LauncherState { inner: Mutex<Inner>, busy: Arc<AtomicBool> }
+struct LauncherState { inner: Mutex<Inner>, busy: Arc<AtomicBool>, remote_busy: Arc<AtomicBool>, remote: Arc<RwLock<serde_json::Value>> }
+impl Default for LauncherState {
+    fn default() -> Self {
+        Self { inner: Mutex::new(Inner::default()), busy: Arc::new(AtomicBool::new(false)),
+            remote_busy: Arc::new(AtomicBool::new(false)), remote: Arc::new(RwLock::new(serde_json::json!({
+                "config": { "oltitle": "https://gtav.2t.hk", "website": "https://gtav.2t.hk", "server": null,
+                    "announcements": [], "latest_version": null, "downloads": {}, "release_notes": "" },
+                "source": "default", "stale": true, "fetched_at": null, "checked_at": null, "error": null }))) }
+    }
+}
 struct BusyGuard(Arc<AtomicBool>);
 impl Drop for BusyGuard { fn drop(&mut self) { self.0.store(false, Ordering::Release); } }
 fn acquire(state: &LauncherState) -> Result<BusyGuard, String> {
@@ -26,10 +35,18 @@ fn acquire(state: &LauncherState) -> Result<BusyGuard, String> {
 }
 
 #[derive(Serialize)]
-struct LauncherStatus { selected_directory: Option<String>, resources: Option<resources::ResourceInfo>, running_urls: Vec<String>, version: &'static str }
-fn snapshot(inner: &Inner) -> LauncherStatus {
+struct LauncherStatus { selected_directory: Option<String>, resources: Option<resources::ResourceInfo>, running_urls: Vec<String>,
+    version: &'static str, platform: &'static str, remote_configuration: serde_json::Value }
+fn platform_key() -> &'static str {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "macos_arm64", ("macos", "x86_64") => "macos_x64",
+        ("windows", "x86_64") => "windows_x64", ("windows", "aarch64") => "windows_arm64", _ => "unsupported",
+    }
+}
+fn snapshot(inner: &Inner, remote: &Arc<RwLock<serde_json::Value>>) -> LauncherStatus {
     LauncherStatus { selected_directory: inner.selected.clone(), resources: inner.prepared.as_ref().map(|p| p.resources.clone()),
-        running_urls: inner.servers.iter().map(|s| s.url()).collect(), version: env!("CARGO_PKG_VERSION") }
+        running_urls: inner.servers.iter().map(|s| s.url()).collect(), version: env!("CARGO_PKG_VERSION"), platform: platform_key(),
+        remote_configuration: remote.read().map(|v| v.clone()).unwrap_or_default() }
 }
 fn preferences_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     app.path().app_config_dir().map(|p| p.join("launcher.json")).map_err(|e| e.to_string())
@@ -55,7 +72,7 @@ fn embedded_client() -> HashMap<String, &'static [u8]> {
 #[tauri::command]
 fn launcher_status(state: State<'_, LauncherState>) -> Result<LauncherStatus, String> {
     let inner = state.inner.lock().map_err(|e| e.to_string())?;
-    Ok(snapshot(&inner))
+    Ok(snapshot(&inner, &state.remote))
 }
 
 #[tauri::command]
@@ -92,14 +109,14 @@ async fn prepare_game(app: tauri::AppHandle, state: State<'_, LauncherState>, se
     inner.prepared = Some(prepared);
     save_preferences(&app, &inner)?;
     progress(&app, "ready", "资源已就绪，可以启动游戏。");
-    Ok(snapshot(&inner))
+    Ok(snapshot(&inner, &state.remote))
 }
 
 #[tauri::command]
 fn start_game(app: tauri::AppHandle, state: State<'_, LauncherState>, additional: bool) -> Result<LauncherStatus, String> {
     let _guard = acquire(&state)?;
     let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
-    if !additional && !inner.servers.is_empty() { return Ok(snapshot(&inner)); }
+    if !additional && !inner.servers.is_empty() { return Ok(snapshot(&inner, &state.remote)); }
     if inner.servers.len() >= 8 { return Err("最多同时开启 8 个测试客户端。".into()); }
     let prepared = inner.prepared.as_ref().ok_or("请先选择并校验游戏资源。")?;
     let index = inner.servers.len() + 1;
@@ -107,19 +124,22 @@ fn start_game(app: tauri::AppHandle, state: State<'_, LauncherState>, additional
     let server = http_server::start(prepared.resources.clone(), prepared.runtime.clone(), embedded_client(), http_server::ServerConfig {
         online_ready: true, instance_name: format!("玩家{index}"), log_file,
         preferred_port: if index == 1 { inner.preferred_port } else { None }, font_overrides: prepared.fonts.clone(),
+        remote_configuration: state.remote.clone(),
+        multiplayer_server: configured_remote(&state).ok().and_then(|config| config.server.map(|server| server.address))
+            .unwrap_or_else(|| "183.66.27.21:47485".to_string()),
         ..Default::default()
     })?;
     if index == 1 { inner.preferred_port = Some(server.port()); }
     inner.servers.push(server);
     save_preferences(&app, &inner)?;
-    Ok(snapshot(&inner))
+    Ok(snapshot(&inner, &state.remote))
 }
 
 #[tauri::command]
 fn stop_game(state: State<'_, LauncherState>) -> Result<LauncherStatus, String> {
     let _guard = acquire(&state)?;
     let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
-    inner.servers.clear(); Ok(snapshot(&inner))
+    inner.servers.clear(); Ok(snapshot(&inner, &state.remote))
 }
 
 #[tauri::command]
@@ -127,6 +147,43 @@ fn open_game(state: State<'_, LauncherState>, index: usize) -> Result<(), String
     let url = state.inner.lock().map_err(|e| e.to_string())?.servers.get(index).ok_or("游戏服务尚未启动。")?.url();
     // 游戏在系统浏览器运行，避免依赖不同系统 WebView 的 WebGPU / WASM 线程支持。
     open::that(url).map_err(|e| format!("无法打开默认浏览器，请复制游戏地址手动打开：{e}"))
+}
+
+#[tauri::command]
+async fn remote_configuration(app: tauri::AppHandle, state: State<'_, LauncherState>, force_refresh: bool) -> Result<serde_json::Value, String> {
+    if !force_refresh || state.remote_busy.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return state.remote.read().map(|value| value.clone()).map_err(|e| e.to_string());
+    }
+    let _guard = BusyGuard(state.remote_busy.clone());
+    let path = app.path().app_cache_dir().map_err(|e| e.to_string())?.join("remote-configuration.json");
+    let snapshot = tauri::async_runtime::spawn_blocking(move || remote_config::load(&path)).await.map_err(|e| e.to_string())?;
+    let value = serde_json::to_value(snapshot).map_err(|e| e.to_string())?;
+    *state.remote.write().map_err(|e| e.to_string())? = value.clone();
+    let _ = app.emit("launcher-remote-config", &value);
+    Ok(value)
+}
+
+fn configured_remote(state: &LauncherState) -> Result<remote_config::RemoteConfig, String> {
+    let value = state.remote.read().map_err(|e| e.to_string())?;
+    remote_config::parse_config(&serde_json::to_vec(value.get("config").ok_or("远程配置尚未加载")?).map_err(|e| e.to_string())?)
+}
+
+#[tauri::command]
+fn open_update_download(state: State<'_, LauncherState>) -> Result<(), String> {
+    let config = configured_remote(&state)?;
+    let latest = config.latest_version.as_deref().ok_or("远程配置尚未发布版本信息。")?;
+    if !remote_config::has_update(env!("CARGO_PKG_VERSION"), Some(latest)) { return Err("没有比当前版本更新的下载。".into()); }
+    let download = remote_config::download_for_platform(&config, platform_key()).ok_or("远程配置尚未提供此系统的下载地址与校验值。")?;
+    // 仅打开已验证元数据里的 HTTPS 下载，绝不执行远程命令或自动覆盖正在运行的应用。
+    open::that(&download.url).map_err(|e| format!("无法打开版本下载地址：{e}"))
+}
+
+#[tauri::command]
+fn open_project_website(state: State<'_, LauncherState>) -> Result<(), String> {
+    let config = configured_remote(&state)?;
+    let url = config.website.as_deref().unwrap_or("https://gtav.2t.hk");
+    remote_config::https_url(url)?;
+    open::that(url).map_err(|e| e.to_string())
 }
 
 pub fn run() {
@@ -138,9 +195,21 @@ pub fn run() {
             let state = app.state::<LauncherState>();
             let mut inner = state.inner.lock().unwrap();
             inner.selected = settings.selected_directory; inner.preferred_port = settings.preferred_port;
+            drop(inner);
+            let remote = state.remote.clone(); let busy = state.remote_busy.clone();
+            let cache = app.path().app_cache_dir()?.join("remote-configuration.json");
+            let handle = app.handle().clone();
+            busy.store(true, Ordering::Release);
+            tauri::async_runtime::spawn_blocking(move || {
+                let _guard = BusyGuard(busy);
+                let value = serde_json::to_value(remote_config::load(&cache)).unwrap_or_default();
+                if let Ok(mut snapshot) = remote.write() { *snapshot = value.clone(); }
+                let _ = handle.emit("launcher-remote-config", value);
+            });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![launcher_status, choose_game_directory, prepare_game, start_game, stop_game, open_game])
+        .invoke_handler(tauri::generate_handler![launcher_status, choose_game_directory, prepare_game, start_game, stop_game, open_game,
+            remote_configuration, open_update_download, open_project_website])
         .build(tauri::generate_context!()).expect("启动桌面界面失败")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
@@ -154,8 +223,11 @@ pub fn verify_resources(selected: &Path, cache: &Path) -> Result<serde_json::Val
     let info = resources::inspect_game_resources(selected)?;
     engine::prepare(&info.original_wasm, &cache.join("runtime"))?;
     let fonts = fonts::prepare(&info.root, &info.original_wasm, &cache.join("fonts"))?;
+    let remote = remote_config::load(&cache.join("remote-configuration.json"));
+    let remote_value = serde_json::to_value(&remote).map_err(|e| e.to_string())?;
     let server = http_server::start(info.clone(), cache.join("runtime"), embedded_client(), http_server::ServerConfig {
-        online_ready: true, font_overrides: fonts.clone(), log_file: cache.join("browser.log"), ..Default::default()
+        online_ready: true, font_overrides: fonts.clone(), log_file: cache.join("browser.log"),
+        remote_configuration: Arc::new(RwLock::new(remote_value)), ..Default::default()
     })?;
     use std::io::{Read, Write};
     let mut connection = std::net::TcpStream::connect(("127.0.0.1", server.port())).map_err(|e| e.to_string())?;
@@ -169,5 +241,6 @@ pub fn verify_resources(selected: &Path, cache: &Path) -> Result<serde_json::Val
     if !headers.contains("Cross-Origin-Embedder-Policy: require-corp") { return Err("缺少跨域隔离响应头".into()); }
     Ok(serde_json::json!({ "resources": info, "embedded_client": true, "fonts_cached": fonts.len(),
         "offline_engine": cache.join("runtime/offline/game.wasm"), "online_engine": cache.join("runtime/online/game.wasm"),
-        "http_started": true, "python_required": false, "game_resources_changed": false }))
+        "http_started": true, "python_required": false, "game_resources_changed": false,
+        "remote_source": remote.source, "oltitle": remote.config.oltitle }))
 }

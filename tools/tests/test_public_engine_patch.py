@@ -488,6 +488,9 @@ class PublicEnginePatchTests(unittest.TestCase):
             "mpPauseMenuActive": (51840, "hud_commands::CommandIsPauseMenuActive()", [], ["i32"]),
             "mpFrontendReady": (51856, "hud_commands::CommandIsFrontendReadyForControl()", [], ["i32"]),
             "mpBeginPauseHeader": (50805, "graphics_commands::CommandBeginScaleformMovieMethodOnFrontendHeader(char const*)", ["i64"], ["i32"]),
+            "mpGetPausePanel": (36266, "CPauseMenu::GetCurrentActivePanel()", ["i64"], []),
+            "mpPausePanelName": (35600, "MenuScreenId::GetParserName() const", ["i64"], ["i64"]),
+            "mpBeginPauseContent": (50804, "graphics_commands::CommandBeginScaleformMovieMethodOnFrontend(char const*)", ["i64"], ["i32"]),
             "mpScaleformString": (50818, "graphics_commands::CommandScaleformMovieMethodAddParamLiteralString(char const*)", ["i64"], []),
             "mpScaleformBool": (50814, "graphics_commands::CommandScaleformMovieMethodAddParamBool(bool)", ["i32"], []),
             "mpScaleformInt": (50812, "graphics_commands::CommandScaleformMovieMethodAddParamInt(int)", ["i32"], []),
@@ -540,6 +543,59 @@ class PublicEnginePatchTests(unittest.TestCase):
             decoded = self.original.instructions(index)
             self.assertTrue(decoded["decode_complete"])
             self.assertEqual([item["target"]["function_index"] for item in decoded["instructions"] if item["operation"] == "call"], [target])
+
+    def test_online_body_uses_actual_multiplayer_script_pane_and_four_byte_menu_id(self):
+        path = ROOT / "gta5data/data/common/data/ui/pausemenu.XML"
+        tree = ET.parse(path)
+        online = next(item for item in tree.iter("Item")
+                      if item.findtext("MenuScreen") == "MENU_UNIQUE_ID_MISSION_CREATOR")
+        self.assertEqual(online.findtext("cGfxFilename"), "PAUSE_MENU_PAGES_MISSIONCREATOR")
+        self.assertEqual(online.findtext("runtime/type"), "SCRIPT")
+        self.assertEqual(online.findtext("runtime/params/data"), "PauseMenu_Multiplayer")
+        panel = self.original.instructions(36266)
+        self.assertTrue(panel["decode_complete"])
+        items = panel["instructions"]
+        # C++ 结构体返回通过 i64 指向调用者自己的四字节 MenuScreenId；不是 this 指针。
+        stores = [item for item in items if item["operation"].endswith("store")]
+        self.assertEqual(len(stores), 2)
+        self.assertTrue(all(item["operation"] == "i32.store" and item["memory"]["offset"] == 0 for item in stores))
+        self.assertFalse(any(item["operation"] == "call" for item in items))
+        self.assertEqual(items[0]["operation"], "i64.const")
+        self.assertEqual(items[0]["value"], 19567504)
+        parser = self.original.instructions(35600)
+        self.assertTrue(parser["decode_complete"])
+        parser_calls = [item["target"]["name"] for item in parser["instructions"] if item["operation"] == "call"]
+        self.assertIn("rage::parEnumData::NameFromValueUnsafe(int) const", parser_calls)
+        self.assertFalse(any("Network" in name or "SocialClub" in name for name in parser_calls))
+
+    def test_pause_content_begin_checks_original_movie_and_warning_parameter_order(self):
+        content = self.original.instructions(50804)
+        self.assertTrue(content["decode_complete"])
+        items = content["instructions"]
+        active = next(index for index, item in enumerate(items) if item["operation"] == "call"
+                      and item["target"]["function_index"] == 36254)
+        begin = next(index for index, item in enumerate(items) if item["operation"] == "call"
+                     and item["target"]["function_index"] == 37248)
+        self.assertLess(active, begin)
+        self.assertEqual([item["operation"] for item in items[active + 1:active + 3]], ["i32.eqz", "br_if"])
+        self.assertTrue(any(item["operation"] == "i64.const" and item["value"] == 19567060 for item in items))
+        self.assertTrue(any(item["operation"] == "i32.lt_s" for item in items[active:begin]))
+        warning = self.original.instructions(36341)
+        self.assertTrue(warning["decode_complete"])
+        args = warning["instructions"]
+        adds = [index for index, item in enumerate(args) if item["operation"] == "call"
+                and item["target"]["function_index"] == 36162]
+        self.assertEqual(len(adds), 11, "warning API 首参是可见性，之后是原十个 native 参数")
+        # 原序列：true, column, layout, title, body, width, image, texture, alignment, image caption, bool。
+        starts = [0] + [index + 1 for index in adds[:-1]]
+        for argument, (start, end) in enumerate(zip(starts, adds)):
+            part = args[start:end]
+            if argument == 0:
+                self.assertTrue(any(item["operation"] == "i32.const" and item["value"] == 1 for item in part))
+            else:
+                expected_local = argument - 1
+                self.assertTrue(any(item["operation"] == "local.get" and item["index"] == expected_local for item in part),
+                                f"warning 参数 {argument} 应从 native local {expected_local} 读取")
 
     def test_pause_game_label_static_position_is_not_assumed_to_be_online_content(self):
         path = ROOT / "gta5data/data/common/data/ui/pausemenu.XML"

@@ -318,7 +318,7 @@ function engine(options = {}) {
     } };
 }
 
-function adapter(network = null) {
+function adapter(network = null, options = {}) {
   const channels = [], timers = new Map(), requests = [];
   const hud = { textContent: '', style: {} };
   let nextTimer = 1;
@@ -334,7 +334,7 @@ function adapter(network = null) {
     clearTimeout(id) { timers.delete(id); } });
   vm.runInContext(adapterSource.replace('export function installGameAdapter', 'function installGameAdapter') +
     '\nglobalThis.installAdapter = installGameAdapter;', context, { filename: 'game-adapter.js' });
-  const api = context.installAdapter({}, network);
+  const api = context.installAdapter({}, network, options);
   const memory = { buffer: new SharedArrayBuffer(8192) }, block = 256, capacity = 4096;
   api.onWorkerMessage({ multiplayer: { type: 'memory', memory, block, capacity } });
   const receive = (data) => network ? network.receiver(data) : channels[0].onmessage({ data });
@@ -1661,4 +1661,15 @@ test('远端弹道优先从真实枪口播放，缺骨架时只使用安全右�
   const hand = engine({ muzzle: [710.5, -1080, 23], noWeaponSkeleton: true, hand: [710.25, -1080, 23] });
   hand.connect(packet({ shots: [shot] })); assert.deepEqual(hand.visualVectors[0].origin, [710.25, -1080, 23]);
   assert.equal(hand.calls.filter(c => c.name === 'mpEntityBoneIndexByName').length, 0, '不能查询空骨架');
+});
+
+test('启动器动态配置进入共享快照，配置更新不清除角色或战斗消息', () => {
+  let update;
+  const page = adapter(null, { watchOnlineConfiguration: callback => { update = callback; callback({ oltitle: 'https://gtav.2t.hk' }); return () => {}; } });
+  page.receive({ type: 'session', connected: true, client_id: 'LOCAL', members: [{ id: 'LOCAL' }, { id: 'REMOTE' }] });
+  page.receive({ type: 'player_state', player_id: 'REMOTE', state: peerState() }); page.flush();
+  assert.equal(page.read().remote_config.oltitle, 'https://gtav.2t.hk');
+  update({ oltitle: 'https://gtav.2t.hk/status', source: 'remote', stale: false }); page.flush();
+  assert.equal(page.read().remote_config.oltitle, 'https://gtav.2t.hk/status');
+  assert.equal(page.read().peers[0].player_id, 'REMOTE');
 });

@@ -50,6 +50,7 @@
 <div id="fps"></div>
 <script type="module">
 import { installGameAdapter } from '/multiplayer/game-adapter.js';
+import { watchOnlineConfiguration } from '/multiplayer/remote-config.js';
 import { installJoinModal, readPublicPreferences, consumePublicEntryIntent } from '/multiplayer/join-modal.js';
 import { startPublicSession } from '/multiplayer/public-session.js';
 // 浏览器版本的入口页。引擎在专用工作线程中运行（loader.js，相当于引擎的“主线程”，静态构造函数和
@@ -476,7 +477,7 @@ const ENGINE_ARGS = ['-fastscriptcore'];
 // 等待还会为每帧增加 15 毫秒。下方使用空回调；游玩时该线程不会在此执行其他工作。
 setInterval(() => {}, 1);
 const worker = new Worker(BASE + '/loader.js');
-	const multiplayerAdapter = ROOM_GAME ? installGameAdapter(worker, publicSession) : null;
+	const multiplayerAdapter = ROOM_GAME ? installGameAdapter(worker, publicSession, { watchOnlineConfiguration }) : null;
 	worker.onmessage = (ev) => {
 		multiplayerAdapter?.onWorkerMessage(ev.data);
 		if (ev.data.hud) hud.textContent = translateUiText(ev.data.hud);
