@@ -1,0 +1,59 @@
+name: 构建桌面启动器
+on:
+  workflow_dispatch:
+  push:
+    tags: ["launcher-v*"]
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: GTA5Data-Launcher-Windows-x64
+            binary: desktop/src-tauri/target/release/gta5data-launcher.exe
+          - os: macos-14
+            artifact: GTA5Data-Launcher-macOS-arm64
+            binary: desktop/src-tauri/target/release/bundle/macos/GTA5Data Launcher.app
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+      - run: npm ci
+        working-directory: desktop
+      - run: npm test
+        working-directory: desktop
+      - run: npm run build
+        working-directory: desktop
+      - run: cargo test --locked
+        working-directory: desktop/src-tauri
+      - if: runner.os == 'Windows'
+        run: npm run tauri -- build --no-bundle
+        working-directory: desktop
+      - if: runner.os == 'macOS'
+        run: npm run tauri -- build --bundles app
+        working-directory: desktop
+      - if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent '${{ matrix.binary }}' desktop/GTA5Data-Launcher-macOS-arm64.zip
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.binary }}
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: ${{ matrix.artifact }}
+          path: desktop/GTA5Data-Launcher-macOS-arm64.zip
+          if-no-files-found: error

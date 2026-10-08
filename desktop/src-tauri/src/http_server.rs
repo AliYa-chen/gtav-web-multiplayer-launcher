@@ -1,0 +1,534 @@
+//! Loopback-only HTTP bridge. Client UI is embedded; player resources are read-only.
+use crate::resources::{contained_file, safe_relative, ResourceInfo};
+use flate2::{write::GzEncoder, Compression};
+use percent_encoding::percent_decode_str;
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::path::{Path, PathBuf};
+use std::sync::{atomic::{AtomicBool, Ordering}, mpsc, Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
+
+const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+const MAX_BATCH_BYTES: u64 = 64 * 1024 * 1024;
+const WORKERS: usize = 8;
+
+#[derive(Clone, Debug)]
+pub struct ServerConfig {
+    pub multiplayer_server: String,
+    pub instance_name: String,
+    pub log_file: PathBuf,
+    pub online_ready: bool,
+    /// Reuse the prior origin so the browser keeps the player's saved profile.
+    pub preferred_port: Option<u16>,
+    /// Relative data names mapped to read-only extracted font caches outside game data.
+    pub font_overrides: HashMap<String, PathBuf>,
+}
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            multiplayer_server: "183.66.27.21:47485".into(),
+            instance_name: "玩家1".into(),
+            log_file: std::env::temp_dir().join("gta5-launcher/browser-local.log"),
+            online_ready: false,
+            preferred_port: None,
+            font_overrides: HashMap::new(),
+        }
+    }
+}
+
+struct State {
+    resources: ResourceInfo,
+    runtime_root: PathBuf,
+    client: HashMap<String, &'static [u8]>,
+    config: ServerConfig,
+    port: u16,
+    log_lock: Mutex<()>,
+}
+
+pub struct ServerHandle {
+    port: u16,
+    running: Arc<AtomicBool>,
+    server: Option<Arc<Server>>,
+    dispatcher: Option<JoinHandle<()>>,
+}
+impl ServerHandle {
+    pub fn url(&self) -> String { format!("http://127.0.0.1:{}/", self.port) }
+    pub fn port(&self) -> u16 { self.port }
+}
+impl Drop for ServerHandle {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Release);
+        if let Some(server) = self.server.as_ref() { server.unblock(); }
+        if let Some(thread) = self.dispatcher.take() { let _ = thread.join(); }
+        drop(self.server.take());
+        // tiny_http wakes its private accept thread asynchronously on Drop.
+        // Wait briefly for it to release the port before a same-origin restart.
+        let address = SocketAddr::from(([127, 0, 0, 1], self.port));
+        for _ in 0..25 {
+            if TcpStream::connect_timeout(&address, Duration::from_millis(10)).is_err() { break; }
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+}
+
+/// Resolve a future log path without creating directories in a rejected game tree.
+fn resolved_future_path(path: &Path) -> Result<PathBuf, String> {
+    let absolute = if path.is_absolute() { path.to_path_buf() } else {
+        std::env::current_dir().map_err(|e| e.to_string())?.join(path)
+    };
+    if absolute.components().any(|part| matches!(part, std::path::Component::ParentDir)) {
+        return Err("启动器输出路径不能包含父目录跳转。".into());
+    }
+    let mut existing = absolute.as_path();
+    let mut suffix = Vec::new();
+    while !existing.exists() {
+        suffix.push(existing.file_name().ok_or("输出路径无效。")?.to_owned());
+        existing = existing.parent().ok_or("输出路径无效。")?;
+    }
+    let mut resolved = existing.canonicalize().map_err(|e| e.to_string())?;
+    for part in suffix.into_iter().rev() { resolved.push(part); }
+    Ok(resolved)
+}
+
+pub fn start(
+    resources: ResourceInfo,
+    runtime_root: PathBuf,
+    client: HashMap<String, &'static [u8]>,
+    mut config: ServerConfig,
+) -> Result<ServerHandle, String> {
+    let runtime_root = runtime_root.canonicalize().map_err(|e| format!("启动器运行目录不存在：{e}"))?;
+    if runtime_root.starts_with(&resources.root) {
+        return Err("启动器运行目录不能位于游戏资源目录内。".into());
+    }
+    config.log_file = resolved_future_path(&config.log_file)?;
+    if config.log_file.starts_with(&resources.root) {
+        return Err("启动器诊断日志不能写入游戏资源目录。".into());
+    }
+    for (name, path) in &mut config.font_overrides {
+        safe_relative(name)?;
+        *path = path.canonicalize().map_err(|e| format!("字体缓存不可读：{e}"))?;
+        if path.starts_with(&resources.root) || !path.is_file() {
+            return Err("字体覆盖必须使用游戏目录之外的只读缓存。".into());
+        }
+    }
+    if !client.contains_key("/index.html") { return Err("启动器缺少内嵌 client/index.html。".into()); }
+    let listen = match config.preferred_port {
+        Some(port) if port != 0 => Server::http(("127.0.0.1", port)).or_else(|_| Server::http("127.0.0.1:0")),
+        _ => Server::http("127.0.0.1:0"),
+    };
+    let server = Arc::new(listen.map_err(|e| format!("无法启动本机游戏服务：{e}"))?);
+    let port = server.server_addr().to_ip().ok_or("本机监听地址无效。")?.port();
+    let running = Arc::new(AtomicBool::new(true));
+    let state = Arc::new(State { resources, runtime_root, client, config, port, log_lock: Mutex::new(()) });
+    let dispatcher_server = server.clone();
+    let dispatcher_running = running.clone();
+    let dispatcher = thread::Builder::new().name("game-http".into()).spawn(move || {
+        let (sender, receiver) = mpsc::sync_channel::<Request>(64);
+        let receiver = Arc::new(Mutex::new(receiver));
+        let mut workers = Vec::new();
+        for _ in 0..WORKERS {
+            let receiver = receiver.clone();
+            let state = state.clone();
+            workers.push(thread::spawn(move || loop {
+                let request = match receiver.lock() { Ok(lock) => lock.recv(), Err(_) => break };
+                match request { Ok(request) => handle(request, &state), Err(_) => break }
+            }));
+        }
+        while dispatcher_running.load(Ordering::Acquire) {
+            match dispatcher_server.recv_timeout(Duration::from_millis(200)) {
+                Ok(Some(request)) => match sender.try_send(request) {
+                    Ok(()) => {},
+                    Err(mpsc::TrySendError::Full(request)) => reply_error(request, 503, "本机资源请求繁忙，请稍后重试。"),
+                    Err(mpsc::TrySendError::Disconnected(_)) => break,
+                },
+                Ok(None) => {},
+                Err(_) => break,
+            }
+        }
+        drop(sender);
+        for worker in workers { let _ = worker.join(); }
+    }).map_err(|e| format!("无法启动本机服务线程：{e}"))?;
+    Ok(ServerHandle { port, running, server: Some(server), dispatcher: Some(dispatcher) })
+}
+
+fn header(request: &Request, name: &'static str) -> Option<String> {
+    request.headers().iter().find(|header| header.field.equiv(name)).map(|header| header.value.as_str().to_owned())
+}
+fn headers(content_type: &str) -> Vec<Header> {
+    [
+        ("Content-Type", content_type),
+        ("Cross-Origin-Opener-Policy", "same-origin"),
+        ("Cross-Origin-Embedder-Policy", "require-corp"),
+        ("Cross-Origin-Resource-Policy", "same-origin"),
+        ("Accept-Ranges", "bytes"),
+        ("Cache-Control", "no-cache"),
+        ("X-Content-Type-Options", "nosniff"),
+    ].iter().map(|(key, value)| Header::from_bytes(key.as_bytes(), value.as_bytes()).unwrap()).collect()
+}
+fn extra_header(headers: &mut Vec<Header>, name: &str, value: &str) {
+    if let Ok(header) = Header::from_bytes(name.as_bytes(), value.as_bytes()) { headers.push(header); }
+}
+fn reply(request: Request, code: u16, body: Vec<u8>, content_type: &str, extras: &[(&str, String)]) {
+    let mut response_headers = headers(content_type);
+    for (key, value) in extras { extra_header(&mut response_headers, key, value); }
+    let size = body.len();
+    let response = Response::new(StatusCode(code), response_headers, Cursor::new(body), Some(size), None);
+    let _ = request.respond(response);
+}
+fn reply_error(request: Request, code: u16, message: &str) {
+    reply(request, code, serde_json::to_vec(&json!({"error": message})).unwrap(), "application/json; charset=utf-8", &[]);
+}
+
+fn normalized_path(raw: &str) -> Result<String, String> {
+    let mut path = raw.to_owned();
+    for _ in 0..8 {
+        let decoded = percent_decode_str(&path).decode_utf8().map_err(|_| "URL 路径编码无效。")?.into_owned();
+        if decoded == path { break; }
+        path = decoded;
+    }
+    if path.contains('\\') || path.contains('\0') || path.split('/').any(|part| part == "..") {
+        return Err("资源路径不能越过已选择目录。".into());
+    }
+    let parts: Vec<_> = path.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
+    Ok(format!("/{}", parts.join("/")))
+}
+
+fn valid_origin(request: &Request, state: &State) -> bool {
+    let allowed_hosts = [format!("127.0.0.1:{}", state.port), format!("localhost:{}", state.port)];
+    if !header(request, "Host").map(|host| allowed_hosts.contains(&host.to_lowercase())).unwrap_or(false) { return false; }
+    match header(request, "Origin") {
+        None => true,
+        Some(origin) => allowed_hosts.iter().any(|host| origin == format!("http://{host}")),
+    }
+}
+
+fn handle(request: Request, state: &State) {
+    if !valid_origin(&request, state) { return reply_error(request, 403, "仅允许当前本机游戏页面访问资源。 "); }
+    let target = request.url().to_owned();
+    let (raw_path, query) = target.split_once('?').unwrap_or((&target, ""));
+    let path = match normalized_path(raw_path) { Ok(path) => path, Err(error) => return reply_error(request, 403, &error) };
+    match request.method() {
+        Method::Post => return handle_post(request, &path, query, state),
+        Method::Get | Method::Head => {},
+        _ => return reply_error(request, 405, "此接口不支持该请求方法。"),
+    }
+    if path == "/multiplayer" {
+        let mut params = vec![("online".to_owned(), "1".to_owned())];
+        for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+            if matches!(key.as_ref(), "name" | "server") && !params.iter().any(|(known, _)| known == &key) {
+                params.push((key.into_owned(), value.into_owned()));
+            }
+        }
+        let location = format!("/?{}", url::form_urlencoded::Serializer::new(String::new()).extend_pairs(params).finish());
+        return reply(request, 307, vec![], "text/plain", &[("Location", location)]);
+    }
+    if path == "/play" && (raw_path != "/play/" || !query.is_empty()) {
+        return reply(request, 307, vec![], "text/plain", &[("Location", "/play/".into())]);
+    }
+    if path == "/api/local-config" {
+        let body = json!({
+            "multiplayer_server": state.config.multiplayer_server,
+            "instance_name": state.config.instance_name,
+            "game_path": "/play/", "mode": "sandbox", "map": "gta5", "debug": false,
+            "resources_ready": true, "multiplayer_ready": state.config.online_ready,
+            "resource_version": state.resources.manifest_version,
+        });
+        return reply(request, 200, serde_json::to_vec(&body).unwrap(), "application/json; charset=utf-8", &[]);
+    }
+    let client_path = if path == "/" || path == "/play" { "/index.html" } else { &path };
+    if let Some(bytes) = state.client.get(client_path) {
+        return serve_memory(request, bytes, mime_type(client_path));
+    }
+    if path.starts_with("/engine/") {
+        let name = match path.as_str() {
+            "/engine/offline/game.wasm" => "offline/game.wasm",
+            "/engine/online/game.wasm" if state.config.online_ready => "online/game.wasm",
+            _ => return reply_error(request, 404, "未找到启动器隔离引擎。"),
+        };
+        let file = match contained_file(&state.runtime_root, name) {
+            Ok(file) if !file.starts_with(&state.resources.root) => file,
+            _ => return reply_error(request, 403, "启动器引擎不能链接到游戏资源目录。"),
+        };
+        return serve_file(request, &file);
+    }
+    if path.to_ascii_lowercase().ends_with(".wasm") {
+        return reply_error(request, 410, "游戏目录中的 WASM 入口已停用；请使用启动器 /engine/offline/game.wasm 或 /engine/online/game.wasm。");
+    }
+    let selected = if let Some(name) = path.strip_prefix("/data/") {
+        data_file(state, name)
+    } else if path.starts_with("/b/") {
+        contained_file(&state.resources.root, path.trim_start_matches('/'))
+    } else {
+        return reply_error(request, 404, "未找到启动器页面或游戏资源。 ");
+    };
+    match selected {
+        Ok(file) if file.extension().map(|value| value.eq_ignore_ascii_case("wasm")).unwrap_or(false) => reply_error(request, 410, "不能通过游戏资源链接读取 WASM。"),
+        Ok(file) => serve_file(request, &file),
+        Err(_) => reply_error(request, 404, "未找到游戏资源。"),
+    }
+}
+
+fn data_file(state: &State, name: &str) -> Result<PathBuf, String> {
+    safe_relative(name)?;
+    let file = if let Some(file) = state.config.font_overrides.get(name) { file.clone() }
+        else { contained_file(&state.resources.data_root, name)? };
+    if file.extension().map(|value| value.eq_ignore_ascii_case("wasm")).unwrap_or(false) {
+        return Err("不能通过游戏数据读取 WASM 引擎。".into());
+    }
+    Ok(file)
+}
+
+fn parse_range(value: Option<String>, size: u64) -> Result<Option<(u64, u64)>, ()> {
+    let value = match value { Some(value) => value, None => return Ok(None) };
+    let range = value.strip_prefix("bytes=").ok_or(())?;
+    let (first, last) = range.split_once('-').ok_or(())?;
+    if size == 0 || (first.is_empty() && last.is_empty()) || last.contains('-') { return Err(()); }
+    if !first.bytes().all(|byte| byte.is_ascii_digit()) || !last.bytes().all(|byte| byte.is_ascii_digit()) { return Err(()); }
+    let (start, end) = if first.is_empty() {
+        let suffix = last.parse::<u64>().map_err(|_| ())?;
+        if suffix == 0 { return Err(()); }
+        (size.saturating_sub(suffix), size - 1)
+    } else {
+        let start = first.parse::<u64>().map_err(|_| ())?;
+        let end = if last.is_empty() { size - 1 } else { last.parse::<u64>().map_err(|_| ())?.min(size - 1) };
+        (start, end)
+    };
+    if start >= size || end < start { return Err(()); }
+    Ok(Some((start, end)))
+}
+
+fn serve_memory(request: Request, bytes: &'static [u8], content_type: &str) {
+    let size = bytes.len() as u64;
+    match parse_range(header(&request, "Range"), size) {
+        Err(_) => reply(request, 416, vec![], content_type, &[("Content-Range", format!("bytes */{size}"))]),
+        Ok(range) => {
+            let (start, end, code) = range.map(|(a, b)| (a, b + 1, 206)).unwrap_or((0, size, 200));
+            let mut response_headers = headers(content_type);
+            if code == 206 { extra_header(&mut response_headers, "Content-Range", &format!("bytes {}-{}/{size}", start, end - 1)); }
+            let response = Response::new(StatusCode(code), response_headers, Cursor::new(&bytes[start as usize..end as usize]), Some((end - start) as usize), None);
+            let _ = request.respond(response);
+        }
+    }
+}
+fn serve_file(request: Request, path: &Path) {
+    let mut file = match File::open(path) { Ok(file) => file, Err(_) => return reply_error(request, 404, "无法打开游戏资源。") };
+    let size = match file.metadata() { Ok(metadata) => metadata.len(), Err(_) => return reply_error(request, 404, "无法读取游戏资源。") };
+    let range = match parse_range(header(&request, "Range"), size) {
+        Ok(range) => range,
+        Err(_) => return reply(request, 416, vec![], "application/octet-stream", &[("Content-Range", format!("bytes */{size}"))]),
+    };
+    let (start, count, code) = range.map(|(a, b)| (a, b - a + 1, 206)).unwrap_or((0, size, 200));
+    if file.seek(SeekFrom::Start(start)).is_err() { return reply_error(request, 500, "无法定位资源读取范围。 "); }
+    let mut response_headers = headers(mime_type(&path.to_string_lossy()));
+    if code == 206 { extra_header(&mut response_headers, "Content-Range", &format!("bytes {}-{}/{size}", start, start + count - 1)); }
+    let response = Response::new(StatusCode(code), response_headers, file.take(count), usize::try_from(count).ok(), None);
+    let _ = request.respond(response);
+}
+
+fn read_body(request: &mut Request) -> Result<Vec<u8>, (u16, String)> {
+    if request.body_length().map(|length| length > MAX_REQUEST_BYTES).unwrap_or(false) {
+        return Err((413, "请求数据超过 1 MiB。".into()));
+    }
+    let mut body = Vec::new();
+    request.as_reader().take(MAX_REQUEST_BYTES as u64 + 1).read_to_end(&mut body)
+        .map_err(|error| (400, format!("请求内容无法读取：{error}")))?;
+    if body.len() > MAX_REQUEST_BYTES { return Err((413, "请求数据超过 1 MiB。".into())); }
+    Ok(body)
+}
+
+fn handle_post(mut request: Request, path: &str, query: &str, state: &State) {
+    let result = post_result(&mut request, path, query, state);
+    let (code, body, content_type, extras) = match result {
+        Ok(value) => value,
+        Err((code, error)) => (code, serde_json::to_vec(&json!({"error": error})).unwrap(), "application/json; charset=utf-8", vec![]),
+    };
+    let mut response_headers = headers(content_type);
+    for (key, value) in extras { extra_header(&mut response_headers, key, &value); }
+    let size = body.len();
+    let response = Response::new(StatusCode(code), response_headers, Cursor::new(body), Some(size), None);
+    let _ = request.respond(response);
+}
+type PostResult = Result<(u16, Vec<u8>, &'static str, Vec<(&'static str, String)>), (u16, String)>;
+fn post_result(request: &mut Request, path: &str, query: &str, state: &State) -> PostResult {
+    if !matches!(path, "/data/batch" | "/log") { return Err((404, "未找到本机接口。".into())); }
+    let body = read_body(request)?;
+    if path == "/log" {
+        let _lock = state.log_lock.lock().map_err(|_| (500, "本机日志繁忙。".into()))?;
+        let parent = state.config.log_file.parent().ok_or((500, "本机日志路径无效。".into()))?;
+        fs::create_dir_all(parent).map_err(|e| (500, format!("无法创建本机日志目录：{e}")))?;
+        let mut file = OpenOptions::new().create(true).append(true).open(&state.config.log_file)
+            .map_err(|e| (500, format!("无法打开本机日志：{e}")))?;
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        writeln!(file, "[{stamp}] {}", String::from_utf8_lossy(&body)).map_err(|e| (500, format!("无法写入本机日志：{e}")))?;
+        return Ok((204, vec![], "text/plain", vec![]));
+    }
+    let runs: Value = serde_json::from_slice(&body).map_err(|e| (400, format!("批量请求 JSON 无效：{e}")))?;
+    let runs = runs.as_array().filter(|runs| runs.len() <= 1000).ok_or((400, "批量请求必须为最多 1000 项的数组。".into()))?;
+    let mut selected = Vec::new();
+    let mut total = 0u64;
+    for run in runs {
+        let row = run.as_array().filter(|row| row.len() == 3).ok_or((400, "批量请求中的文件范围格式无效。".into()))?;
+        let name = row[0].as_str().ok_or((400, "文件路径格式无效。".into()))?;
+        let start = row[1].as_u64().ok_or((400, "文件读取起点无效。".into()))?;
+        let end = row[2].as_u64().filter(|end| *end >= start).ok_or((400, "文件读取终点无效。".into()))?;
+        let file = data_file(state, name).map_err(|e| (400, e))?;
+        let size = file.metadata().map_err(|e| (400, e.to_string()))?.len();
+        let count = end.saturating_add(1).min(size).saturating_sub(start);
+        total = total.checked_add(count).filter(|total| *total <= MAX_BATCH_BYTES).ok_or((400, "批量读取超过 64 MiB。".into()))?;
+        selected.push((file, start, count));
+    }
+    let mut output = Vec::with_capacity(total as usize);
+    let mut lengths = Vec::new();
+    for (path, start, count) in selected {
+        let mut file = File::open(path).map_err(|e| (400, e.to_string()))?;
+        file.seek(SeekFrom::Start(start)).map_err(|e| (400, e.to_string()))?;
+        let before = output.len();
+        file.take(count).read_to_end(&mut output).map_err(|e| (400, e.to_string()))?;
+        if (output.len() - before) as u64 != count { return Err((400, "资源在读取过程中发生变化，请重新选择稳定的游戏资源。".into())); }
+        lengths.push(count.to_string());
+    }
+    let mut extras = vec![("X-Run-Lengths", lengths.join(","))];
+    if url::form_urlencoded::parse(query.as_bytes()).any(|(key, value)| key == "gz" && value == "1") {
+        let mut gzip = GzEncoder::new(Vec::new(), Compression::fast());
+        gzip.write_all(&output).map_err(|e| (500, e.to_string()))?;
+        output = gzip.finish().map_err(|e| (500, e.to_string()))?;
+        extras.push(("Content-Encoding", "gzip".into()));
+    }
+    Ok((200, output, "application/octet-stream", extras))
+}
+
+fn mime_type(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
+        "html" => "text/html; charset=utf-8", "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8", "json" => "application/json; charset=utf-8",
+        "wasm" => "application/wasm", "png" => "image/png", "jpg" | "jpeg" => "image/jpeg",
+        "svg" => "image/svg+xml", "webp" => "image/webp", "ico" => "image/x-icon",
+        "woff2" => "font/woff2", "woff" => "font/woff", "mp3" => "audio/mpeg", "ogg" => "audio/ogg",
+        _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpStream;
+    fn fixture() -> (tempfile::TempDir, ResourceInfo, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("game");
+        let data = root.join("data");
+        let runtime = temp.path().join("runtime");
+        fs::create_dir_all(&data).unwrap();
+        fs::create_dir_all(root.join("b/8b0b5899ed")).unwrap();
+        fs::create_dir_all(runtime.join("offline")).unwrap();
+        fs::create_dir_all(runtime.join("online")).unwrap();
+        fs::write(root.join("index.html"), "untrusted game index").unwrap();
+        fs::write(root.join("b/8b0b5899ed/game.wasm"), "original WASM must never be served").unwrap();
+        fs::write(root.join("b/8b0b5899ed/game-multiplayer.wasm"), "stale WASM must never be served").unwrap();
+        fs::write(root.join("b/8b0b5899ed/game.js"), "original engine JS").unwrap();
+        fs::write(data.join("sample.bin"), b"0123456789").unwrap();
+        fs::write(runtime.join("offline/game.wasm"), b"\0asm\x01\0\0\0OFFLINE").unwrap();
+        fs::write(runtime.join("online/game.wasm"), b"\0asm\x01\0\0\0ONLINE").unwrap();
+        let info = ResourceInfo {
+            root: root.canonicalize().unwrap(), data_root: data.canonicalize().unwrap(),
+            original_wasm: root.join("b/8b0b5899ed/game.wasm"), manifest_version: "test".into(),
+            original_sha256: "test".into(), manifest_file_count: 1, sample_md5: None,
+        };
+        (temp, info, runtime)
+    }
+    fn request(server: &ServerHandle, method: &str, path: &str, extra: &str, body: &[u8]) -> (String, Vec<u8>) {
+        let mut stream = TcpStream::connect(("127.0.0.1", server.port())).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        write!(stream, "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\nContent-Length: {}\r\n{extra}\r\n", server.port(), body.len()).unwrap();
+        stream.write_all(body).unwrap();
+        let mut output = Vec::new(); stream.read_to_end(&mut output).unwrap();
+        let split = output.windows(4).position(|value| value == b"\r\n\r\n").unwrap();
+        (String::from_utf8(output[..split].to_vec()).unwrap(), output[split + 4..].to_vec())
+    }
+    fn client() -> HashMap<String, &'static [u8]> {
+        HashMap::from([("/index.html".into(), b"trusted client index" as &'static [u8]), ("/b/8b0b5899ed/loader.js".into(), b"trusted loader" as &'static [u8])])
+    }
+    #[test]
+    fn ranges_cover_suffix_clipping_and_invalid_reads() {
+        assert_eq!(parse_range(Some("bytes=2-6".into()), 10), Ok(Some((2, 6))));
+        assert_eq!(parse_range(Some("bytes=-3".into()), 10), Ok(Some((7, 9))));
+        assert_eq!(parse_range(Some("bytes=8-90".into()), 10), Ok(Some((8, 9))));
+        for value in ["bytes=10-", "bytes=9-2", "bytes=-0", "bytes=0-1,3-4", "bytes=-", "bytes=--1"] {
+            assert!(parse_range(Some(value.into()), 10).is_err(), "{value}");
+        }
+        assert!(parse_range(Some("bytes=0-".into()), 0).is_err());
+    }
+    #[test]
+    fn paths_decode_before_validation() {
+        assert!(normalized_path("/data/%252e%252e/secret").is_err());
+        assert!(normalized_path("/data/%5csecret").is_err());
+        assert_eq!(normalized_path("//b//file.js").unwrap(), "/b/file.js");
+    }
+    #[test]
+    fn actual_http_serves_embedded_client_and_isolated_engines_only() {
+        let (temp, info, runtime) = fixture();
+        let config = ServerConfig { online_ready: true, log_file: temp.path().join("logs/browser.log"), ..Default::default() };
+        let server = start(info, runtime, client(), config).unwrap();
+        let (headers, body) = request(&server, "GET", "/", "", b"");
+        assert!(headers.starts_with("HTTP/1.1 200"));
+        assert!(headers.to_lowercase().contains("cross-origin-embedder-policy: require-corp"));
+        assert_eq!(body, b"trusted client index");
+        for path in ["/play/", "/index.html"] { assert_eq!(request(&server, "GET", path, "", b"").1, b"trusted client index"); }
+        assert_eq!(request(&server, "GET", "/b/8b0b5899ed/loader.js", "", b"").1, b"trusted loader");
+        for path in ["/b/8b0b5899ed/game.wasm", "/b/8b0b5899ed/game-multiplayer.wasm", "/game.wasm", "/b/8b0b5899ed/%2567ame.wasm"] {
+            assert!(request(&server, "GET", path, "", b"").0.starts_with("HTTP/1.1 410"), "{path}");
+        }
+        assert_eq!(request(&server, "GET", "/engine/online/game.wasm", "Range: bytes=0-7\r\n", b"").1, b"\0asm\x01\0\0\0");
+        let (headers, body) = request(&server, "HEAD", "/data/sample.bin", "", b"");
+        assert!(headers.to_lowercase().contains("content-length: 10"));
+        assert!(body.is_empty());
+        let (headers, body) = request(&server, "GET", "/data/sample.bin", "Range: bytes=3-5\r\n", b"");
+        assert!(headers.starts_with("HTTP/1.1 206")); assert_eq!(body, b"345");
+        let (headers, _) = request(&server, "GET", "/data/sample.bin", "Range: bytes=40-\r\n", b"");
+        assert!(headers.starts_with("HTTP/1.1 416")); assert!(headers.to_lowercase().contains("content-range: bytes */10"));
+        assert!(request(&server, "GET", "/data/%252e%252e/index.html", "", b"").0.starts_with("HTTP/1.1 403"));
+        let (headers, _) = request(&server, "GET", "/play/?debug=1", "", b"");
+        assert!(headers.starts_with("HTTP/1.1 307")); assert!(headers.to_lowercase().contains("location: /play/"));
+        let (headers, _) = request(&server, "GET", "/multiplayer/?name=test&server=example%3A1234&debug=1", "", b"");
+        assert!(headers.to_lowercase().contains("location: /?online=1&name=test&server=example%3a1234"));
+        let body = request(&server, "GET", "/api/local-config", "", b"").1;
+        let config: Value = serde_json::from_slice(&body).unwrap(); assert_eq!(config["debug"], false); assert_eq!(config["map"], "gta5");
+        let port = server.port(); drop(server);
+        assert!(TcpStream::connect(("127.0.0.1", port)).is_err(), "dropping launcher must stop its HTTP listener");
+    }
+    #[test]
+    fn actual_batch_matches_lengths_and_gzip_and_logs_stay_external() {
+        let (temp, info, runtime) = fixture();
+        let log = temp.path().join("logs/browser.log");
+        let server = start(info.clone(), runtime.clone(), client(), ServerConfig { log_file: log.clone(), ..Default::default() }).unwrap();
+        let input = br#"[["sample.bin",1,3],["sample.bin",8,20]]"#;
+        let (headers, body) = request(&server, "POST", "/data/batch", "", input);
+        assert!(headers.starts_with("HTTP/1.1 200")); assert!(headers.to_lowercase().contains("x-run-lengths: 3,2")); assert_eq!(body, b"12389");
+        let (headers, body) = request(&server, "POST", "/data/batch?gz=1", "", input);
+        assert!(headers.to_lowercase().contains("content-encoding: gzip"));
+        let mut decoder = flate2::read::GzDecoder::new(&body[..]); let mut decoded = Vec::new(); decoder.read_to_end(&mut decoded).unwrap(); assert_eq!(decoded, b"12389");
+        assert!(request(&server, "POST", "/data/batch", "", br#"[["../index.html",0,1]]"#).0.starts_with("HTTP/1.1 400"));
+        assert!(request(&server, "POST", "/log", "", b"test log").0.starts_with("HTTP/1.1 204"));
+        assert!(fs::read_to_string(log).unwrap().contains("test log"));
+        assert!(request(&server, "POST", "/log", "Origin: http://evil.invalid\r\n", b"evil log").0.starts_with("HTTP/1.1 403"));
+        assert!(start(info.clone(), runtime, client(), ServerConfig { log_file: info.root.join("new/log.txt"), ..Default::default() }).is_err());
+        assert!(!info.root.join("new").exists());
+    }
+    #[test]
+    fn saved_origin_port_is_reused_and_busy_port_falls_back() {
+        fn assert_send<T: Send>() {} assert_send::<ServerHandle>();
+        let (temp, info, runtime) = fixture();
+        let config = ServerConfig { log_file: temp.path().join("log.txt"), ..Default::default() };
+        let first = start(info.clone(), runtime.clone(), client(), config.clone()).unwrap();
+        let preferred_port = Some(first.port());
+        let busy = start(info.clone(), runtime.clone(), client(), ServerConfig { preferred_port, ..config.clone() }).unwrap();
+        assert_ne!(busy.port(), first.port());
+        drop(first);
+        let restarted = start(info, runtime, client(), ServerConfig { preferred_port, ..config }).unwrap();
+        assert_eq!(Some(restarted.port()), preferred_port);
+    }
+}

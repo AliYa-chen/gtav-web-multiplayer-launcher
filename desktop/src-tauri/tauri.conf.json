@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "GTA5Data Launcher",
+  "version": "0.1.0",
+  "identifier": "com.gta5data.launcher",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{ "label": "main", "title": "GTA V 公共战局 · 启动器", "width": 1080, "height": 780,
+      "minWidth": 850, "minHeight": 670, "center": true, "backgroundColor": "#101411" }],
+    "security": { "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data:; connect-src ipc: http://ipc.localhost" }
+  },
+  "bundle": { "active": true, "targets": "all", "category": "Game", "icon": ["icons/icon.png", "icons/icon.icns", "icons/icon.ico"],
+    "shortDescription": "选择自己的游戏资源，一键进入 GTA V 公共战局",
+    "macOS": { "minimumSystemVersion": "12.0" },
+    "windows": { "webviewInstallMode": { "type": "downloadBootstrapper", "silent": true } }
+  }
+}

@@ -4,11 +4,13 @@ import sys
 from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
-DENIED_PREFIXES = ('gta5data/', 'mirror/', 'runtime/', 'client/runtime/', 'archive/', 'docs/snapshot/')
+DENIED_PREFIXES = ('gta5data/', 'mirror/', 'runtime/', 'client/runtime/', 'archive/', 'docs/snapshot/',
+                   'desktop/src-tauri/target/', 'desktop/src-tauri/gen/', 'desktop/dist/', 'desktop/releases/')
 DENIED_SUFFIXES = {
     '.wasm', '.rpf', '.gfx', '.ytd', '.ydd', '.yft', '.ymt', '.fxc', '.bik', '.bk2',
     '.ttf', '.otf', '.woff', '.woff2', '.jar', '.class', '.zip', '.pyc', '.pyo',
     '.log', '.tmp', '.part',
+    '.exe', '.dll', '.dylib', '.rlib', '.a', '.pdb',
 }
 
 

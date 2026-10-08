@@ -1,0 +1,1447 @@
+{
+  "format_version": 1,
+  "purpose": "玩家提供原引擎；启动器仅在外部缓存生成离线和公共战局运行副本。",
+  "original_sha256": "11ca8d2c04c5e843d18ff4aea4899d72c86973c6b031df334e67c446b2ae83e0",
+  "original_bytes": 63201802,
+  "online_sha256": "292c78fba39b55b1923fedb6d57d617b2126521b9781e30741f3542d7f92ead5",
+  "online_bytes": 63204630,
+  "imported_functions": 85,
+  "callback_import": 11,
+  "exports": [
+    {
+      "name": "mpGetPlayerPed",
+      "function_index": 58627,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpGetEntityCoords",
+      "function_index": 50028,
+      "parameters": [
+        "i64",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpGetActiveThread",
+      "function_index": 16949,
+      "parameters": [],
+      "results": [
+        "i64"
+      ]
+    },
+    {
+      "name": "mpGetCurrentHandler",
+      "function_index": 63772,
+      "parameters": [],
+      "results": [
+        "i64"
+      ]
+    },
+    {
+      "name": "mpAlloc",
+      "function_index": 91000,
+      "parameters": [
+        "i64"
+      ],
+      "results": [
+        "i64"
+      ]
+    },
+    {
+      "name": "mpFree",
+      "function_index": 91002,
+      "parameters": [
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpCachedMeleeInputs",
+      "function_index": 41719,
+      "parameters": [
+        "i64",
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpCreateVehicle",
+      "function_index": 61266,
+      "parameters": [
+        "i32",
+        "i64",
+        "f32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpDeleteVehicle",
+      "function_index": 61267,
+      "parameters": [
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpGetQuaternion",
+      "function_index": 50044,
+      "parameters": [
+        "i32",
+        "i64",
+        "i64",
+        "i64",
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetQuaternion",
+      "function_index": 50147,
+      "parameters": [
+        "i32",
+        "f32",
+        "f32",
+        "f32",
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpGetVelocity",
+      "function_index": 50052,
+      "parameters": [
+        "i64",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetVelocity",
+      "function_index": 50154,
+      "parameters": [
+        "i32",
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpGetAngularVelocity",
+      "function_index": 50047,
+      "parameters": [
+        "i64",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetAngularVelocity",
+      "function_index": 50155,
+      "parameters": [
+        "i32",
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpGetVehiclePedIsIn",
+      "function_index": 57184,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpGetPedInSeat",
+      "function_index": 61366,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpSetPedIntoVehicle",
+      "function_index": 57201,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpTryingVehicle",
+      "function_index": 57306,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpTryingSeat",
+      "function_index": 57305,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpLeaveVehicle",
+      "function_index": 60572,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpIsArrested",
+      "function_index": 58711,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpMeleeAction",
+      "function_index": 57608,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpMeleeTarget",
+      "function_index": 57612,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpAnimDictExists",
+      "function_index": 60331,
+      "parameters": [
+        "i64"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpRequestAnimDict",
+      "function_index": 60332,
+      "parameters": [
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpHasAnimDictLoaded",
+      "function_index": 60333,
+      "parameters": [
+        "i64"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpTaskPlayAnim",
+      "function_index": 60617,
+      "parameters": [
+        "i32",
+        "i64",
+        "i64",
+        "f32",
+        "f32",
+        "i32",
+        "i32",
+        "f32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpIsPlayingAnim",
+      "function_index": 50077,
+      "parameters": [
+        "i32",
+        "i64",
+        "i64",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpAnimTime",
+      "function_index": 50024,
+      "parameters": [
+        "i32",
+        "i64",
+        "i64"
+      ],
+      "results": [
+        "f32"
+      ]
+    },
+    {
+      "name": "mpPedDensity",
+      "function_index": 57186,
+      "parameters": [
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpScenarioDensity",
+      "function_index": 57187,
+      "parameters": [
+        "f32",
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpVehicleDensity",
+      "function_index": 61298,
+      "parameters": [
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpRandomVehicleDensity",
+      "function_index": 61299,
+      "parameters": [
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpParkedVehicleDensity",
+      "function_index": 61300,
+      "parameters": [
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpAllVehicles",
+      "function_index": 61943,
+      "parameters": [
+        "i64"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpNearbyPeds",
+      "function_index": 57673,
+      "parameters": [
+        "i32",
+        "i64",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpPopulationType",
+      "function_index": 50055,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpEngineHealth",
+      "function_index": 61599,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "f32"
+      ]
+    },
+    {
+      "name": "mpBodyHealth",
+      "function_index": 61604,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "f32"
+      ]
+    },
+    {
+      "name": "mpSetEngineHealth",
+      "function_index": 61600,
+      "parameters": [
+        "i32",
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetBodyHealth",
+      "function_index": 61605,
+      "parameters": [
+        "i32",
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpEngineRunning",
+      "function_index": 61653,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpSetEngineOn",
+      "function_index": 61505,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpTaskWander",
+      "function_index": 60591,
+      "parameters": [
+        "i32",
+        "f32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpDriveWander",
+      "function_index": 60576,
+      "parameters": [
+        "i32",
+        "i32",
+        "f32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpFadeAfterDeath",
+      "function_index": 52752,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpFadeAfterArrest",
+      "function_index": 52753,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpFadeAfterRestart",
+      "function_index": 52754,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpPedSyncTree",
+      "function_index": 88346,
+      "parameters": [
+        "i64"
+      ],
+      "results": [
+        "i64"
+      ]
+    },
+    {
+      "name": "mpPlayerSyncTree",
+      "function_index": 88355,
+      "parameters": [
+        "i64"
+      ],
+      "results": [
+        "i64"
+      ]
+    },
+    {
+      "name": "mpNetworkScriptHandler",
+      "function_index": 63797,
+      "parameters": [],
+      "results": [
+        "i64"
+      ]
+    },
+    {
+      "name": "mpForcePlaying",
+      "function_index": 18890,
+      "parameters": [],
+      "results": []
+    },
+    {
+      "name": "mpResurrectLocalPlayer",
+      "function_index": 54881,
+      "parameters": [
+        "i64",
+        "f32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpPauseDeathRestart",
+      "function_index": 52750,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpScreenFadeIn",
+      "function_index": 49036,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpIsScreenFadedOut",
+      "function_index": 49034,
+      "parameters": [],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpSetPlayerControl",
+      "function_index": 58654,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpTaskStandStill",
+      "function_index": 60564,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpTaskGoStraight",
+      "function_index": 60577,
+      "parameters": [
+        "i32",
+        "i64",
+        "f32",
+        "i32",
+        "f32",
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpGetModel",
+      "function_index": 50040,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpHeading",
+      "function_index": 50032,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "f32"
+      ]
+    },
+    {
+      "name": "mpCreatePed",
+      "function_index": 57110,
+      "parameters": [
+        "i32",
+        "i32",
+        "i64",
+        "f32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpSetCoords",
+      "function_index": 50131,
+      "parameters": [
+        "i32",
+        "i64",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetHeading",
+      "function_index": 50135,
+      "parameters": [
+        "i32",
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetCollision",
+      "function_index": 50128,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetInvincible",
+      "function_index": 50137,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetCanRagdoll",
+      "function_index": 57471,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpIsRagdoll",
+      "function_index": 57464,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpBlockEvents",
+      "function_index": 57447,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpDeleteEntity",
+      "function_index": 50100,
+      "parameters": [
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpDeletePed",
+      "function_index": 57115,
+      "parameters": [
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpExists",
+      "function_index": 50006,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpSetCoordsNoOffset",
+      "function_index": 50133,
+      "parameters": [
+        "i32",
+        "i64",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpFreeze",
+      "function_index": 50102,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpGetHealth",
+      "function_index": 50034,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpSetHealth",
+      "function_index": 50136,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpIsDead",
+      "function_index": 50068,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpIsShooting",
+      "function_index": 57158,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpSelectedWeapon",
+      "function_index": 62955,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpGetCurrentPedWeapon",
+      "function_index": 62918,
+      "parameters": [
+        "i32",
+        "i64",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpGetAmmoInClip",
+      "function_index": 62942,
+      "parameters": [
+        "i32",
+        "i32",
+        "i64"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpLastWeaponImpact",
+      "function_index": 62953,
+      "parameters": [
+        "i32",
+        "i64"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpIsAiming",
+      "function_index": 58689,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpIsReloading",
+      "function_index": 57122,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpIsJumping",
+      "function_index": 57240,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpIsDucking",
+      "function_index": 57259,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpSetDucking",
+      "function_index": 57258,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpIsSprinting",
+      "function_index": 60839,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpGiveWeapon",
+      "function_index": 62910,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetCurrentWeapon",
+      "function_index": 62917,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpTaskShootAtCoord",
+      "function_index": 60656,
+      "parameters": [
+        "i32",
+        "i64",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpTaskAimGunAtCoord",
+      "function_index": 60655,
+      "parameters": [
+        "i32",
+        "i64",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpTaskReloadWeapon",
+      "function_index": 60785,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpTaskJump",
+      "function_index": 60565,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpCamCoords",
+      "function_index": 49040,
+      "parameters": [
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpCamRot",
+      "function_index": 49041,
+      "parameters": [
+        "i64",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpRequestModel",
+      "function_index": 60322,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpHasModel",
+      "function_index": 60324,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpAddBlipForEntity",
+      "function_index": 51603,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpSetBlipColour",
+      "function_index": 51623,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetBlipSprite",
+      "function_index": 51664,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetBlipScale",
+      "function_index": 51659,
+      "parameters": [
+        "i32",
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetBlipAsShortRange",
+      "function_index": 51652,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpRemoveBlip",
+      "function_index": 51667,
+      "parameters": [
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpBeginSetBlipName",
+      "function_index": 51491,
+      "parameters": [
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpAddTextPlayerSubstring",
+      "function_index": 51504,
+      "parameters": [
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpEndSetBlipName",
+      "function_index": 51492,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpBeginTheFeedPost",
+      "function_index": 51457,
+      "parameters": [
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpEndTheFeedPostTicker",
+      "function_index": 51464,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpPauseMenuActive",
+      "function_index": 51840,
+      "parameters": [],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpFrontendReady",
+      "function_index": 51856,
+      "parameters": [],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpBeginPauseHeader",
+      "function_index": 50805,
+      "parameters": [
+        "i64"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpScaleformString",
+      "function_index": 50818,
+      "parameters": [
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpScaleformBool",
+      "function_index": 50814,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpScaleformInt",
+      "function_index": 50812,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpEndScaleform",
+      "function_index": 50806,
+      "parameters": [],
+      "results": []
+    },
+    {
+      "name": "mpSetPlayerModel",
+      "function_index": 58625,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpPlayerId",
+      "function_index": 58714,
+      "parameters": [],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpDefaultVariation",
+      "function_index": 57395,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpGetDrawable",
+      "function_index": 57381,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpGetTexture",
+      "function_index": 57384,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpGetPalette",
+      "function_index": 57387,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpSetComponent",
+      "function_index": 57392,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpRandomComponents",
+      "function_index": 57393,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpRandomProps",
+      "function_index": 57394,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetHeadOverlay",
+      "function_index": 57402,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32",
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpHeadOverlayCount",
+      "function_index": 57404,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpSetOverlayTint",
+      "function_index": 57405,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetHairTint",
+      "function_index": 57406,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpGetPropIndex",
+      "function_index": 57435,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpGetPropTextureIndex",
+      "function_index": 57438,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpSetProp",
+      "function_index": 57436,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpClearProp",
+      "function_index": 57439,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpDrawableCount",
+      "function_index": 57383,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpTextureCount",
+      "function_index": 57385,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpShootBullet",
+      "function_index": 52891,
+      "parameters": [
+        "i64",
+        "i64",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpRevive",
+      "function_index": 57485,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpResurrect",
+      "function_index": 57486,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpClearTasksImmediately",
+      "function_index": 60722,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpRequestWeaponAsset",
+      "function_index": 62968,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpHasWeaponAsset",
+      "function_index": 62969,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    }
+  ],
+  "patches": [
+    {
+      "label": "script_context_callback",
+      "function_index": 16953,
+      "original_body_offset": 9966552,
+      "original_body_bytes": 32915,
+      "original_body_sha256": "1708011660672d8db72b6fbf8b96e21488ec78ca3b35ad63022e4ea63b319973",
+      "operation": "insert",
+      "offset": 115,
+      "bytes_hex": "200041c2a8c1ea04100b1a",
+      "expected_prefix_hex": "031a7e0c7f067d230042f00b7d220521082005240042b0d6ac07200042ac037c22143703002000280220221d417e714102470440200042c0017c210642a0d6ac07290300211a42a0d6ac072000370300230122024298187c221b41013a000020024290187c2218290300211920182000370300",
+      "expected_tail_hex": ""
+    },
+    {
+      "label": "pause_menu_callback",
+      "function_index": 36291,
+      "original_body_offset": 21691800,
+      "original_body_bytes": 24513,
+      "original_body_sha256": "77649c56f6a2303de1a31efd373ae4757fde6a95bf6e77d3cf33f8f1e6df3c63",
+      "operation": "insert",
+      "offset": 24504,
+      "bytes_hex": "420041c9aac1ea04100b1a",
+      "expected_prefix_hex": "",
+      "expected_tail_hex": "20064280047c24000b"
+    },
+    {
+      "label": "singleplayer_model_wrapper",
+      "function_index": 58868,
+      "original_body_offset": 32255576,
+      "original_body_bytes": 21,
+      "original_body_sha256": "2da78f899be175f6be54dc6295b7e1e15b1b569edfcf4dfe974aebc88f2d8130",
+      "operation": "replace",
+      "offset": 0,
+      "bytes_hex": "00010101010101010101010101010101010101010b",
+      "expected_prefix_hex": "002000290310220028020020002802081081ca030b",
+      "expected_tail_hex": ""
+    }
+  ]
+}
