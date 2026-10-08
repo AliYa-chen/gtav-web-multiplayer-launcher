@@ -155,7 +155,7 @@ pub fn https_url(value: &str) -> Result<String, String> {
 
 fn clean_title(value: &str) -> Result<String, String> {
     let value = text(value, 160, "oltitle")?;
-    if value.is_empty() || value.contains(['<', '>']) || value.contains(['\n', '\t']) {
+    if value.contains(['<', '>']) || value.contains(['\n', '\t']) {
         return Err("远程配置中的 oltitle 必须是单行文字或 HTTPS 地址。".into());
     }
     // A URL-like title cannot be used to smuggle an executable or insecure link.
@@ -424,6 +424,12 @@ mod tests {
         assert_eq!(parse_config(&serialized).unwrap(), config);
         let redundant = parse_config(br#"{"server":[{"id":"main","address":"localhost:47485"}],"servers":[{"id":"main","address":"localhost:47485"}]}"#).unwrap();
         assert_eq!(redundant.servers.len(), 1);
+        for bytes in [br#"{"server":{"address":"localhost:47485"}}"#.as_slice(),
+            br#"{"oltitle":"","server":[{"id":"main","address":"localhost:47485"}]}"#.as_slice()] {
+            let missing_title = parse_config(bytes).unwrap();
+            assert!(missing_title.oltitle.is_empty());
+            assert_eq!(parse_config(&serde_json::to_vec(&missing_title).unwrap()).unwrap(), missing_title);
+        }
     }
 
     #[test]
