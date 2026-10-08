@@ -85,7 +85,7 @@ Windows 便携 EXE（在 Windows 构建）：
 npm run tauri -- build --no-bundle
 ```
 
-产物位于 `desktop/src-tauri/target/release/`。GitHub 的“构建桌面启动器”工作流可手动分别构建 Windows x64 和 macOS ARM64；它只 checkout 源码，不能访问维护者的本地游戏目录。首次流程运行前需提交 `Cargo.lock` 和 `package-lock.json`，以固定依赖。
+产物位于 `desktop/src-tauri/target/release/`。GitHub 的“构建桌面启动器”工作流仅允许手动触发，普通提交和标签不会自动编译；需要用户明确要求构建后才运行。它可分别构建 Windows x64 和 macOS ARM64，只 checkout 源码，不能访问维护者的本地游戏目录。首次流程运行前需提交 `Cargo.lock` 和 `package-lock.json`，以固定依赖。
 
 维护者更新已支持的引擎适配描述：
 

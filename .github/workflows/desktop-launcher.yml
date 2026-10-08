@@ -1,8 +1,6 @@
 name: 构建桌面启动器
 on:
   workflow_dispatch:
-  push:
-    tags: ["launcher-v*"]
 permissions:
   contents: read
 jobs:
