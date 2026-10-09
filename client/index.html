@@ -20,9 +20,10 @@
 	.ls-cam { position: absolute; inset: 0; perspective: 1229px; perspective-origin: 640px 360px; }
 	.ls-layer { position: absolute; left: 0; top: 0; transform-origin: 0 0; background-size: 100% 100%; }
 	#ls-logo { position: absolute; left: 95px; top: 492.5px; width: 186px; height: 186px; }
-	#ls-bars { position: absolute; right: 96px; top: 642px; max-width: 1088px; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 3px; }
+	#ls-bars { position: absolute; right: max(24px, env(safe-area-inset-right)); bottom: max(28px, env(safe-area-inset-bottom)); max-width: calc(100vw - 48px); display: flex; justify-content: flex-end; gap: 3px; font: 12px Chalet, "Microsoft YaHei", "PingFang SC", sans-serif; }
 	.ls-bar { min-height: 24px; padding: 0 6px; display: flex; align-items: center; background: rgba(0, 0, 0, .706); border-radius: 2.4px; white-space: nowrap; }
-	#modes { gap: 8px; }
+	#modes { display: flex; gap: 8px; }
+	.launcher-entry #modes { display: none; }
 	#modes button { display: flex; align-items: center; height: 24px; padding: 0; border: 0; background: none; color: #fff; font: 12px Chalet, "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; cursor: pointer; }
 	#modes button:disabled { cursor: default; }
 	#modes button[hidden] { display: none; }
@@ -34,10 +35,12 @@
 	#label { max-width: 660px; white-space: normal; overflow-wrap: anywhere; text-shadow: .85px .85px 1px rgba(0, 0, 0, .45); }
 	#pct { margin-left: 15px; font-variant-numeric: tabular-nums; }
 	/* 暂时保留移植版的底部进度条；上方居中显示最新日志，再上方显示已下载的数据量。 */
-	#ls-log { position: absolute; left: 8px; right: 8px; bottom: 6px; display: flex; flex-direction: column; align-items: center; font: 10px/1.35 Consolas, "Microsoft YaHei", "PingFang SC", monospace; color: rgba(190, 190, 190, .75); text-shadow: 0 0 2px #000, 1px 1px 1px #000; white-space: pre; pointer-events: none; }
+	#ls-log { position: absolute; left: 8px; right: 8px; bottom: 6px; display: none; flex-direction: column; align-items: center; font: 10px/1.35 Consolas, "Microsoft YaHei", "PingFang SC", monospace; color: rgba(190, 190, 190, .75); text-shadow: 0 0 2px #000, 1px 1px 1px #000; white-space: pre; pointer-events: none; }
+	.diagnostics #ls-log { display: flex; }
 	#console { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 	#data { color: #6a9; }
-	#bar { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(255, 255, 255, .08); }
+	#bar { display: none; position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(255, 255, 255, .08); }
+	.diagnostics #bar { display: block; }
 	#fill { height: 100%; width: 0; background: #7cc576; }
 	#hud { position: fixed; left: 8px; bottom: 8px; max-width: 60vw; white-space: pre-wrap; opacity: .8; pointer-events: none; }
 	#fps { position: fixed; left: 8px; top: 6px; display: none; color: #0f0; font: bold 18px/1.2 Consolas, "Microsoft YaHei", "PingFang SC", monospace; font-variant-numeric: tabular-nums; text-shadow: 1px 1px 2px #000, 0 0 3px #000; pointer-events: none; z-index: 10; }
@@ -47,14 +50,14 @@
 <body>
 <canvas id="canvas" width="800" height="600" tabindex="-1"></canvas>
 <div id="hud"></div>
-<div id="loading"><div id="ls-stage"><div id="ls-screens"></div><img id="ls-logo" src="/b/8b0b5899ed/title/logo.png" alt=""><div id="ls-bars"><div id="modes" class="ls-bar"><button data-act="back"></button><button data-act="map5"></button><button data-act="map6"></button><button data-act="sandbox"></button><button data-act="story"></button><button data-act="online"></button></div><div class="ls-bar"><span id="label">正在启动…</span><span id="pct">0%</span><i class="ls-spin"></i></div></div></div><div id="ls-log"><div id="data"></div><div id="console"></div></div><div id="bar"><div id="fill"></div></div></div>
+<div id="loading"><div id="ls-stage"><div id="ls-screens"></div><img id="ls-logo" src="/b/8b0b5899ed/title/logo.png" alt=""></div><div id="ls-bars"><div id="modes" class="ls-bar"><button data-act="back"></button><button data-act="map5"></button><button data-act="map6"></button><button data-act="sandbox"></button><button data-act="story"></button><button data-act="online"></button></div><div class="ls-bar" role="status" aria-live="polite"><span id="label">正在启动…</span><span id="pct">0%</span><i class="ls-spin" aria-hidden="true"></i></div></div><div id="ls-log"><div id="data"></div><div id="console"></div></div><div id="bar"><div id="fill"></div></div></div>
 <div id="fps"></div>
 <div id="language-notice" role="status" aria-live="polite" hidden></div>
 <script type="module">
 import { t, getLanguage, initLanguage, onLanguageChange, translateText } from '/i18n.js';
 import { installGameAdapter } from '/multiplayer/game-adapter.js';
 import { watchOnlineConfiguration } from '/multiplayer/remote-config.js';
-import { installJoinModal, readPublicPreferences, consumePublicEntryIntent } from '/multiplayer/join-modal.js';
+import { installJoinModal, readPublicPreferences, consumePublicEntryIntent, launcherPublicEntry, savePublicEntry } from '/multiplayer/join-modal.js';
 import { startPublicSession } from '/multiplayer/public-session.js';
 // 浏览器版本的入口页。引擎在专用工作线程中运行（loader.js，相当于引擎的“主线程”，静态构造函数和
 // main() 在此执行，可能阻塞该线程）。页面仅持有 canvas，并将其交给该线程，再转交 GPU 工作线程。
@@ -70,13 +73,29 @@ function setUiText(element, source) {
 setUiText(document.getElementById('label'), () => t('page.starting'));
 const ROOM_GAME = location.pathname === '/play/';
 const q = new URLSearchParams(ROOM_GAME ? 'mode=sandbox' : location.search);
-const onlinePreferences = ROOM_GAME ? readPublicPreferences() : null;
+const LAUNCHER_ENTRY = new URLSearchParams(location.search).get('launcher') === '1';
+if (LAUNCHER_ENTRY) document.body.classList.add('launcher-entry');
+if (q.get('log') === '1' || q.get('console') === '1') document.body.classList.add('diagnostics');
+let launcherEntry = null, launcherEntryError = null;
+if (ROOM_GAME) {
+	try {
+		launcherEntry = launcherPublicEntry(new URLSearchParams(location.search), location.href);
+		if (launcherEntry) {
+			if (!savePublicEntry(launcherEntry)) throw new Error(t('join.saveFailed'));
+			const cleaned = new URL(location.href);
+			for (const field of ['name', 'server', 'preset', 'seed', 'lang']) cleaned.searchParams.delete(field);
+			history.replaceState(null, '', cleaned.pathname + cleaned.search + cleaned.hash);
+		}
+	} catch (error) { launcherEntryError = error.message; }
+}
+const onlinePreferences = ROOM_GAME && !launcherEntryError ? launcherEntry || readPublicPreferences() : null;
 const ONLINE_RECONNECT = ROOM_GAME && consumePublicEntryIntent(performance.getEntriesByType('navigation')[0]?.type);
 const ONLINE_LOADING = ONLINE_RECONNECT ? '恢复战局中' : '加入战局中';
 // 浏览器从页面快照恢复时，旧连接和工作线程已在 pagehide 关闭，需要重新初始化。
 if (ROOM_GAME) addEventListener('pageshow', (event) => { if (event.persisted) location.reload(); });
 let onlineConnectionReady = !ROOM_GAME;
 const joinModal = installJoinModal({ onJoin: () => location.assign('/play/') });
+if (launcherEntryError) joinModal.setMessage(launcherEntryError);
 const editingInput = (event) => joinModal.isOpen || Boolean(event.target?.closest?.('input,textarea,select,[contenteditable="true"]'));
 // 在线入口在页面捕获阶段拦截调试按键，避免将它们写入引擎的共享输入区。
 function stopOnlineDebugKey(e) {
@@ -226,8 +245,8 @@ let stopTitle = () => {};
 // 2 = GTA V 地图的沙盒模式（在随机位置自由探索，拥有所有武器），3 = env_test 的沙盒模式。引擎接收选择结果前允许更改
 // （约在加载到 62% 时读取 -level；未选择时在此等待，页面键帽闪烁提示）。之后只保留所选
 // 项目。?mode=story|sandbox 可提前指定模式；追加 &map=env_test 可进入 env_test 沙盒模式。
-let startMode = q.get('mode') === 'story' ? 1 : q.get('mode') === 'sandbox' ? (q.get('map') === 'env_test' ? 3 : 2) : 0;
-let startModeWord = null, startCommitted = ROOM_GAME, pickingMap = false, waitingChoice = false;		// waitingChoice：引擎正在等待模式选择。
+let startMode = q.get('mode') === 'story' ? 1 : q.get('mode') === 'sandbox' ? (q.get('map') === 'env_test' ? 3 : 2) : LAUNCHER_ENTRY ? 2 : 0;
+let startModeWord = null, startCommitted = ROOM_GAME || LAUNCHER_ENTRY, pickingMap = false, waitingChoice = false;		// 启动器选好模式；共享首页保留原来的访客模式选择。
 const ACTS = {		// 按钮定义：文案、键帽文字、按键代码。
 	back: ['返回', '退格', ['Backspace']],
 	map5: ['GTA V 地图', '5', ['Digit5', 'Numpad5']],
@@ -291,6 +310,7 @@ onLanguageChange(() => {
 	}
 	showModes();
 });
+let multiplayerAdapter = null, engineWorldReady = false;
 // ---- 加载进度：引擎（prejs.js、loader.js）和 GPU 工作线程通过 BroadcastChannel 发布 {pct, label} ------------------
 {
 	const loading = document.getElementById('loading'), fill = document.getElementById('fill'), label = document.getElementById('label'), pct = document.getElementById('pct');
@@ -322,7 +342,7 @@ onLanguageChange(() => {
 		if (m.choice && !startMode) { waitingChoice = true; modesEl.classList.add('ask'); showModes(); }		// 引擎正在等待选择，showModes 在状态文字中显示选择提示。
 		if (m.commit) { startCommitted = true; pickingMap = false; if (m.mode) startMode = m.mode; showModes(); }		// 引擎已接收选择结果。
 		if (m.compiling !== undefined && !waitingChoice) { lastLabel = 'Preparing shaders'; lastTranslations = null; setUiText(label, progressText); target = Math.max(target, 99); }		// 游戏世界已就绪；GPU 工作线程等待渲染管线编译完毕后再显示画面。
-		if (m.world) { ready = true; setUiText(hud, ROOM_GAME ? '点击游戏画面以锁定鼠标（Esc 释放鼠标）' : '点击游戏画面以锁定鼠标（Esc 释放鼠标，Shift+P 切换键盘模式，= 显示帧率）'); setTimeout(() => { setUiText(hud, ''); }, 15000); }
+		if (m.world === true) { engineWorldReady = true; multiplayerAdapter?.setEngineReady(); ready = true; setUiText(hud, ROOM_GAME ? '点击游戏画面以锁定鼠标（Esc 释放鼠标）' : '点击游戏画面以锁定鼠标（Esc 释放鼠标，Shift+P 切换键盘模式，= 显示帧率）'); setTimeout(() => { setUiText(hud, ''); }, 15000); }
 	};
 	// 两次报告之间，进度条缓慢前移，最多超过上次报告 6 个百分点，避免长时间加载阶段看起来像卡住。
 	const dataEl = document.getElementById('data');
@@ -477,7 +497,8 @@ const worker = new Worker(BASE + '/loader.js');
 		languageNoticeTimer = setTimeout(() => { notice.hidden = true; }, 8000);
 	});
 	addEventListener('pagehide', stopWorkerLanguage, { once: true });
-	const multiplayerAdapter = ROOM_GAME ? installGameAdapter(worker, publicSession, { watchOnlineConfiguration }) : null;
+	multiplayerAdapter = ROOM_GAME ? installGameAdapter(worker, publicSession, { watchOnlineConfiguration }) : null;
+	if (engineWorldReady) multiplayerAdapter?.setEngineReady();
 	worker.onmessage = (ev) => {
 		multiplayerAdapter?.onWorkerMessage(ev.data);
 		if (ev.data.hud) setUiText(hud, () => translateUiText(ev.data.hud));

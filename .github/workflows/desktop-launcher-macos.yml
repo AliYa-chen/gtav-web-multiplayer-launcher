@@ -34,10 +34,10 @@ jobs:
       - name: 验证 macOS 开发签名（未公证）
         run: codesign --verify --deep --strict --verbose=2 'desktop/src-tauri/target/release/bundle/macos/GTA5Data Launcher.app'
       - name: 打包 macOS 应用
-        run: ditto -c -k --sequesterRsrc --keepParent 'desktop/src-tauri/target/release/bundle/macos/GTA5Data Launcher.app' desktop/GTA5Data-Launcher-macOS-arm64-v0.2.12-development.zip
+        run: ditto -c -k --sequesterRsrc --keepParent 'desktop/src-tauri/target/release/bundle/macos/GTA5Data Launcher.app' desktop/GTA5Data-Launcher-macOS-arm64-v0.2.13-development.zip
       - name: 保存 macOS 构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: GTA5Data-Launcher-macOS-arm64-v0.2.12-development
-          path: desktop/GTA5Data-Launcher-macOS-arm64-v0.2.12-development.zip
+          name: GTA5Data-Launcher-macOS-arm64-v0.2.13-development
+          path: desktop/GTA5Data-Launcher-macOS-arm64-v0.2.13-development.zip
           if-no-files-found: error

@@ -92,6 +92,20 @@ class LanguageHttpTests(unittest.TestCase):
             serve_local.LocalServer(('127.0.0.1', 0), language='fr', game_root=self.game,
                 runtime_root=self.base / 'runtime', log_file=self.base / 'logs/browser.log')
 
+    def test_public_entry_keeps_launcher_identity_but_discards_engine_debug_options(self):
+        from urllib.parse import urlencode, urlsplit, parse_qs
+        entry={'launcher':'1','mode':'online','name':'局域玩家','server':'wss://example.com/session/ws',
+               'preset':'npc_male','seed':'47'}
+        with self.server('zh-CN') as (_server,base):
+            with urlopen(base+'/play/?'+urlencode(entry)) as response:
+                self.assertEqual(parse_qs(urlsplit(response.url).query),{key:[value] for key,value in entry.items()})
+                self.assertIn(b'launcherPublicEntry',response.read())
+            with urlopen(base+'/play/?'+urlencode({**entry,'args':'-dangerous','map':'env_test','console':'1'})) as response:
+                self.assertEqual(parse_qs(urlsplit(response.url).query),{key:[value] for key,value in entry.items()})
+            with urlopen(base+'/play/?name=host-player&server=example.com') as response:
+                self.assertEqual(urlsplit(response.url).query,'')
+        self.assertEqual(self.inventory(),self.before)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -25,9 +25,14 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
   let notices = [], nextNoticeId = 0;
   let nativeHud = false, lastNetworkNotice = '', lastGamePhase = '', lastKills = null;
   let shared = null;
+  let engineReady = false;
   let timer = 0;
   let closed = false;
-  let lastReport = '';
+  // Worker status types interleave every tick. Remember each type independently
+  // and coalesce its newest sample instead of posting one HTTP request per tick.
+  const reportHistory = new Map(), pendingReports = new Map();
+  let reportTimer = 0, reportTimeout = 0, reportInFlight = false, reportController = null;
+  let lastReportSentAt = -Infinity;
   let networkMessage = '', gameMessage = '';
   let lastCombatNotice = '', lastCombatNoticeAt = -Infinity;
   let remoteConfig = { oltitle: '-', source: 'unavailable', stale: true };
@@ -126,11 +131,77 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
   }
 
   function reportStatus(value) {
-    const text = JSON.stringify(value);
-    if (text === lastReport) return;
-    lastReport = text;
-    // 保存状态变化和错误，便于实际客户端复测；不输出调试面板或上传位置。
-    try { fetch('/log', { method: 'POST', body: '[public-client] ' + text }).catch(() => {}); } catch { /* 日志失败不影响同步 */ }
+    if (closed) return;
+    let serialized;
+    try { serialized = JSON.stringify(value); } catch { return; }
+    if (!serialized) return;
+    // Bound malformed diagnostics too; keep each log line valid JSON for probes.
+    if (serialized.length > 8192) serialized = JSON.stringify({ phase: value.phase,
+      message: String(value.message || value.text || '').slice(0, 2048),
+      ...(Array.isArray(value.tail) ? { tail: value.tail.slice(-8).map(line => String(line).slice(0, 256)) } : {}), truncated: true });
+    const kind = value.phase || 'unknown';
+    const key = kind + (kind === 'world_entity' ? ':' + String(value.entity_id).slice(0, 160)
+      : kind === 'script_policy' ? ':' + String(value.script).slice(0, 160) : '');
+    // A world transaction increments revision even when the displayed state is
+    // unchanged. Keep it in the diagnostic payload, not its change signature.
+    const signature = ['synchronizing', 'loading_avatar', 'recovering_avatar', 'dead', 'world_environment'].includes(kind)
+      ? JSON.stringify({ ...value, revision: undefined }) : serialized;
+    if (reportHistory.get(key) === signature) {
+      // A pending batch may still carry the latest observed revision without
+      // scheduling another request solely because that revision advanced.
+      if (pendingReports.has(key)) pendingReports.get(key).text = serialized;
+      return;
+    }
+    reportHistory.delete(key); reportHistory.set(key, signature);
+    while (reportHistory.size > 256) reportHistory.delete(reportHistory.keys().next().value);
+    const urgent = kind === 'error' || kind === 'engine_crash';
+    pendingReports.delete(key); pendingReports.set(key, { text: serialized, urgent });
+    while (pendingReports.size > 128) {
+      const oldestNormal = [...pendingReports].find(([, report]) => !report.urgent)?.[0];
+      pendingReports.delete(oldestNormal ?? pendingReports.keys().next().value);
+    }
+    scheduleReports(urgent);
+  }
+  function scheduleReports(urgent = false) {
+    if (closed || reportInFlight || !pendingReports.size) return;
+    if (reportTimer) {
+      if (!urgent) return;
+      clearTimeout(reportTimer); reportTimer = 0;
+    }
+    const interval = urgent ? 250 : 1000;
+    const delay = Math.max(0, interval - (performance.now() - lastReportSentAt));
+    if (urgent && delay === 0) { flushReports(); return; }
+    // First normal report is also batched, so startup statuses share one request.
+    reportTimer = setTimeout(flushReports, Number.isFinite(lastReportSentAt) ? delay : interval);
+  }
+  function flushReports() {
+    reportTimer = 0;
+    if (closed || reportInFlight || !pendingReports.size) return;
+    const lines = [];
+    let bytes = 0;
+    // Preserve urgent diagnostics before ordinary samples when the queue is full.
+    const entries = [...pendingReports].sort((a, b) => Number(b[1].urgent) - Number(a[1].urgent));
+    for (const [key, report] of entries) {
+      const line = '[public-client] ' + report.text;
+      const length = new TextEncoder().encode(line).length + 1;
+      if (lines.length >= 64 || bytes + length > 65536) break;
+      lines.push(line); bytes += length; pendingReports.delete(key);
+    }
+    reportInFlight = true; lastReportSentAt = performance.now();
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    reportController = controller;
+    let finished = false;
+    const complete = () => {
+      if (finished) return;
+      finished = true; clearTimeout(reportTimeout); reportTimeout = 0;
+      reportController = null; reportInFlight = false;
+      scheduleReports([...pendingReports.values()].some(report => report.urgent));
+    };
+    // A stalled diagnostics endpoint must never accumulate concurrent requests.
+    reportTimeout = setTimeout(() => { controller?.abort(); complete(); }, 5000);
+    try { Promise.resolve(fetch('/log', { method: 'POST', body: lines.join('\n'),
+      ...(controller ? { signal: controller.signal } : {}) })).then(complete, complete); }
+    catch { complete(); } // Logging failures never interrupt gameplay or retry old samples.
   }
 
   const crashes = new BroadcastChannel('game-crash');
@@ -144,7 +215,7 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
     if (!shared || closed) return;
     const packet = { ...session, peers: [...peers.values()], shots, combat, controls,
       notices: notices.map(({ id, value }) => ({ id, text: localize(value, true) })),
-      language: getLanguage(), world, world_events: worldEvents,
+      language: getLanguage(), engine_ready: engineReady, world, world_events: worldEvents,
       remote_config: remoteConfig, world_shots: worldShots, world_projectiles: [...projectiles.values()],
       world_areas: [...areaEffects.values()], world_effects: effectEvents, collision_queries: [...collisionQueries.values()] };
     const bytes = new TextEncoder().encode(JSON.stringify(packet));
@@ -391,9 +462,15 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
     stopRemoteConfiguration?.();
     stopLanguage?.();
     clearTimeout(timer);
+    clearTimeout(reportTimer); clearTimeout(reportTimeout);
+    reportController?.abort(); pendingReports.clear(); reportHistory.clear();
     sendLocal({ type: 'game_closed' });
     channel?.close();
     crashes.close();
   }, { once: true });
-  return { onWorkerMessage };
+  return { onWorkerMessage, setEngineReady() {
+    if (closed || engineReady) return;
+    engineReady = true;
+    schedule();
+  } };
 }

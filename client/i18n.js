@@ -18,6 +18,7 @@ const messages = Object.freeze({
   'join.hint': ['角色会生成随机服饰与适用妆容。选择同一条线路的玩家进入同一个 GTA V 公共战局。', 'Clothing and compatible makeup are randomized. Players on the same server join the same GTA V public session.'],
   'join.submit': ['加入战局', 'Join Session'],
   'join.defaultName': ['玩家', 'Player'],
+  'join.saveFailed': ['无法保存本次战局设置，请允许此页面使用会话存储后重试。', 'Could not save session settings. Allow session storage for this page, then try again.'],
   'join.checkPending': ['正在检查多人运行副本，请稍候…', 'Checking the multiplayer runtime, please wait…'],
   'join.checkMissing': ['多人运行副本尚未就绪。请先运行 python3 tools/build_multiplayer_client.py（自定义资源目录需附加对应的 --game-dir 和 --runtime-dir），再重启 serve_local.py 并刷新页面。', 'The multiplayer runtime is not ready. Run python3 tools/build_multiplayer_client.py (add --game-dir and --runtime-dir for custom resources), then restart serve_local.py and refresh this page.'],
   'page.crash': ['游戏已停止（{kind}）：{reason}{advice}', 'The game stopped ({kind}): {reason}{advice}'],

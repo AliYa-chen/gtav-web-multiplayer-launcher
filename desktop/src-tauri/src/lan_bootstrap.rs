@@ -107,17 +107,55 @@ pub fn start_with_language(address: Ipv4Addr, port: u16, https_port: u16, ca_cer
                 "/lan-guide-i18n.js" => respond(request,200,include_bytes!("lan-guide-i18n.js").to_vec(),"text/javascript; charset=utf-8",false),
                 "/ca.cer" => respond(request, 200, ca_certificate.clone(), "application/pkix-cert", true),
                 "/lan-probe.js" => respond(request, 200, PROBE.to_vec(), "text/javascript; charset=utf-8", false),
-                _ => respond(request, 200, page.as_bytes().to_vec(), "text/html; charset=utf-8", false),
+                _ => {
+                    let requested=target_game_url(request.url(),&https_url);
+                    let body=if let Some(target)=requested {
+                        let settings=serde_json::to_string(&serde_json::json!({"httpsUrl":target,"fingerprint":fingerprint})).unwrap()
+                            .replace('<',"\\u003c").replace('>',"\\u003e").replace('&',"\\u0026");
+                        GUIDE.replace("/*__LAN_SETTINGS__*/",&format!("window.LAN_SETTINGS = {settings};"))
+                    } else { page.clone() };
+                    respond(request, 200, body.into_bytes(), "text/html; charset=utf-8", false)
+                },
             }
         }
     }).map_err(|error| format!("无法启动证书安装引导线程：{error}"))?;
     Ok(BootstrapHandle { port, url, running, server: Some(server), dispatcher: Some(dispatcher) })
 }
 
+fn target_game_url(request: &str, https_base: &str) -> Option<String> {
+    let request=url::Url::parse(&format!("http://launcher.invalid{request}")).ok()?;
+    let entry=request.query_pairs().find(|(key,_)|key=="target")?.1;
+    if !entry.starts_with('/') || entry.starts_with("//") || entry.contains('\\') || entry.len()>4096 { return None; }
+    let target=url::Url::parse(https_base).ok()?.join(&entry).ok()?;
+    let allowed=["launcher","mode","map","name","server","preset","seed"];
+    if !matches!(target.path(),"/"|"/play/") || target.fragment().is_some()
+        || target.query_pairs().any(|(key,_)|!allowed.contains(&key.as_ref())) { return None; }
+    let query=target.query_pairs().collect::<std::collections::HashMap<_,_>>();
+    if matches!(target.path(),"/"|"/play/") && target.query().is_none() {return crate::launch::game_url(https_base,&entry).ok();}
+    if target.path()=="/play/" && !crate::launch::valid_online_query(target.query().unwrap_or_default()) {return None;}
+    if target.path()=="/" && query.get("launcher").map(|value|value.as_ref())!=Some("1") && !matches!(query.get("mode").map(|value|value.as_ref()),Some("story"|"sandbox")) { return None; }
+    if target.path()=="/" && !matches!(query.get("mode").map(|value|value.as_ref()),Some("story"|"sandbox")) { return None; }
+    if let Some(server)=query.get("server") { crate::launch::normalize_server(server).ok()?; }
+    crate::launch::game_url(https_base,&entry).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+    #[test]
+    fn owner_target_stays_on_the_resource_host_and_guest_target_has_no_identity() {
+        let base="https://192.168.1.2:8443/";
+        let entry=crate::launch::LaunchPreferences {name:"A & 中文".into(),server:"wss://example.com:47485/ws".into(),..Default::default()}.entry_path(4).unwrap();
+        let owner=crate::launch::guide_url("http://192.168.1.2:8442/",&entry).unwrap();
+        let relative=owner.split_once("8442").unwrap().1;
+        assert_eq!(target_game_url(relative,base),Some(crate::launch::game_url(base,&entry).unwrap()));
+        assert_eq!(target_game_url("/?target=%2F",base),Some(base.into()));
+        for target in ["https://attacker.example/","//attacker.example/play/","/play/?launcher=1&debug=1","/play/?launcher=1&name=A&name=B"] {
+            let request=crate::launch::guide_url("http://192.168.1.2:8442/",target).unwrap();
+            assert!(target_game_url(request.split_once("8442").unwrap().1,base).is_none());
+        }
+    }
 
     fn unused_port() -> u16 {
         std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap().local_addr().unwrap().port()

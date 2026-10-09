@@ -40,7 +40,7 @@ const captureFixture = () => ({
 const MAGIC = 0x4d505442;
 const peerState = (changes = {}) => ({ position: [710, -1080, 22], model: 0x705e61f2, heading: 120, health: 200,
   weapon: 0x1b06d571, shooting: false, ...changes });
-const packet = (changes = {}) => ({ connected: true, client_id: 'LOCAL', members: [{ id: 'LOCAL' }, { id: 'REMOTE' }],
+const packet = (changes = {}) => ({ connected: true, engine_ready: true, client_id: 'LOCAL', members: [{ id: 'LOCAL' }, { id: 'REMOTE' }],
   peers: [{ player_id: 'REMOTE', state: peerState() }], shots: [], ...changes });
 
 function engine(options = {}) {
@@ -277,6 +277,19 @@ function engine(options = {}) {
   if (options.noLocalPlayerResurrection) delete ex.mpResurrectLocalPlayer;
   if (options.noNativeNotices) { delete ex.mpBeginTheFeedPost; delete ex.mpEndTheFeedPostTicker; }
   const self = { postMessage(value) { if (options.throwPost) throw new Error('页面已关闭'); messages.push(value); } };
+  const startupBridgeCalls = [];
+  if (options.startupBridgeSpies) {
+    self.createWorldEntityBridge = () => ({
+      suppressPopulation() { startupBridgeCalls.push('population'); },
+      renderEffects() { startupBridgeCalls.push('effects'); },
+      sampleMelee() { startupBridgeCalls.push('melee'); },
+      update() { startupBridgeCalls.push('entities'); return { active: false }; }, clear() {},
+    });
+    self.createWorldEnvironmentBridge = () => ({
+      suppressLocalDispatch() { startupBridgeCalls.push('dispatch'); },
+      update() { startupBridgeCalls.push('environment'); }, reset() {},
+    });
+  }
   const context = vm.createContext({ self, performance: { now: () => now }, TextDecoder: BrowserTextDecoder, TextEncoder, Atomics,
     Int32Array, Uint8Array, DataView, BigInt, SharedArrayBuffer });
   if (options.worldBridge) vm.runInContext(worldSource, context, { filename: 'world-engine-bridge.js' });
@@ -309,9 +322,9 @@ function engine(options = {}) {
     publish(value);
     // 相同脚本和 handler 连续出现超过真实桥的 1200 ms 观察窗口。
     // 受控替身只能证明桥的选举分支；不证明实际游戏脚本的生命周期。
-    for (let index = 0; index < 13; index++) tick();
+    for (let index = 0; index < 14; index++) tick();
   };
-  return { memory, calls, messages, state, tick, setup, publish, connect, alive, blips, health, invincible, dead, ragdoll, ragdollAllowed, notifications,
+  return { memory, calls, messages, state, tick, setup, publish, connect, alive, blips, health, invincible, dead, ragdoll, ragdollAllowed, notifications, startupBridgeCalls,
     remotePositions, remoteHeadings, frozen, tasks, animations, uiCalls, occupiedVehicles, visualVectors, blipStyles,
     setBlipReady: (value) => { blipReady = value; }, setShootThrows: (value) => { shootThrows = value; },
     frontendTick: (at = now + 100) => { now = at; return imports.env.wasm_module_int_js(0n, 0x4d505549); },
@@ -353,19 +366,20 @@ function adapter(network = null, options = {}) {
   const channels = [], timers = new Map(), requests = [];
   const hud = { textContent: '', style: {} };
   let language = options.language || 'zh-CN', languageListener = null;
-  let nextTimer = 1;
+  let nextTimer = 1, now = 100, pagehide = null;
   class Channel {
     constructor(name) { this.name = name; this.posts = []; channels.push(this); }
     postMessage(value) { this.posts.push(value); }
     close() {}
   }
   const context = vm.createContext({ BroadcastChannel: Channel, TextEncoder, TextDecoder, Atomics, Int32Array,
-    Uint8Array, DataView, SharedArrayBuffer, performance: { now: () => 100 }, document: { getElementById: () => hud }, addEventListener() {},
+    Uint8Array, DataView, SharedArrayBuffer, AbortController, performance: { now: () => now }, document: { getElementById: () => hud },
+    addEventListener(name, callback) { if (name === 'pagehide') pagehide = callback; },
     getLanguage: () => language, translateText: value => value,
     localizeServerError: value => errorI18nContext.errorTranslator(value, language),
     onLanguageChange: callback => { languageListener = callback; return () => { languageListener = null; }; },
-    fetch(url, options) { requests.push({ url, ...options }); return Promise.resolve({ ok: true }); },
-    setTimeout(callback) { const id = nextTimer++; timers.set(id, callback); return id; },
+    fetch(url, request) { requests.push({ url, ...request }); return options.fetch ? options.fetch(url, request) : Promise.resolve({ ok: true }); },
+    setTimeout(callback, delay) { const id = nextTimer++; timers.set(id, { callback, delay }); return id; },
     clearTimeout(id) { timers.delete(id); } });
   vm.runInContext(adapterSource.replace(/^import .* from '\.\.\/i18n\.js';\n/m, '').replace('export function installGameAdapter', 'function installGameAdapter') +
     '\nglobalThis.installAdapter = installGameAdapter;', context, { filename: 'game-adapter.js' });
@@ -373,13 +387,16 @@ function adapter(network = null, options = {}) {
   const memory = { buffer: new SharedArrayBuffer(8192) }, block = 256, capacity = 4096;
   api.onWorkerMessage({ multiplayer: { type: 'memory', memory, block, capacity } });
   const receive = (data) => network ? network.receiver(data) : channels[0].onmessage({ data });
-  const flush = () => { const callbacks = [...timers.values()]; timers.clear(); for (const callback of callbacks) callback(); };
+  const flush = () => { const callbacks = [...timers.values()]; timers.clear(); for (const { callback } of callbacks) callback(); };
   const read = () => {
     const header = new Int32Array(memory.buffer, block, 4);
     assert.equal(Atomics.load(header, 0) & 1, 0, '快照发布后序号必须为偶数');
     return JSON.parse(new TextDecoder().decode(new Uint8Array(memory.buffer, block + 16, Atomics.load(header, 1))));
   };
   return { api, receive, flush, read, channels, requests, hud,
+    runTimer(delay) { const entry = [...timers].find(([, timer]) => timer.delay === delay); assert.ok(entry, `Missing ${delay} ms timer`); timers.delete(entry[0]); now += delay; entry[1].callback(); },
+    setNow(value) { now = value; }, close() { pagehide?.(); },
+    pendingTimers: () => [...timers.values()].map(timer => timer.delay),
     setLanguage: value => { language = value; languageListener?.({ language: value }); } };
 }
 
@@ -388,6 +405,24 @@ function directNetwork() {
     setReceiver(value) { this.receiver = value; },
     onWorkerMessage(value) { this.messages.push(value); } };
 }
+
+test('引擎就绪只来自页面确认，服务端就绪快照不能提前开启原生场景写入', () => {
+  const network=directNetwork(),page=adapter(network);
+  page.receive({type:'session',connected:true,client_id:'LOCAL',members:[{id:'LOCAL'}],engine_ready:true});
+  page.receive({type:'world_state',ready:true,world_epoch:'scene-test',entities:[],tombstones:[]});
+  page.flush();assert.equal(page.read().engine_ready,false);
+  page.api.setEngineReady();page.flush();assert.equal(page.read().engine_ready,true);
+  page.receive({type:'session',connected:false,client_id:null});page.flush();
+  assert.equal(page.read().engine_ready,true,'断线不恢复本地加载或剧情');
+  page.close();
+});
+
+test('页面早于共享内存收到真实场景确认时，新共享快照仍保留就绪状态', () => {
+  const page=adapter(directNetwork());
+  page.api.setEngineReady();page.api.setEngineReady();page.flush();
+  assert.equal(page.read().engine_ready,true);
+  page.close();page.api.setEngineReady();
+});
 
 test('同一来源的两个游戏页直接使用各自会话，不创建共享战局广播频道', () => {
   const a = directNetwork(), b = directNetwork();
@@ -581,6 +616,50 @@ test('统一网络层就绪观测只报告初始化状态，不创建网络对�
   }
 });
 
+test('网络世界基线先到不抢跑引擎启动，真实场景就绪才应用环境、创建实体和换模', () => {
+  const bridge = engine({ localModel: 0x9b22dbaf, startupBridgeSpies: true });
+  bridge.setup();
+  const policy = { revision: 1, story_enabled: false, local_script_mode: 'suspend_after_ready', allowed_scripts: [], mission_events: 'server_only' };
+  const remote = { kind: 'ped', player_id: 'REMOTE', model: 0x705e61f2, revision: 1,
+    components: { transform: { position: [710, -1080, 22], rotation: [0, 0, 0, 1] },
+      ped: { weapon: 0, shooting: false }, combat: { health: 200, alive: true, revision: 1 } } };
+  const value = packet({ engine_ready: false, world_v2: true, session_policy: policy,
+    world: { ready: true, entities: [remote], world_epoch: 'STARTUP' },
+    controls: [{ id: 9, event: { type: 'correction', player_id: 'LOCAL', position: [711, -1088, 22], revision: 1 } }] });
+  for (const flag of [undefined, false, null, 1, 'true']) {
+    bridge.publish({ ...value, engine_ready: flag });
+    for (let index = 0; index < 14; index++) bridge.tick();
+    for (const script of ['initial', 'main', 'main_persistent', 'player_controller']) assert.equal(bridge.scriptGate(script), 0);
+  }
+  assert.deepEqual(bridge.startupBridgeCalls, []);
+  assert.equal(bridge.calls.filter(call => /^mp(?:Create|SetPlayerModel|SetCoords|SetHealth|PauseDeathRestart|ForcePlaying|ScreenFadeIn)/.test(call.name)).length, 0);
+  assert.equal(bridge.messages.some(message => ['local_state', 'control_ack', 'world_readiness', 'lifecycle'].includes(message.multiplayer?.type)), false);
+  assert.equal(bridge.state.controlsEnabled, false, '仅安全保持输入禁用，不冻结启动VM');
+  assert.equal(bridge.calls.filter(call => call.name === 'mpSetPlayerControl').length, 1);
+  bridge.connect({ ...value, engine_ready: true, controls: [] });
+  assert.ok(bridge.startupBridgeCalls.includes('population'));
+  assert.ok(bridge.startupBridgeCalls.includes('environment'));
+  assert.ok(bridge.startupBridgeCalls.includes('entities'));
+  assert.equal(bridge.calls.filter(call => call.name === 'mpSetPlayerModel').length, 1);
+  assert.ok(bridge.calls.some(call => call.name === 'mpCreatePed'));
+  assert.ok(bridge.messages.some(message => message.multiplayer?.type === 'local_state'));
+  assert.equal(bridge.scriptGate('initial'), 1, '实际场景已加载、放置角色后才启用服务端脚本策略');
+  assert.equal(bridge.state.controlsEnabled, true);
+});
+
+test('初始角色缺失时不调用控制native，加载后断线仍保持已启用的剧情禁止策略', () => {
+  const policy = { revision: 1, story_enabled: false, local_script_mode: 'suspend_after_ready', allowed_scripts: [], mission_events: 'server_only' };
+  const bridge = engine({ localPed: 0 }); bridge.setup();
+  bridge.publish(packet({ engine_ready: false, world_v2: true, session_policy: policy, world: { ready: true, entities: [] } }));
+  bridge.tick(); assert.equal(bridge.scriptGate('initial'), 0);
+  assert.equal(bridge.calls.some(call => call.name === 'mpSetPlayerControl'), false);
+  bridge.setLocalPed(7);
+  bridge.connect(packet({ world_v2: true, session_policy: policy, world: { ready: true, entities: [] } }));
+  assert.equal(bridge.scriptGate('initial'), 1);
+  bridge.publish(packet({ connected: false, engine_ready: false, world_v2: false, world: null })); bridge.tick();
+  assert.equal(bridge.scriptGate('initial'), 1, '就绪消息或网络消失不能重新放开本地剧情VM');
+});
+
 test('无 handler 的线程不会消耗有效线程的节流窗口', () => {
   const bridge = engine();
   bridge.state.handler = 0n;
@@ -654,7 +733,7 @@ test('在线模型替换使用真实 PlayerId，换模后更新角色句柄并�
 
 test('实体写入等待同一脚本和 handler 持续观察，锁定后其他上下文不能执行同步写入', () => {
   const bridge = engine({ localModel: 0x0d7114c9 }); bridge.setup(); bridge.publish(packet());
-  for (let index = 0; index < 11; index++) bridge.tick();
+  for (let index = 0; index < 12; index++) bridge.tick();
   assert.equal(bridge.calls.filter((call) => call.name === 'mpCreatePed').length, 0);
   assert.equal(bridge.calls.filter((call) => call.name === 'mpSetPlayerModel').length, 0);
   bridge.tick();
@@ -992,9 +1071,11 @@ test('生命周期变化写入本地日志，重复诊断不反复请求也不�
   const postsBefore = page.channels[0].posts.length;
   page.api.onWorkerMessage({ multiplayer: value });
   page.api.onWorkerMessage({ multiplayer: value });
+  assert.equal(page.requests.length, before, 'normal diagnostics wait for their batch');
+  page.flush();
   assert.equal(page.requests.length, before + 1);
   assert.equal(page.requests.at(-1).url, '/log');
-  const report = JSON.parse(page.requests.at(-1).body.slice('[public-client] '.length));
+  const report = page.requests.at(-1).body.split('\n').map(line => JSON.parse(line.slice('[public-client] '.length))).find(report => report.phase === 'lifecycle');
   assert.equal(report.phase, 'lifecycle');
   assert.equal(report.replica_creates, 1);
   assert.equal(page.channels[0].posts.length, postsBefore);
@@ -1860,4 +1941,128 @@ test('小地图native暂不可用时限频重试，不中断角色同步', () =>
   bridge.state.radar.throwBackground = false; bridge.tick(bridge.now() + 600);
   assert.equal(bridge.state.radar.rendering, true);
   assert.equal(bridge.messages.filter(m => m.multiplayer?.type === 'bridge_error').length, 0);
+});
+
+const diagnosticLines = (page) => page.requests.flatMap(request => request.body.split('\n').map(line => JSON.parse(line.slice('[public-client] '.length))));
+const settleDiagnostics = async () => { await Promise.resolve(); await Promise.resolve(); };
+
+test('interleaved steady worker statuses are deduplicated by type and sent in one batch', async () => {
+  const page = adapter(), networkBefore = page.channels[0].posts.length;
+  const statuses = [
+    { type: 'world_readiness', mode: 'read_only', ped_tree_initialized: false },
+    { type: 'world_environment_status', weather: 'CLEAR', clock: [12, 0] },
+    { type: 'shot_visual', played: 0, expired: 0 },
+    { type: 'game_status', role_loading: true, peer_count: 0 },
+  ];
+  for (let tick = 0; tick < 1000; tick++) for (const value of statuses) page.api.onWorkerMessage({ multiplayer: value });
+  assert.equal(page.requests.length, 0);
+  page.runTimer(1000); await settleDiagnostics();
+  assert.equal(page.requests.length, 1);
+  assert.deepEqual(diagnosticLines(page).map(value => value.phase), ['engine_ready', 'world_readiness', 'world_environment', 'shot_visual', 'loading_avatar']);
+  for (let tick = 0; tick < 1000; tick++) for (const value of statuses) page.api.onWorkerMessage({ multiplayer: value });
+  assert.equal(page.requests.length, 1);
+  assert.ok(!page.pendingTimers().includes(1000));
+  assert.equal(page.channels[0].posts.length, networkBefore, 'diagnostics never enter the gameplay protocol');
+});
+
+test('steady game and environment revisions do not trigger HTTP while real state changes retain current revision', async () => {
+  const page = adapter();
+  const game = { type:'game_status', peer_count:1, client_id:'LOCAL', health:200, alive:true,
+    native_health:200, native_dead:false, weapon:0x1b06d571, weapon_ready:true };
+  const environment = { type:'world_environment_status', world_epoch:'WORLD', weather:'CLEAR', hour:12 };
+  for (let revision = 1; revision <= 100; revision++) {
+    page.api.onWorkerMessage({ multiplayer:{ ...game,revision } });
+    page.api.onWorkerMessage({ multiplayer:{ ...environment,revision } });
+  }
+  page.runTimer(1000); await settleDiagnostics();
+  assert.equal(diagnosticLines(page).find(value => value.phase === 'synchronizing').revision, 100);
+  assert.equal(diagnosticLines(page).find(value => value.phase === 'world_environment').revision, 100);
+  const sent = page.requests.length;
+  for (let revision = 101; revision <= 1000; revision++) {
+    page.api.onWorkerMessage({ multiplayer:{ ...game,revision } });
+    page.api.onWorkerMessage({ multiplayer:{ ...environment,revision } });
+  }
+  assert.equal(page.requests.length, sent); assert.ok(!page.pendingTimers().includes(1000));
+  assert.match(page.hud.textContent, /生命值 200/, 'HUD remains current independently of logging');
+  page.api.onWorkerMessage({ multiplayer:{ ...game,health:175,revision:1001 } });
+  page.api.onWorkerMessage({ multiplayer:{ ...environment,hour:13,revision:1001 } });
+  page.runTimer(1000); await settleDiagnostics();
+  const changed = diagnosticLines(page).slice(-2);
+  assert.equal(changed.find(value => value.phase === 'synchronizing').server_health, 175);
+  assert.equal(changed.find(value => value.phase === 'world_environment').hour, 13);
+  assert.ok(changed.every(value => value.revision === 1001));
+  page.api.onWorkerMessage({ multiplayer:{ ...environment,world_epoch:'NEXT',revision:1 } });
+  page.runTimer(1000); await settleDiagnostics();
+  assert.equal(diagnosticLines(page).at(-1).world_epoch, 'NEXT');
+});
+
+test('rapidly changing samples coalesce to latest values while entity diagnostics have bounded queues', async () => {
+  const page = adapter();
+  for (let seq = 0; seq < 1000; seq++) {
+    page.api.onWorkerMessage({ multiplayer: { type: 'shot_visual', played: seq, expired: 0 } });
+    page.api.onWorkerMessage({ multiplayer: { type: 'world_entity_status', entity_id: 'npc-' + seq, kind: 'ped', phase: 'created' } });
+  }
+  page.runTimer(1000); await settleDiagnostics();
+  assert.equal(page.requests.length, 1);
+  assert.ok(diagnosticLines(page).length <= 64);
+  page.runTimer(1000); await settleDiagnostics();
+  assert.equal(page.requests.length, 2);
+  const reports = diagnosticLines(page);
+  assert.ok(reports.length <= 128);
+  assert.equal(reports.find(value => value.phase === 'shot_visual').played, 999);
+  assert.ok(page.requests.every(request => Buffer.byteLength(request.body) <= 65536));
+});
+
+test('errors are immediately diagnostic, repeats deduplicate and later changes cannot create concurrent HTTP', async () => {
+  let release;
+  const page = adapter(null, { fetch: () => new Promise(resolve => { release = resolve; }) });
+  page.api.onWorkerMessage({ multiplayer: { type: 'bridge_error', message: 'cannot allocate sync buffers' } });
+  assert.equal(page.requests.length, 1);
+  assert.equal(diagnosticLines(page)[0].phase, 'error');
+  assert.match(page.hud.textContent, /cannot allocate sync buffers/);
+  for (let tick = 0; tick < 1000; tick++) {
+    page.api.onWorkerMessage({ multiplayer: { type: 'bridge_error', message: 'cannot allocate sync buffers' } });
+    page.api.onWorkerMessage({ multiplayer: { type: 'world_readiness', ready: false, count: tick } });
+  }
+  assert.equal(page.requests.length, 1);
+  page.api.onWorkerMessage({ multiplayer: { type: 'bridge_error', message: 'another distinct error' } });
+  assert.equal(page.requests.length, 1);
+  release({ ok: true }); await settleDiagnostics();
+  assert.ok(page.pendingTimers().includes(250));
+  page.runTimer(250);
+  assert.equal(page.requests.length, 2);
+  assert.equal(diagnosticLines(page).find(value => value.message === 'another distinct error').phase, 'error');
+  assert.equal(diagnosticLines(page).filter(value => value.message === 'cannot allocate sync buffers').length, 1);
+});
+
+test('stalled logging aborts after a bounded timeout, preserves latest queued diagnostics and closes on pagehide', async () => {
+  const page = adapter(null, { fetch: () => new Promise(() => {}) });
+  page.runTimer(1000);
+  page.api.onWorkerMessage({ multiplayer: { type: 'world_readiness', ready: true } });
+  assert.equal(page.requests.length, 1);
+  assert.equal(page.requests[0].signal.aborted, false);
+  page.runTimer(5000);
+  assert.equal(page.requests[0].signal.aborted, true);
+  assert.equal(page.requests.length, 1);
+  page.runTimer(0);
+  assert.equal(page.requests.length, 2);
+  assert.ok(diagnosticLines(page).some(value => value.phase === 'world_readiness'));
+  page.close();
+  assert.equal(page.requests[1].signal.aborted, true);
+  assert.equal(page.pendingTimers().length, 0);
+  page.api.onWorkerMessage({ multiplayer: { type: 'bridge_error', message: 'after close' } });
+  assert.equal(page.requests.length, 2);
+});
+
+test('diagnostic failures never prevent gameplay forwarding and oversized errors keep valid bounded JSON', async () => {
+  const network = directNetwork(), page = adapter(network, { fetch: () => { throw new Error('logging unavailable'); } });
+  page.api.onWorkerMessage({ multiplayer: { type: 'bridge_error', message: 'error'.repeat(10000) } });
+  assert.equal(page.requests.length, 1);
+  const error = diagnosticLines(page)[0];
+  assert.equal(error.phase, 'error'); assert.equal(error.truncated, true); assert.ok(error.message.length <= 2048);
+  page.api.onWorkerMessage({ multiplayer: { type: 'local_state', state: peerState() } });
+  assert.equal(network.messages.at(-1).type, 'local_state');
+  page.api.onWorkerMessage({ multiplayer: { type: 'shot_visual', played: 1 } });
+  page.runTimer(1000);
+  assert.equal(page.requests.length, 2);
 });

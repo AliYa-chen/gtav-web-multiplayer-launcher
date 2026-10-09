@@ -3,7 +3,7 @@ import argparse, errno, gzip, hashlib, io, ipaddress, json, mimetypes, posixpath
 from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit, unquote, parse_qs, urlencode
+from urllib.parse import urlsplit, unquote, parse_qs, parse_qsl, urlencode
 from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parent / 'gta5data'
@@ -386,10 +386,17 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_header('Cache-Control', 'no-store')
             self.end_headers()
             return io.BytesIO(body)
-        # 多人游戏入口只允许固定 GTA V 沙盒，不传递任何查询/调试参数。
-        if route.path == '/play' or (route.path == '/play/' and route.query):
+        # Preserve only the launcher's entry data. Engine/map/debug options are
+        # never forwarded into the fixed public-session sandbox.
+        launch_fields = ('launcher', 'mode', 'name', 'server', 'preset', 'seed')
+        launch_query = parse_qsl(route.query, keep_blank_values=True)
+        allowed_query = [(key, value) for key, value in launch_query if key in launch_fields]
+        if not any(key == 'launcher' and value == '1' for key, value in allowed_query):
+            allowed_query = []
+        safe_play_query = urlencode(allowed_query)
+        if route.path == '/play' or (route.path == '/play/' and route.query != safe_play_query):
             self.send_response(307)
-            self.send_header('Location', '/play/')
+            self.send_header('Location', '/play/' + ('?' + safe_play_query if safe_play_query else ''))
             self.send_header('Content-Length', '0')
             self.end_headers()
             return None

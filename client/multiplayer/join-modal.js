@@ -45,6 +45,47 @@ function serverOptionLabel(item) {
   return [localized?.name || translateText(item.name), localized?.role || translateText(item.role), item.display].filter(Boolean).join(' · ');
 }
 
+function cleanEntryPreferences(value, pageUrl) {
+  const name = typeof value?.name === 'string' ? value.name.trim() : '';
+  if (!name || Array.from(name).length > 24 || /[\u0000-\u001f\u007f]/.test(name)) {
+    throw new Error(translateText('请输入 1 至 24 个字符的昵称。'));
+  }
+  if (!ROLE_PRESETS.includes(value?.preset) || !Number.isInteger(value?.seed)
+      || value.seed < 0 || value.seed > 0xffffffff) {
+    throw new Error(translateText('服务器未能完成操作。'));
+  }
+  if (typeof value?.server !== 'string' || !value.server.trim() || value.server.length > 2048) {
+    throw new Error(translateText('请选择远程线路或输入服务器 IP:端口。'));
+  }
+  return { server: normalizeServerAddress(value.server, pageUrl), name, preset: value.preset, seed: value.seed };
+}
+
+// The launcher owns mode/character choices. Parse its one-time online handoff
+// without reading storage, changing DOM, selecting a fallback host or language.
+export function launcherPublicEntry(params, pageUrl = globalThis.location?.href) {
+  const query = params instanceof URLSearchParams ? params : new URLSearchParams(params);
+  if (query.get('launcher') !== '1' || new URL(pageUrl).pathname !== '/play/') return null;
+  for (const key of ['launcher', 'mode', 'name', 'server', 'preset', 'seed']) {
+    if (query.getAll(key).length > 1) throw new Error(translateText('服务器未能完成操作。'));
+  }
+  if (query.has('mode') && query.get('mode') !== 'online') throw new Error(translateText('服务器未能完成操作。'));
+  if (['name', 'server', 'preset', 'seed'].every(key => !query.has(key))) return null;
+  const seed = query.get('seed');
+  if (typeof seed !== 'string' || !/^(?:0|[1-9]\d{0,9})$/.test(seed)) throw new Error(translateText('服务器未能完成操作。'));
+  return cleanEntryPreferences({ name: query.get('name'), server: query.get('server'),
+    preset: query.get('preset'), seed: Number(seed) }, pageUrl);
+}
+
+export function savePublicEntry(preferences, storage, pageUrl = globalThis.location?.href) {
+  try {
+    const entry = cleanEntryPreferences(preferences, pageUrl);
+    storage ||= globalThis.sessionStorage;
+    storage.setItem(SESSION_KEY, JSON.stringify(entry));
+    storage.setItem(FRESH_JOIN_KEY, '1');
+    return true;
+  } catch { return false; }
+}
+
 export function readPublicPreferences(storage, pageUrl = globalThis.location?.href) {
   try {
     storage ||= globalThis.sessionStorage;
@@ -258,10 +299,9 @@ export function installJoinModal({ onJoin } = {}) {
     try { address = inputAddress(); }
     catch (error) { setMessage(error.message); server.focus(); return; }
     const preferences = { server: address, name, preset: preset.value, seed: newAppearanceSeed() };
-    try {
-      sessionStorage.setItem(SESSION_KEY, JSON.stringify(preferences));
-      sessionStorage.setItem(FRESH_JOIN_KEY, '1');
-    } catch { setMessage('浏览器禁止保存战局设置，请允许此网站的会话存储后重试。'); return; }
+    if (!savePublicEntry(preferences, undefined, location.href)) {
+      setMessage('浏览器禁止保存战局设置，请允许此网站的会话存储后重试。'); return;
+    }
     try { localStorage.setItem('gta5.multiplayer.nickname', name); } catch { /* 昵称本次仍会发送给服务器。 */ }
     savePanelPreferences(preferences, undefined, location.href);
     connectionAddress = address;

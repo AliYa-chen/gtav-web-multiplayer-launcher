@@ -1,9 +1,10 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import metadata from '../package.json';
-import { escapeHtml as html, displayDirectory, progressValue, readBackground, saveBackground, remotePresentation, launcherActions, paginateText, lanSettings, lanActions, lanRequest, clientCapacity, clientPage } from './view-state.js';
+import { escapeHtml as html, displayDirectory, progressValue, readBackground, saveBackground, remotePresentation, launcherActions, paginateText, lanSettings, lanActions, lanRequest, clientCapacity, clientPage, launchPreferences, launchServerOptions, launchRequest, displayLaunchServer } from './view-state.js';
 import { backgrounds } from './backgrounds.js';
 import { createTranslator, normalizeLanguageConfig, translateMessage, message, supportedPreferences } from './i18n.js';
+import { checkBrowserServers } from './server-health.js';
 import './style.css';
 
 const app = document.querySelector('#app');
@@ -16,6 +17,7 @@ const state = {
   remote: null, remoteBusy: false, remoteError: '', platform: '',
   announcementIndex: 0, clientPage: 0, clientCapacity: 2, clientFocusId: null, reading: null, readingPage: 0,
   updateRequired: false, caInstallFailed: false, caInstallError: '', caSystemStatus: null,
+  launch: launchPreferences(), launchDirty: false, serverAvailability: [], serverChecking: false, serverCatalog: '',
   lan: null, lanOpen: false, lanSettings: lanSettings(null),
 };
 const t = (key, params) => createTranslator(state.language.resolved)(key, params);
@@ -28,6 +30,7 @@ function applyLanguage(value) {
   state.language = next;
   state.languageInitialized = true;
 }
+let serverCheckPromise = null, serverCheckGeneration = 0;
 let caSystemRequest = null, caSystemRetryTimer = null;
 let clientMeasureFrame = null;
 let measuredFriendHeight = 0;
@@ -110,6 +113,7 @@ const icons = {
 };
 function updateStatus(value) {
   if (value.language) applyLanguage(value.language);
+  if (value.launch_preferences && !state.launchDirty) state.launch = launchPreferences(value.launch_preferences);
   const visibleIds = state.clients.slice(state.clientPage * state.clientCapacity, (state.clientPage + 1) * state.clientCapacity).map((client) => client.id);
   state.selected = value.selected_directory || state.selected;
   state.resources = value.resources || null;
@@ -141,7 +145,46 @@ function applyRemote(snapshot) {
   }
   if (state.updateRequired) { state.settingsOpen = false; state.reading = null; state.lanOpen = false; }
   if (snapshot?.source !== 'remote' || snapshot?.stale === true) state.reading = null;
+  const catalog = JSON.stringify(launchServerOptions(snapshot).map(item => [item.address, item.server, item.health_url]));
+  if (catalog !== state.serverCatalog) {
+    state.serverCatalog = catalog; state.serverAvailability = []; serverCheckGeneration++;
+    if (state.desktop && !state.updateRequired) void refreshServerAvailability();
+  }
 }
+async function refreshServerAvailability() {
+  if (!state.desktop || state.updateRequired) return;
+  if (serverCheckPromise) return serverCheckPromise;
+  const options = launchServerOptions(state.remote);
+  if (!options.length) { state.serverAvailability = []; return; }
+  const generation = serverCheckGeneration;
+  state.serverChecking = true; render();
+  serverCheckPromise = checkBrowserServers(options).then(values => {
+    if (generation !== serverCheckGeneration) return;
+    state.serverAvailability = options.map(option => {
+      const value = Array.isArray(values) ? values.find(item => item?.address === option.address) : null;
+      const available = value?.available === true && Number.isFinite(value.latency_ms) && value.latency_ms >= 0;
+      return { address: option.address, available, latency_ms: available ? Math.round(value.latency_ms) : null,
+        error: typeof value?.error === 'string' ? value.error : '' };
+    });
+    if (!state.launch.server) {
+      const first = state.serverAvailability.find(item => item.available);
+      if (first) state.launch.server = first.address;
+    }
+  }).catch(() => {
+    if (generation === serverCheckGeneration) state.serverAvailability = options.map(option => ({ address: option.address, available: false, latency_ms: null }));
+  }).finally(() => {
+    serverCheckPromise = null; state.serverChecking = false; render();
+    if (generation !== serverCheckGeneration) void refreshServerAvailability();
+  });
+  return serverCheckPromise;
+}
+function selectedServerAvailability() {
+  const options = launchServerOptions(state.remote);
+  const selected = options.find(item => item.address === state.launch.server || item.server === state.launch.server);
+  return selected && state.serverAvailability.find(item => item.address === selected.address);
+}
+function canUseSelectedServer() { return !state.serverChecking && selectedServerAvailability()?.available === true; }
+
 function render() {
   document.documentElement.lang = state.language.resolved;
   document.title = t('app.title');
@@ -149,12 +192,21 @@ function render() {
   const languageFocused = document.activeElement?.id === 'launcher-language';
   const focusedBackground = document.activeElement?.dataset?.background;
   const focusedUpdateAction = document.activeElement?.id;
+  const focusedLaunchField = document.activeElement?.dataset?.launchField ? document.activeElement : null;
   const focusedLanField = state.lanOpen && document.activeElement?.dataset?.lanField ? document.activeElement : null;
   const lanAddress = state.lan?.host_address || state.lan?.addresses?.[0] || '';
   const lanAddresses = [...new Set([...(state.lan?.addresses || []), ...(lanAddress ? [lanAddress] : [])])];
   const sharing = lanActions(state), caEnabled = state.desktop && !state.busy && !state.updateRequired;
   const caSystemTrusted = systemCaTrusted();
   const actions = launcherActions(state, state.remoteBusy), remote = remotePresentation(state.remote, state.version, state.platform, state.language.resolved);
+  const canVerify = actions.launch;
+  const launchServers = launchServerOptions(state.remote, state.language.resolved);
+  const selectedServer = state.launch.server ? displayLaunchServer(state.launch.server, launchServers) : '';
+  const existingOpen = primaryClient() && !state.launchDirty;
+  if (state.launch.mode === 'online') {
+    actions.launch = actions.launch && (existingOpen || canUseSelectedServer());
+    actions.additional = actions.additional && canUseSelectedServer();
+  }
   const background = backgrounds.find((item) => item.id === state.background) || backgrounds[0];
   state.announcementIndex = Math.min(state.announcementIndex, Math.max(0, remote.announcements.length - 1));
   state.clientPage = clientPage(state.clients, state.clientCapacity, state.clientPage);
@@ -181,8 +233,12 @@ function render() {
       <section class="glass launch-card"><div class="launch-main"><div class="launch-heading"><div class="section-heading"><span class="step-number">02</span><div><h2>${running ? t('launch.ready') : t('launch.title')}</h2></div></div>${running ? `<button id="stop" class="text-button launch-stop" title="${t('launch.stopAllHint')}" ${actions.stop ? '' : 'disabled'}>${t('launch.stopAll')}</button>` : ''}</div>
         <div class="progress-status ${state.error ? 'has-error' : ''}" role="status" aria-live="polite"><span class="${state.busy ? 'spinner' : 'status-dot'}"></span><span class="status-copy" title="${html(localText(state.error || state.message))}">${html(localText(state.error || state.message))}</span>${state.error ? `<button class="text-button" data-read="error">${t('launch.details')}</button>` : ''}</div>
         ${state.busy ? `<div class="progress-track"><span style="width:${progressValue(state.phase)}%"></span></div>` : ''}</div>
-        <div class="launch-actions"><button id="launch" class="primary" ${actions.launch ? '' : 'disabled'}>${primaryClient() ? t('launch.open') : state.busy ? t('launch.preparing') : t('launch.start')}${icons.arrow}</button>
-          ${running ? `<button id="additional" class="secondary" ${actions.additional ? '' : 'disabled'}>${t('launch.additional')}</button>` : `<button id="verify" class="text-button" ${actions.launch ? '' : 'disabled'}>${t('launch.verify')}</button>`}
+        <div class="launch-configuration"><div class="launch-mode" role="group" aria-label="${t('launch.mode')}">${['online', 'story', 'sandbox'].map(mode => `<button type="button" data-launch-mode="${mode}" aria-pressed="${state.launch.mode === mode}" ${state.busy ? 'disabled' : ''}>${t('launch.' + mode)}</button>`).join('')}</div><div class="launch-fields">${state.launch.mode === 'online' ? `<label>${t('launch.nickname')}<input id="launch-name" data-launch-field="name" value="${html(state.launch.name)}" maxlength="24" ${state.busy ? 'disabled' : ''}></label><label>${t('launch.preset')}<select id="launch-preset" data-launch-field="preset" ${state.busy ? 'disabled' : ''}>${['npc_male', 'npc_female', 'freemode_male', 'freemode_female'].map(preset => `<option value="${preset}" ${state.launch.preset === preset ? 'selected' : ''}>${t('launch.' + preset)}</option>`).join('')}</select></label><label class="launch-fields__server">${t('launch.server')}<div class="launch-server-control"><select id="launch-server" data-launch-field="server" ${state.busy || state.serverChecking ? 'disabled' : ''}><option value="" ${!selectedServer ? 'selected' : ''} disabled>${t(state.serverChecking ? 'launch.checkingRoutes' : 'launch.chooseRoute')}</option>${launchServers.map(item => {
+          const status = state.serverAvailability.find(value => value.address === item.address);
+          const available = !state.serverChecking && status?.available === true;
+          return `<option value="${html(item.address)}" ${selectedServer === item.address ? 'selected' : ''} ${available ? '' : 'disabled'}>${html(item.label)} · ${state.serverChecking || !status ? t('launch.checking') : available ? t('launch.latency', { ms: status.latency_ms }) : t('launch.unavailable')}</option>`;
+        }).join('')}${selectedServer && !launchServers.some(item => item.address === selectedServer) ? `<option value="${html(selectedServer)}" selected disabled>${html(selectedServer)} · ${t('launch.unavailable')}</option>` : ''}</select><button id="check-servers" type="button" class="text-button" ${state.serverChecking || state.busy || !state.desktop || !launchServers.length ? 'disabled' : ''}>${state.serverChecking ? t('launch.checking') : t('launch.checkRoutes')}</button></div><small class="launch-server-status" role="status">${state.serverChecking ? t('launch.checkingRoutes') : selectedServerAvailability()?.available ? t('launch.availableLatency', { ms: selectedServerAvailability().latency_ms }) : t('launch.chooseAvailableRoute')}</small></label>` : state.launch.mode === 'sandbox' ? `<label class="launch-fields__server">${t('launch.map')}<select id="launch-map" data-launch-field="map" ${state.busy ? 'disabled' : ''}>${['gtav', 'env_test'].map(map => `<option value="${map}" ${state.launch.map === map ? 'selected' : ''}>${t(map === 'gtav' ? 'launch.map5' : 'launch.map6')}</option>`).join('')}</select></label>` : ''}</div><small>${t(state.launch.mode === 'online' ? 'launch.onlineHint' : 'launch.offlineHint')}</small></div><div class="launch-actions"><button id="launch" class="primary" ${actions.launch ? '' : 'disabled'}>${primaryClient() ? t('launch.open') : state.busy ? t('launch.preparing') : t('launch.start')}${icons.arrow}</button>
+          ${running ? `<button id="additional" class="secondary" ${actions.additional ? '' : 'disabled'}>${t('launch.additional')}</button>` : `<button id="verify" class="text-button" ${canVerify ? '' : 'disabled'}>${t('launch.verify')}</button>`}
           ${state.desktop ? `<button id="lan-setup" class="secondary" ${sharing.configure ? '' : 'disabled'}>${t('launch.sharing')}</button>` : ''}</div>
         <div class="launch-details">${caSystemTrusted ? '' : `<div class="ca-trust-actions"><div><span>${t('ca.title')}</span><small title="${html(localText(state.caSystemStatus?.message || state.caSystemStatus?.error || ''))}">${html(state.caSystemStatus?.installed === true ? t('ca.installedUntrusted') : localText(state.caSystemStatus?.message) || t('ca.once'))}</small></div><div class="ca-trust-actions__buttons"><button id="ca-install" class="secondary" ${caEnabled ? '' : 'disabled'}>${t('ca.install')}</button><button id="ca-save" class="text-button" ${caEnabled ? '' : 'disabled'}>${t('ca.download')}</button></div>${state.caInstallFailed ? `<p class="ca-trust-fallback" role="status">${t('ca.fallback')}</p>` : ''}</div>`}
         ${running ? `<div class="client-list"><div class="client-list__heading"><span>${t('clients.title')}</span>${clientPages > 1 ? `<button id="clients-next" class="text-button client-page" aria-label="${t('clients.next')}">${state.clientPage + 1} / ${clientPages} ${icons.arrow}</button>` : state.clients.some((client) => !client.primary) ? `<small>${t('clients.sendToFriends')}</small>` : ''}</div><div class="addresses">${visibleClients.map((client) => {
@@ -208,6 +264,10 @@ function render() {
   }
   if (languageFocused && state.settingsOpen) document.querySelector('#launcher-language')?.focus({ preventScroll: true });
   if (focusedBackground && state.settingsOpen) document.querySelector(`[data-background="${focusedBackground}"]`)?.focus({ preventScroll: true });
+  if (focusedLaunchField) {
+    const replacement = document.querySelector(`#${focusedLaunchField.id}`); replacement?.focus({ preventScroll: true });
+    if (typeof focusedLaunchField.selectionStart === 'number') replacement?.setSelectionRange?.(focusedLaunchField.selectionStart, focusedLaunchField.selectionEnd);
+  }
   if (focusedLanField && state.lanOpen) {
     const replacement = document.querySelector(`#${focusedLanField.id}`);
     replacement?.focus({ preventScroll: true });
@@ -234,6 +294,7 @@ async function refreshRemote(forceRefresh = true) {
   state.remoteBusy = true; state.remoteError = ''; render();
   try {
     applyRemote(await invoke('remote_configuration', { forceRefresh }));
+    await refreshServerAvailability();
   } catch { applyRemote({ config: {}, source: 'unavailable', stale: true, error: '远程配置暂时无法加载，请稍后重试。' }); }
   finally { state.remoteBusy = false; render(); }
 }
@@ -246,6 +307,7 @@ async function prepare() {
 app.addEventListener('click', async (event) => {
   const target = event.target.closest('button'); if (!target || target.disabled) return;
   if (state.updateRequired && !['mandatory-update-download', 'mandatory-update-check'].includes(target.id)) return;
+  if (target.dataset.launchMode) { if (state.busy) return; state.launch.mode = target.dataset.launchMode; state.launchDirty = true; render(); return; }
   if (target.id === 'get-game-resources') {
     if (!state.desktop) return;
     try { await invoke('open_game_resource_page'); }
@@ -342,14 +404,22 @@ app.addEventListener('click', async (event) => {
     const value = await invoke('choose_game_directory');
     if (value) { state.selected = value; state.resources = null; state.phase = ''; state.message = message('message.directoryChosen'); }
   });
+  else if (target.id === 'check-servers') await refreshServerAvailability();
   else if (target.id === 'verify') await operation(prepare);
   else if (target.id === 'launch') await operation(async () => {
+    if (primaryClient() && !state.launchDirty) { await openClient(primaryClient()); state.message = message('message.gameOpened'); return; }
+    if (state.launch.mode === 'online') { launchRequest(state.launch, state.remote); await refreshServerAvailability(); }
+    const launch = launchRequest(state.launch, state.remote, state.serverAvailability);
+    if (!state.resources) await prepare();
     if (!primaryClient()) {
-      if (!state.resources) await prepare();
       requireCurrentVersion();
       const caStatus = refreshCaSystemStatus(true);
-      updateStatus(await invoke('start_game', { additional: false }));
+      const status = await invoke('start_game', { additional: false, launch });
+      state.launchDirty = false; updateStatus(status);
       await caStatus;
+    } else {
+      const status = await invoke('start_game', { additional: false, launch });
+      state.launchDirty = false; updateStatus(status);
     }
     requireCurrentVersion();
     const client = primaryClient();
@@ -359,7 +429,8 @@ app.addEventListener('click', async (event) => {
   else if (target.id === 'additional' && launcherActions(state).additional) await operation(async () => {
     requireCurrentVersion();
     const previousIds = new Set(state.clients.map((client) => client.id));
-    updateStatus(await invoke('start_game', { additional: true }));
+    if (state.launch.mode === 'online') await refreshServerAvailability();
+    updateStatus(await invoke('start_game', { additional: true, launch: launchRequest(state.launch, state.remote, state.serverAvailability) }));
     const added = state.clients.find((client) => !previousIds.has(client.id));
     if (added) {
       const page = clientPage(state.clients, state.clientCapacity, state.clientPage, added.id);
@@ -381,11 +452,18 @@ app.addEventListener('click', async (event) => {
   }
 });
 app.addEventListener('input', (event) => {
+  const launchField = event.target?.dataset?.launchField;
+  if (launchField && launchField !== 'server' && !state.busy) { state.launch[launchField] = event.target.value; state.launchDirty = true; return; }
   const field = event.target?.dataset?.lanField;
   if (!field || !state.lanOpen || state.busy || state.urls.length) return;
   state.lanSettings[field] = event.target.value;
 });
 app.addEventListener('change', async (event) => {
+  const launchField = event.target?.dataset?.launchField;
+  if (launchField && !state.busy) {
+    if (launchField === 'server' && (state.serverChecking || !state.serverAvailability.some(item => item.address === event.target.value && item.available))) return;
+    state.launch[launchField] = event.target.value; state.launchDirty = true; render(); return;
+  }
   if (event.target?.id === 'launcher-language') {
     const preference = event.target.value;
     if (state.languageBusy || !supportedPreferences.includes(preference) || state.updateRequired) return;
@@ -453,8 +531,10 @@ render();
 if (state.desktop) {
   listen('language-change', ({ payload }) => { applyLanguage(payload); render(); });
   listen('launcher-progress', ({ payload }) => { state.phase = payload.phase; state.message = payload.text; render(); });
-  listen('launcher-remote-config', ({ payload }) => { applyRemote(payload); render(); });
+  listen('launcher-remote-config', ({ payload }) => { applyRemote(payload); render(); if (payload?.source === 'remote' && !payload.stale) void refreshServerAvailability(); });
   void refreshCaSystemStatus();
   invoke('launcher_status').then(updateStatus).then(render).catch((error) => { state.languageInitialized = true; state.error = String(error); render(); }).finally(() => refreshRemote(false));
   setInterval(() => refreshRemote(true), 5 * 60 * 1000);
+  setInterval(() => { if (document.visibilityState !== 'hidden') void refreshServerAvailability(); }, 30000);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') void refreshServerAvailability(); });
 } else { state.message = message('message.preview'); render(); }

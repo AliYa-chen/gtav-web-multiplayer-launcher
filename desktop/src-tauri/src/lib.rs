@@ -8,6 +8,7 @@ mod lan_ca_embedded;
 mod lan_bootstrap;
 mod ca_trust;
 mod language;
+mod launch;
 
 use include_dir::{include_dir, Dir};
 use serde::{Deserialize, Serialize};
@@ -17,13 +18,13 @@ use tauri::{Emitter, Manager, State};
 static CLIENT: Dir<'_> = include_dir!("$OUT_DIR/embedded-client");
 
 #[derive(Default, Deserialize, Serialize)]
-struct Preferences { selected_directory: Option<String>, #[serde(default)] lan_settings: Option<lan::Settings>, #[serde(default)] language: Option<String> }
+struct Preferences { selected_directory: Option<String>, #[serde(default)] lan_settings: Option<lan::Settings>, #[serde(default)] language: Option<String>, #[serde(default)] launch: Option<launch::LaunchPreferences> }
 struct Prepared { resources: resources::ResourceInfo, runtime: PathBuf, fonts: HashMap<String, PathBuf> }
-struct GameClient { id: u64, number: u64, primary: bool, guide: lan_bootstrap::BootstrapHandle, server: http_server::ServerHandle }
+struct GameClient { id: u64, number: u64, primary: bool, launch: launch::LaunchPreferences, seed: u32, guide: lan_bootstrap::BootstrapHandle, server: http_server::ServerHandle }
 struct ClientIdentity { id: u64, primary: bool }
 #[derive(Default)]
 struct Inner { selected: Option<String>, prepared: Option<Prepared>, clients: Vec<GameClient>,
-    lan_settings: lan::Settings, last_client_id: u64,
+    launch: launch::LaunchPreferences, lan_settings: lan::Settings, last_client_id: u64,
     lan_address: Option<String>, lan_fingerprint: Option<String> }
 struct LauncherState { inner: Mutex<Inner>, busy: Arc<AtomicBool>, remote_busy: Arc<AtomicBool>,
     update_required: Arc<AtomicBool>, shutting_down: AtomicBool, remote: Arc<RwLock<serde_json::Value>>, language: language::SharedLanguage }
@@ -44,7 +45,7 @@ fn acquire(state: &LauncherState) -> Result<BusyGuard, String> {
 
 #[derive(Serialize)]
 struct LauncherStatus { selected_directory: Option<String>, resources: Option<resources::ResourceInfo>, clients: Vec<ClientStatus>, running_urls: Vec<String>, invitation_urls: Vec<String>,
-    version: &'static str, platform: &'static str, update_required: bool, remote_configuration: serde_json::Value, lan: LanStatus, language: language::LanguageConfig }
+    version: &'static str, platform: &'static str, update_required: bool, remote_configuration: serde_json::Value, lan: LanStatus, language: language::LanguageConfig, launch_preferences: launch::LaunchPreferences }
 #[derive(Serialize)]
 struct ClientStatus { id: u64, number: u64, primary: bool, running_url: String, invitation_url: String }
 #[derive(Serialize)]
@@ -98,11 +99,11 @@ fn snapshot(inner: &Inner, state: &LauncherState) -> LauncherStatus {
     }).unwrap_or_else(|_| (serde_json::Value::Null, state.update_required.load(Ordering::Acquire)));
     LauncherStatus { selected_directory: inner.selected.clone(), resources: inner.prepared.as_ref().map(|p| p.resources.clone()),
         clients: inner.clients.iter().map(|client| ClientStatus { id: client.id, number: client.number, primary: client.primary,
-            running_url: client.server.url(), invitation_url: client.guide.url() }).collect(),
-        running_urls: inner.clients.iter().map(|client| client.server.url()).collect(),
-        invitation_urls: inner.clients.iter().map(|client| client.guide.url()).collect(), version: env!("CARGO_PKG_VERSION"), platform: platform_key(),
-        update_required, remote_configuration, language: language::snapshot(&state.language), lan: LanStatus { settings: inner.lan_settings.clone(), addresses: lan::addresses(),
-            running_url: primary_client(inner).map(|client| client.server.url()), guide_url: primary_client(inner).map(|client| client.guide.url()),
+            running_url: client_running_url(client), invitation_url: client_invitation_url(client) }).collect(),
+        running_urls: inner.clients.iter().map(client_running_url).collect(),
+        invitation_urls: inner.clients.iter().map(client_invitation_url).collect(), version: env!("CARGO_PKG_VERSION"), platform: platform_key(),
+        update_required, remote_configuration, launch_preferences: inner.launch.clone(), language: language::snapshot(&state.language), lan: LanStatus { settings: inner.lan_settings.clone(), addresses: lan::addresses(),
+            running_url: primary_client(inner).map(client_running_url), guide_url: primary_client(inner).map(|client| launch::guide_url(&client.guide.url(),&shared_entry(client)).unwrap_or_else(|_|client.guide.url())),
             host_address: inner.lan_address.clone(), ca_fingerprint: inner.lan_fingerprint.clone().or_else(|| ca_trust::fingerprint().ok()) } }
 }
 fn preferences_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -115,7 +116,7 @@ fn save_preferences(app: &tauri::AppHandle, inner: &Inner) -> Result<(), String>
 fn save_preferences_with_language(app: &tauri::AppHandle, inner: &Inner, preference: Option<String>) -> Result<(), String> {
     let path = preferences_path(app)?;
     write_preferences(&path,&Preferences { selected_directory: inner.selected.clone(),
-        lan_settings: Some(inner.lan_settings.clone()), language: preference })
+        lan_settings: Some(inner.lan_settings.clone()), language: preference, launch: Some(inner.launch.clone()) })
 }
 fn write_preferences(path: &Path, preferences: &Preferences) -> Result<(), String> {
     use std::io::Write;
@@ -214,8 +215,17 @@ fn start_client_with_identity(prepared: &Prepared, lan: lan::PreparedLan, identi
     })?;
     // 引导端口不可用时回滚 HTTPS，只有两者都成功才发布客户端。
     let guide = lan_bootstrap::start_with_language(ip, lan.settings.http_port, server.port(), lan.ca_certificate, lan.fingerprint,language)?;
-    Ok(GameClient { id: identity.id, number: identity.id, primary: identity.primary, guide, server })
+    Ok(GameClient { id: identity.id, number: identity.id, primary: identity.primary, launch: launch::LaunchPreferences::default(), seed: 0, guide, server })
 }
+
+fn client_running_url(client: &GameClient) -> String {
+    let entry=if client.primary {client.launch.entry_path(client.seed).unwrap_or_default()} else {shared_entry(client)};
+    launch::game_url(&client.server.url(),&entry).unwrap_or_else(|_|client.server.url())
+}
+fn client_invitation_url(client: &GameClient) -> String {
+    launch::guide_url(&client.guide.url(),&shared_entry(client)).unwrap_or_else(|_|client.guide.url())
+}
+fn shared_entry(_client: &GameClient) -> String { "/".into() }
 
 fn next_client_identity(inner: &Inner, additional: bool) -> Result<Option<ClientIdentity>, String> {
     if !additional && primary_client(inner).is_some() { return Ok(None); }
@@ -229,11 +239,26 @@ fn client_settings(inner: &Inner, additional: bool) -> Result<lan::Settings, Str
 }
 
 #[tauri::command]
-async fn start_game(app: tauri::AppHandle, state: State<'_, LauncherState>, additional: bool) -> Result<LauncherStatus, String> {
+async fn start_game(app: tauri::AppHandle, state: State<'_, LauncherState>, additional: bool, launch: Option<launch::LaunchPreferences>) -> Result<LauncherStatus, String> {
     ensure_current_launcher(&state)?;
     let _guard = acquire(&state)?;
+    let mut requested = {
+        let inner=state.inner.lock().map_err(|e|e.to_string())?;
+        launch.unwrap_or_else(||inner.launch.clone())
+    };
+    if requested.mode=="online" {
+        let config=configured_remote(&state)?;
+        let selected=launch::configured_server(&config,&requested.server)
+            .ok_or("请选择远程配置提供的服务器线路。")?;
+        let endpoint=launch::server_endpoint(&selected)?;
+        requested.server=endpoint;
+    }
     let (settings, address, identity) = {
-        let inner = state.inner.lock().map_err(|e| e.to_string())?;
+        let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+        let next = requested.validate()?;
+        let previous=inner.launch.clone();inner.launch=next.clone();
+        if let Err(error)=save_preferences(&app,&inner){inner.launch=previous;return Err(error);}
+        if !additional { if let Some(client)=inner.clients.iter_mut().find(|client|client.primary) {client.launch=next;} }
         let Some(identity) = next_client_identity(&inner, additional)? else { return Ok(snapshot(&inner, &state)); };
         inner.prepared.as_ref().ok_or("请先选择并校验游戏资源。")?;
         let address = inner.lan_address.clone().or_else(|| inner.lan_settings.address.clone())
@@ -255,8 +280,11 @@ async fn start_game(app: tauri::AppHandle, state: State<'_, LauncherState>, addi
         .and_then(|config| config.server.map(|server| server.websocket_url.unwrap_or(server.address)))
         .unwrap_or_else(|| "183.66.27.21:47485".to_string());
     let id = identity.id;
-    let client = start_client_with_identity(prepared, lan, identity, &app.path().app_log_dir().map_err(|e| e.to_string())?,
+    let mut client = start_client_with_identity(prepared, lan, identity, &app.path().app_log_dir().map_err(|e| e.to_string())?,
         state.remote.clone(), multiplayer_server,state.language.clone())?;
+    client.launch=inner.launch.clone();
+    if additional { client.launch.name=format!("{}-{}",client.launch.name.chars().take(18).collect::<String>(),id); }
+    client.seed=(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos() as u32)^id as u32;
     inner.last_client_id = id;
     inner.clients.push(client);
     inner.lan_address = Some(address);
@@ -324,7 +352,8 @@ fn open_game(state: State<'_, LauncherState>, id: Option<u64>, index: Option<usi
     let inner = state.inner.lock().map_err(|e| e.to_string())?;
     let client = find_client(&inner, id, index)?;
     // 未确认信任时先打开 HTTP 引导；引导页验证 HTTPS 后自动进入对应客户端。
-    let url = if trusted.unwrap_or(false) { client.server.url() } else { client.guide.url() };
+    let entry=if client.primary {client.launch.entry_path(client.seed)?} else {shared_entry(client)};
+    let url = if trusted.unwrap_or(false) { launch::game_url(&client.server.url(),&entry)? } else { launch::guide_url(&client.guide.url(),&entry)? };
     drop(inner);
     open::that(url).map_err(|e| format!("无法打开默认浏览器，请复制客户端邀请地址手动打开：{e}"))
 }
@@ -498,6 +527,7 @@ pub fn run() {
             let mut inner = state.inner.lock().unwrap();
             inner.selected = settings.selected_directory;
             inner.lan_settings = settings.lan_settings.unwrap_or_default();
+            inner.launch = settings.launch.and_then(|value|value.validate().ok()).unwrap_or_default();
             *state.language.write().unwrap()=language::LanguageConfig::with_preference(settings.language.as_deref().unwrap_or("system"),1).unwrap_or_default();
             drop(inner);
             update_native_language(app.handle(),&state);
@@ -580,7 +610,7 @@ mod update_gate_tests {
         let old: Preferences=serde_json::from_str(r#"{"selected_directory":"/games/player-data"}"#).unwrap();
         assert_eq!(old.selected_directory.as_deref(),Some("/games/player-data"));
         assert!(old.language.is_none());
-        let saved=Preferences { language:Some("en".into()),..old };
+        let saved=Preferences { language:Some("en".into()), launch: None,..old };
         let reloaded:Preferences=serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap();
         assert_eq!(reloaded.language.as_deref(),Some("en"));
     }
@@ -592,7 +622,7 @@ mod update_gate_tests {
         fs::write(&path,b"previous preferences").unwrap();
         let linked=temp.path().join("player-original");
         fs::hard_link(&path,&linked).unwrap();
-        write_preferences(&path,&Preferences { language:Some("en".into()),..Default::default() }).unwrap();
+        write_preferences(&path,&Preferences { language:Some("en".into()), launch: None,..Default::default() }).unwrap();
         assert_eq!(fs::read(&linked).unwrap(),b"previous preferences");
         let saved:Preferences=serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved.language.as_deref(),Some("en"));

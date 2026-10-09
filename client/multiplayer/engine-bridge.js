@@ -307,11 +307,18 @@ self.prepareMultiplayerBridge = function (imports) {
       const name = contextName(thread);
       const candidates = [packet?.world?.session_policy, packet?.session_policy].filter(Boolean);
       const nextPolicy = candidates.sort((a, b) => b.revision - a.revision)[0];
-      if (nextPolicy && !publicRulesActive && packet?.connected) {
+      if (nextPolicy && !publicRulesActive && packet?.connected && !bootstrapControlsHeld) {
         // 启动VM完成模型/地图加载前，玩家输入不能进入单机任务触发区。
-        ex.mpSetPlayerControl?.(ex.mpPlayerId(), 0, 0); bootstrapControlsHeld = true;
+        // 游戏加载阶段可能尚无角色；不可对缺失或无效句柄调用控制 native。
+        try {
+          const ped = ex.mpGetPlayerPed(-1);
+          if (ped > 0 && ex.mpExists(ped) && ex.mpSetPlayerControl && ex.mpPlayerId) {
+            ex.mpSetPlayerControl(ex.mpPlayerId(), 0, 0); bootstrapControlsHeld = true;
+          }
+        } catch { /* 初始角色和原生控制尚未可用时保留加载VM，下次回调重试。 */ }
       }
-      if (sessionId && initialPlacement && packet?.world_v2 && (!nextPolicy || packet?.world?.ready)) publicRulesActive = true;
+      if (packet?.engine_ready === true && sessionId && initialPlacement && packet?.world_v2
+          && (!nextPolicy || packet?.world?.ready)) publicRulesActive = true;
       const online = publicRulesActive;
       if (online && nextPolicy?.story_enabled === false && nextPolicy.local_script_mode === 'suspend_after_ready'
           && nextPolicy.mission_events === 'server_only' && Number.isSafeInteger(nextPolicy.revision)
@@ -796,6 +803,11 @@ self.prepareMultiplayerBridge = function (imports) {
           post({ type: 'memory', memory, block, capacity: CAPACITY });
         }
         readPacket();
+        // 服务端快照 ready 只表示网络基线完整，不能证明本地引擎完成场景加载。
+        // 页面收到 GPU 的真实场景/稳定帧事件后通过共享快照打开此门槛。
+        // 启动阶段只分配通信缓冲、读取快照；原VM继续完成加载，不创建实体、
+        // 换模、放置角色、改变环境或提交任何仿真。原生UI与安全输入保持独立。
+        if (packet?.engine_ready !== true) return;
         worldEntities?.suppressPopulation(packet);
         environmentBridge?.suppressLocalDispatch(packet);
         if (!useOwner(thread, handler, now)) return;

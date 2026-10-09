@@ -175,6 +175,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   let lastSentState = null, lastCombatResultSequence = -1;
   let lastStateSentAt = -Infinity, lastShotSentAt = -Infinity;
   let lastStatus = '', latestStatusSource = null;
+  const statusLogHistory = new Map();
   let readyResolve, readyReject, initialDone = false;
   const ready = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
   // 首次连接失败由入口页处理；后续断线保持游戏运行并自动重连。
@@ -236,7 +237,12 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     try { onStatus(value); } catch { /* 界面回调不应中断连接。 */ }
     emit(latestStatus);
     // 只记录连接目标和玩家数量变化，不输出坐标、外观或逐帧状态。
-    try { fetch('/log', { method: 'POST', body: '[public-session] ' + encoded }).catch(() => {}); } catch {}
+    // Periodic membership/sync callbacks still reach the HUD, while each phase
+    // logs only when its own state changed instead of alternating every poll.
+    if (statusLogHistory.get(phase) !== encoded) {
+      statusLogHistory.set(phase, encoded);
+      try { fetch('/log', { method: 'POST', body: '[public-session] ' + encoded }).catch(() => {}); } catch {}
+    }
   }
   function postSession() {
     const connected = Boolean(room && profiled);
@@ -974,6 +980,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     clearTimeout(reconnectTimer);
     reconnectTimer = 0;
     if (stopped || socket) return;
+    statusLogHistory.clear(); // A new transport is a real connection lifecycle.
     status('connecting', '正在连接服务器');
     let current;
     try { current = new WebSocket(address); }

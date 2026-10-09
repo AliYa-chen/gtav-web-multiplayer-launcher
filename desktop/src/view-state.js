@@ -144,3 +144,63 @@ export function lanRequest(settings, language = 'zh-CN') {
   if (!(a === 10 || a === 172 && b >= 16 && b <= 31 || a === 192 && b === 168 || a === 169 && b === 254 || a === 100 && b >= 64 && b <= 127)) throw new Error(t('lan.invalidAddress'));
   return { port, httpPort, address };
 }
+
+export function launchPreferences(value = {}) {
+  return { mode: ['online', 'story', 'sandbox'].includes(value.mode) ? value.mode : 'online',
+    name: typeof value.name === 'string' ? value.name : '玩家1', server: typeof value.server === 'string' ? value.server : '',
+    preset: ['npc_male', 'npc_female', 'freemode_male', 'freemode_female'].includes(value.preset) ? value.preset : 'npc_male',
+    map: value.map === 'env_test' ? 'env_test' : 'gtav' };
+}
+export function launchServer(value) {
+  const input = String(value || '').trim();
+  if (!input || input.length > 2048 || /\s/.test(input) || input.startsWith('/')) throw new Error('请输入有效的服务器 IP 或地址。');
+  const explicit = input.includes('://');
+  let url;
+  try { url = new URL(explicit ? input : 'wss://' + input); } catch { throw new Error('服务器地址格式无效。'); }
+  if (url.protocol !== 'wss:' || !url.hostname || url.username || url.password || url.hash) throw new Error('请输入不含用户名、密码或片段的 wss:// 地址。');
+  if (!explicit && !url.port) url.port = '47485';
+  if (url.pathname === '/') url.pathname = '/ws';
+  return url.href;
+}
+export function launchServerOptions(snapshot, language = 'zh-CN') {
+  if (snapshot?.source !== 'remote' || snapshot.stale) return [];
+  const config = snapshot.config || {}, values = config.servers || config.server || [];
+  return (Array.isArray(values) ? values : [values]).slice(0, 32).flatMap(item => {
+    try {
+      let server = launchServer(item.websocket_url || item.ws_url || item.address);
+      if (!item.websocket_url && !item.ws_url && !String(item.address).includes('://') && item.health_url) {
+        const health = new URL(item.health_url), target = new URL(server), port = url => url.port || '443';
+        const pathname = health.pathname.replace(/\/+$/, '');
+        if (health.protocol === 'https:' && !health.username && !health.password && !health.hash && health.hostname === target.hostname && port(health) === port(target) && pathname.endsWith('/health')) {
+          health.protocol = 'wss:'; health.pathname = pathname.slice(0, -7) + '/ws'; server = launchServer(health.href);
+        }
+      }
+      let healthUrl = '';
+      if (typeof item.health_url === 'string') {
+        const health = new URL(item.health_url), endpoint = new URL(server);
+        if (health.protocol === 'https:' && !health.username && !health.password && !health.hash && health.hostname === endpoint.hostname && (health.port || '443') === (endpoint.port || '443')) healthUrl = health.href;
+      }
+      const localized = item.i18n?.[language] || {};
+      return [{ address: String(item.address), server, health_url: healthUrl, label: [translateMessage(localized.name || item.name || '', language), translateMessage(localized.role || item.role || '', language), item.address].filter(Boolean).join(' · ') }];
+    } catch { return []; }
+  });
+}
+export function launchRequest(value, snapshot, availability = null) {
+  const result = launchPreferences(value);
+  result.name = result.name.trim();
+  if (result.mode === 'online' && (!result.name || Array.from(result.name).length > 24 || /[\u0000-\u001f\u007f]/.test(result.name))) throw new Error('请输入 1 至 24 个字符的昵称。');
+  if (result.mode === 'online') {
+    const options = launchServerOptions(snapshot), input = result.server.trim();
+    const selected = options.find(item => item.address === input || item.server === input);
+    if (!selected) throw new Error('请选择已检测可用的服务器线路。');
+    if (availability && !availability.some(item => item.address === selected.address && item.available === true)) throw new Error('所选服务器不可用，请选择可用线路或重新检测。');
+    result.server = selected.server;
+  }
+  return result;
+}
+
+export function displayLaunchServer(value, options = []) {
+  const known = options.find(item => item.server === value || item.address === value);
+  if (known) return known.address;
+  try { const url = new URL(value); return url.hostname + ':' + (url.port || '443'); } catch { return value || options[0]?.address || ''; }
+}

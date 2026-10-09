@@ -80,7 +80,7 @@ async function harness(options = {}) {
   if (options.localStorageDenied) {
     vm.runInContext("Object.defineProperty(globalThis, 'localStorage', { get() { throw new Error('SecurityError'); } });", context);
   }
-  vm.runInContext(source + '\nglobalThis.module = { cleanJoinServerOptions, readPublicPreferences, readPanelPreferences, savePanelPreferences, consumePublicEntryIntent, installJoinModal };',
+  vm.runInContext(source + '\nglobalThis.module = { cleanJoinServerOptions, launcherPublicEntry, savePublicEntry, readPublicPreferences, readPanelPreferences, savePanelPreferences, consumePublicEntryIntent, installJoinModal };',
     context, { filename: 'join-modal.js' });
   const api = context.module;
   const modal = options.install === false ? null : api.installJoinModal({ onJoin: (value) => joined.push(copy(value)) });
@@ -592,4 +592,60 @@ test('远程线路显式语言配置热切换覆盖默认名字，昵称与连�
   assert.match(page.serverList.children[0].label, /Custom Session · Primary/);
   assert.equal(page.fields.server.value, address);
   page.i18n.setLanguage('zh-CN');
+});
+
+test('启动器在线选择直接生成首进偏好，保留完整WSS代理路径和中文昵称而不自动改语言', async () => {
+  const page = await harness({ install: false, language: 'en' });
+  const url = new URL('https://192.168.31.225/play/');
+  url.search = new URLSearchParams({ launcher:'1', name:' 玩家甲 ', server:'wss://gtaserver.2t.hk:47485/47485/ws?route=main',
+    preset:'freemode_female', seed:'4294967295', lang:'zh-CN' }).toString();
+  const result = copy(page.api.launcherPublicEntry(url.searchParams, url.href));
+  assert.deepEqual(result, { server:'wss://gtaserver.2t.hk:47485/47485/ws?route=main', name:'玩家甲', preset:'freemode_female', seed:4294967295 });
+  assert.equal(page.i18n.getLanguage(), 'en', 'query language cannot override launcher configuration');
+  assert.equal(page.sessionStorage.values.size, 0, 'parser is pure and does not reuse/write identity storage');
+  assert.equal(page.joined.length, 0, 'parser does not install or submit the web modal');
+});
+
+test('启动器裸服务器保留开发默认端口，首次加入消费fresh标记，清理URL后刷新恢复同一份选择', async () => {
+  const page = await harness({ install:false, sessionStorage:storage({ [sessionKey]:JSON.stringify({ ...preferences(), seed:1 }),
+    'gta5.public.identity:old':'existing-resume-token' }) });
+  const query = new URLSearchParams({ launcher:'1', name:'New Player', server:'127.0.0.1:47485', preset:'npc_male', seed:'0' });
+  const entry = page.api.launcherPublicEntry(query, 'http://localhost:8010/play/');
+  assert.equal(entry.server, 'ws://127.0.0.1:47485/ws');
+  assert.equal(page.api.savePublicEntry(entry, page.sessionStorage, 'http://localhost:8010/play/'), true);
+  assert.equal(page.api.consumePublicEntryIntent('navigate', page.sessionStorage), false, 'explicit launcher entry creates a fresh player');
+  assert.equal(page.sessionStorage.getItem('gta5.public.identity:old'), 'existing-resume-token', 'unrelated old identities are not removed');
+  assert.deepEqual(copy(page.api.readPublicPreferences(page.sessionStorage, 'http://localhost:8010/play/')), copy(entry));
+  assert.equal(page.api.launcherPublicEntry(new URLSearchParams(), 'http://localhost:8010/play/'), null);
+  assert.equal(page.api.launcherPublicEntry(new URLSearchParams({ launcher:'1',mode:'online',log:'1' }), 'http://localhost:8010/play/'), null,
+    'normalized launcher route contains no fresh entry payload and uses saved session preferences');
+  assert.equal(page.api.consumePublicEntryIntent('reload', page.sessionStorage), true, 'subsequent normalized URL refresh restores the same session');
+});
+
+test('普通网页和启动器离线选择不绕过公共线路表单，缺失非法或重复首进字段明确失败', async () => {
+  const page = await harness({ install:false });
+  const valid = { launcher:'1', name:'Player', server:'wss://session.example/public', preset:'npc_female', seed:'23' };
+  assert.equal(page.api.launcherPublicEntry(new URLSearchParams({ ...valid, launcher:'0' }), 'https://localhost/play/'), null);
+  assert.equal(page.api.launcherPublicEntry(new URLSearchParams({ launcher:'1',mode:'story' }), 'https://localhost/'), null);
+  for (const change of [{name:''}, {name:'a'.repeat(25)}, {name:'Player\u0000'}, {server:''}, {server:'javascript:alert(1)'},
+    {server:'ws://session.example'}, {server:'wss://user:secret@session.example'}, {preset:'admin'},
+    {seed:'-1'}, {seed:'4294967296'}, {seed:'1.5'}, {seed:'01'}, {seed:''}, {mode:'story'}]) {
+    assert.throws(() => page.api.launcherPublicEntry(new URLSearchParams({ ...valid,...change }), 'https://localhost/play/'));
+  }
+  const duplicated = new URLSearchParams(valid); duplicated.append('server','wss://other.example');
+  assert.throws(() => page.api.launcherPublicEntry(duplicated, 'https://localhost/play/'));
+  for (const missing of ['name','server','preset','seed']) {
+    const query = new URLSearchParams(valid); query.delete(missing);
+    assert.throws(() => page.api.launcherPublicEntry(query, 'https://localhost/play/'));
+  }
+  assert.equal(page.sessionStorage.values.size, 0);
+});
+
+test('首进偏好无法保存时明确失败，非法输入不改变已存战局偏好', async () => {
+  const page = await harness({ install:false });
+  const entry = { ...preferences(), seed:7 };
+  const denied = { setItem() { throw new Error('storage denied'); } };
+  assert.equal(page.api.savePublicEntry(entry, denied, 'http://localhost/play/'), false);
+  assert.equal(page.api.savePublicEntry({ ...entry,server:'' }, page.sessionStorage, 'http://localhost/play/'), false);
+  assert.equal(page.sessionStorage.values.size, 0);
 });

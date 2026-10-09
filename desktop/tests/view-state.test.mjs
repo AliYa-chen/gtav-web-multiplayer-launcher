@@ -146,3 +146,14 @@ test('共享设置请求提交不同双端口，空白 IP 表示自动检测', (
   ]) assert.throws(() => lanRequest({ ...valid, ...changes }));
   for (const address of ['10.0.0.5', '172.16.0.8', '169.254.1.2', '100.64.0.9']) assert.equal(lanRequest({ ...valid, address }).address, address);
 });
+
+test('启动器线路保留HTTPS反向代理路径，模式默认在线且离线不要求线路', async () => {
+  const { launchPreferences, launchServerOptions, launchRequest, launchServer } = await import('../src/view-state.js');
+  assert.equal(launchPreferences().mode, 'online');
+  const snapshot = { source: 'remote', config: { servers: [{ address: 'gtaserver.2t.hk:47485', name: '公共战局', health_url: 'https://gtaserver.2t.hk:47485/47485/health' }] } };
+  assert.equal(launchServerOptions(snapshot)[0].server, 'wss://gtaserver.2t.hk:47485/47485/ws');
+  assert.equal(launchRequest({ name: '玩家1', server: 'gtaserver.2t.hk:47485' }, snapshot).server, 'wss://gtaserver.2t.hk:47485/47485/ws');
+  assert.equal(launchRequest({ mode: 'story', name: '玩家1' }).mode, 'story');
+  assert.equal(launchServer('example.com:47485'), 'wss://example.com:47485/ws');
+  for (const value of ['ws://example.com/ws', 'wss://name:password@example.com/ws', '/play/', 'https://example.com']) assert.throws(() => launchServer(value));
+});

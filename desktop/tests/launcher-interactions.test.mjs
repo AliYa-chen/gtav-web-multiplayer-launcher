@@ -4,12 +4,13 @@ import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import * as presentation from '../src/view-state.js';
 import * as internationalization from '../src/i18n.js';
+import * as serverHealth from '../src/server-health.js';
 
 const source = (await readFile(new URL('../src/main.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '');
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 const caFingerprint = 'AB:'.repeat(31) + 'CD';
 async function launcher(desktop = true, options = {}) {
-  const calls = [], values = new Map(), events = new Map(), intervals = [], held = new Map(), failures = new Set(), copied = [], requests = [], timers = new Map();
+  const calls = [], values = new Map(), events = new Map(), intervals = [], held = new Map(), failures = new Set(), copied = [], requests = [], healthRequests = [], timers = new Map();
   let timerId = 0, frameId = 0;
   const frames = new Map(), observers = [];
   let clients = options.clients || (options.urls || []).map((url, index) => ({ id: index + 1, number: index + 1, primary: index === 0, running_url: url, invitation_url: options.invitationUrls?.[index] || '' }));
@@ -17,11 +18,14 @@ async function launcher(desktop = true, options = {}) {
   let layout = { detailsHeight: 170, addressTop: 24, cardHeight: 60, rowGap: 7, ...options.layout };
   let lan = { settings: { port: 8443, http_port: 8442 }, addresses: ['192.168.31.225'], running_url: null, guide_url: null, host_address: null, ca_fingerprint: null, ...options.lan };
   let caSystemStatus = options.caSystemStatus || { installed: false, trusted: false, fingerprint: null, message: '' };
+  let launchPreferences = options.launch || { mode: 'online', name: '玩家1', server: 'wss://gtaserver.2t.hk:47485/47485/ws', preset: 'npc_male', map: 'gtav' };
   let language = options.language || { preference: 'system', resolved: 'zh-CN', revision: 0 };
   let remoteFailure = false;
   let resources = options.resources === undefined ? { manifest_file_count: 5814 } : options.resources;
-  let remote = { config: { oltitle: 'https://gtav.2t.hk', latest_version: '0.2.5', downloads: { windows_x64: { url: 'https://oss.2t.hk/launcher.exe', sha256: 'a'.repeat(64) } }, announcements: [{ title: '<img>', body: '<script>unsafe</script>' }] }, source: 'remote' };
-  const status = () => ({ language, selected_directory: options.selected === undefined ? '/游戏资源' : options.selected, resources, clients,
+  const defaultServers = [{ address: 'gtaserver.2t.hk:47485', name: '公共战局', health_url: 'https://gtaserver.2t.hk:47485/47485/health' }];
+  let serverAvailability = options.availability || [{ address: 'gtaserver.2t.hk:47485', available: true, latency_ms: 28 }];
+  let remote = { config: { servers: defaultServers, oltitle: 'https://gtav.2t.hk', latest_version: '0.2.5', downloads: { windows_x64: { url: 'https://oss.2t.hk/launcher.exe', sha256: 'a'.repeat(64) } }, announcements: [{ title: '<img>', body: '<script>unsafe</script>' }] }, source: 'remote' };
+  const status = () => ({ language, launch_preferences: launchPreferences, selected_directory: options.selected === undefined ? '/游戏资源' : options.selected, resources, clients,
     running_urls: clients.map((client) => client.running_url), invitation_urls: clients.map((client) => client.invitation_url), lan, version: '0.2.5', platform: 'windows_x64', remote_configuration: remote });
   let renderCount = 0, rendered = '';
   const app = { get innerHTML() { return rendered; }, set innerHTML(value) { rendered = value; renderCount++; }, addEventListener(name, callback) { events.set(`app:${name}`, callback); } };
@@ -68,6 +72,7 @@ async function launcher(desktop = true, options = {}) {
       if (command === 'choose_game_directory') return '/新资源';
       if (command === 'prepare_game') resources = { manifest_file_count: 5814 };
       if (command === 'start_game') {
+        if (args.launch) launchPreferences = args.launch;
         if (!args.additional && clients.some((client) => client.primary)) return status();
         if (clients.length >= 8) throw new Error('最多同时开启 8 个客户端。');
         const address = lan.settings.address || '192.168.31.225', offset = lastClientId * 2, id = ++lastClientId;
@@ -86,7 +91,20 @@ async function launcher(desktop = true, options = {}) {
       if (command === 'remote_configuration') { if (remoteFailure) throw new Error('failed request'); return remote; }
       return status();
     },
-    fetch: (...args) => { requests.push(args); throw new Error('The launcher must use native CA status'); },
+    checkBrowserServers: options => serverHealth.checkBrowserServers(options, {
+      now: () => 100,
+      fetch: async (url, args) => {
+        healthRequests.push({ url, ...args });
+        if (failures.has('browser_health')) throw new Error('health fetch failed');
+        const values = held.has('browser_health') ? await held.get('browser_health').promise : serverAvailability;
+        const parsed = new URL(url), address = parsed.hostname + ':' + (parsed.port || '443');
+        const status = values.find(value => value.address === address);
+        if (!status?.available) throw new Error('unavailable');
+        return new Response(JSON.stringify({ protocol: 1, map: 'gta5', public_session: true, state_transport: true,
+          server_version: '0.4.2', capabilities: ['public_session', 'world_v2'] }), { status: 200 });
+      },
+    }),
+    fetch: (...args) => { requests.push(args); throw new Error('CA status must use its native query'); },
     setTimeout: (callback, delay) => { const id = ++timerId; timers.set(id, { callback, delay }); return id; }, clearTimeout: (id) => timers.delete(id),
     setInterval: (callback, delay) => { intervals.push({ callback, delay }); return intervals.length; },
     requestAnimationFrame: (callback) => { const id = ++frameId; frames.set(id, callback); return id; },
@@ -103,21 +121,24 @@ async function launcher(desktop = true, options = {}) {
   vm.runInContext(source, context);
   await tick();
   flushFrames();
-  return { calls, app, values, events, intervals, document, status, copied, requests, timers,
+  return { calls, app, values, events, intervals, document, status, copied, requests, healthRequests, timers,
     renderCount: () => renderCount,
     resize(value) { layout = { ...layout, ...value }; observers.forEach((observer) => observer.callback()); flushFrames(); },
     setCaSystemStatus(value) { caSystemStatus = value; },
     async runTimer(delay) { const entries = [...timers].filter(([, timer]) => timer.delay === delay); const entry = entries.at(-1); assert.ok(entry, `missing ${delay}ms timer`); timers.delete(entry[0]); entry[1].callback(); await tick(); },
-    setRemote(value) { remote = value; remoteFailure = false; }, failRemote() { remoteFailure = true; },
+    setRemote(value) { remote = value; if (remote?.source === 'remote' && remote.config && !remote.config.servers && !remote.config.server) remote.config.servers = defaultServers; remoteFailure = false; },
+    setAvailability(value) { serverAvailability = value; }, failRemote() { remoteFailure = true; },
     failCommand(command, failed = true) { failed ? failures.add(command) : failures.delete(command); },
     hold(command) { let resolve; const promise = new Promise((accept) => { resolve = accept; }); held.set(command, { promise }); return (value = status()) => { held.delete(command); resolve(value); }; },
+    launchInput(field, value) { events.get('app:input')({ target: { dataset: { launchField: field }, value } }); },
+    async launchChange(field, value) { await events.get('app:change')({ target: { dataset: { launchField: field }, value } }); },
     async changeLanguage(value) { await events.get('app:change')({ target: { id: 'launcher-language', value } }); flushFrames(); },
     input(field, value) { events.get('app:input')({ target: { dataset: { lanField: field }, value } }); },
     async click(id, dataset = {}) { const button = { id, dataset, disabled: false }; await events.get('app:click')({ target: { closest: () => button } }); flushFrames(); } };
 }
 
 function newerSnapshot(overrides = {}) {
-  return { source: 'remote', stale: false, config: { latest_version: '0.2.6', release_notes: '必须更新\n修复连接。',
+  return { source: 'remote', stale: false, config: { servers: [{ address: 'gtaserver.2t.hk:47485', name: '公共战局', health_url: 'https://gtaserver.2t.hk:47485/47485/health' }], latest_version: '0.2.6', release_notes: '必须更新\n修复连接。',
     downloads: { windows_x64: { url: 'https://oss.2t.hk/launcher-new.exe', sha256: 'b'.repeat(64) } }, ...overrides } };
 }
 function publish(ui, snapshot) {
@@ -238,7 +259,7 @@ test('实际启动界面仅通过后端读取远程配置，并从目录选择�
   await ui.click('choose');
   await ui.click('launch');
   assert.deepEqual(ui.calls.filter((call) => ['prepare_game', 'start_game', 'open_game'].includes(call.command)).map((call) => [call.command, JSON.stringify(call.args)]), [
-    ['prepare_game', '{"selected":"/新资源"}'], ['start_game', '{"additional":false}'], ['open_game', '{"id":1,"trusted":false}'],
+    ['prepare_game', '{"selected":"/新资源"}'], ['start_game', JSON.stringify({ additional: false, launch: { mode: 'online', name: '玩家1', server: 'wss://gtaserver.2t.hk:47485/47485/ws', preset: 'npc_male', map: 'gtav' } })], ['open_game', '{"id":1,"trusted":false}'],
   ]);
   const beforeAdditional = ui.calls.length; await ui.click('additional');
   assert.deepEqual(ui.calls.slice(beforeAdditional).map(call => call.command), ['start_game']);
@@ -258,8 +279,8 @@ test('实际设置点击持久化背景，检查更新与下载始终交给受�
   await ui.click('', { background: 'beach' });
   assert.equal(ui.values.get(presentation.backgroundPreferenceKey), 'beach');
   await ui.click('check-updates');
+  assert.equal(ui.calls.filter(call => call.command === 'remote_configuration').at(-1).args.forceRefresh, true);
   assert.equal(ui.calls.at(-1).command, 'remote_configuration');
-  assert.equal(ui.calls.at(-1).args.forceRefresh, true);
   ui.setRemote(newerSnapshot()); await ui.click('check-updates');
   await ui.click('mandatory-update-download');
   assert.equal(ui.calls.at(-1).command, 'open_update_download');
@@ -292,7 +313,7 @@ test('运行中的启动器每五分钟后台刷新公告配置，不重启游�
   assert.equal(ui.intervals[0].delay, 300000);
   const before = ui.calls.length; await ui.intervals[0].callback();
   assert.deepEqual(ui.calls.slice(before).map(call => call.command), ['remote_configuration']);
-  assert.equal(ui.calls.at(-1).args.forceRefresh, true);
+  assert.equal(ui.calls.filter(call => call.command === 'remote_configuration').at(-1).args.forceRefresh, true);
 });
 test('真实接口数据展示两条线路和新公告，失败后清空旧数据，再次请求能恢复', async () => {
   const ui = await launcher();
@@ -518,7 +539,7 @@ test('停止本机客户端保留朋友角色，再次启动只重建本机；�
   const before = ui.calls.length;
   await ui.click('launch');
   assert.deepEqual(ui.calls.slice(before).filter((call) => ['start_game', 'open_game'].includes(call.command)).map((call) => [call.command, JSON.stringify(call.args)]), [
-    ['start_game', '{"additional":false}'], ['open_game', '{"id":4,"trusted":false}'],
+    ['start_game', JSON.stringify({ additional: false, launch: { mode: 'online', name: '玩家1', server: 'wss://gtaserver.2t.hk:47485/47485/ws', preset: 'npc_male', map: 'gtav' } })], ['open_game', '{"id":4,"trusted":false}'],
   ]);
   assert.deepEqual(clientIds(ui), [2, 3, 4]);
   assert.match(ui.app.innerHTML, /客户端 4 · 本机/);
@@ -888,4 +909,127 @@ test('语言保存期间的旧同revision状态不撤销即时选择，提交事
   finishLanguage(result); await selecting;
   assert.equal(ui.document.documentElement.lang, 'en');
   assert.match(ui.app.innerHTML, /value="en" selected/);
+});
+
+test('启动器默认公共战局并显示昵称、线路、角色，切离线模式不要求服务器', async () => {
+  const ui = await launcher();
+  assert.match(ui.app.innerHTML, /data-launch-mode="online" aria-pressed="true"/);
+  assert.match(ui.app.innerHTML, /id="launch-name"|id="launch-server"|id="launch-preset"/);
+  ui.launchInput('name', '新玩家 & A'); await ui.launchChange('server', 'gtaserver.2t.hk:47485');
+  await ui.launchChange('preset', 'npc_female'); await ui.click('launch');
+  const entry = ui.calls.find(call => call.command === 'start_game');
+  assert.equal(entry.args.launch.name, '新玩家 & A'); assert.equal(entry.args.launch.preset, 'npc_female');
+  assert.equal(entry.args.launch.server, 'wss://gtaserver.2t.hk:47485/47485/ws');
+  await ui.click('', { launchMode: 'story' });
+  assert.doesNotMatch(ui.app.innerHTML, /id="launch-name"|id="launch-server"|id="launch-preset"/);
+  assert.match(ui.app.innerHTML, /使用原版离线引擎/);
+  const before = ui.calls.length; await ui.click('launch');
+  assert.equal(ui.calls.slice(before).find(call => call.command === 'start_game').args.launch.mode, 'story');
+  await ui.click('', { launchMode: 'sandbox' }); await ui.launchChange('map', 'env_test'); await ui.click('launch');
+  assert.equal(ui.calls.filter(call => call.command === 'start_game').at(-1).args.launch.map, 'env_test');
+});
+
+test('非法昵称启动前拒绝，服务器只可选已检测线路，切语言不覆盖未提交昵称', async () => {
+  const ui = await launcher(); ui.launchInput('name', '玩家'.repeat(20));
+  const before = ui.calls.length; await ui.click('launch'); assert.equal(ui.calls.length, before);
+  assert.match(ui.app.innerHTML, /请输入 1 至 24 个字符/);
+  ui.launchInput('name', '测试'); await ui.launchChange('server', 'unknown.example:1234');
+  assert.doesNotMatch(ui.app.innerHTML, /option value="unknown.example:1234"/);
+  ui.events.get('tauri:language-change')({ payload: { preference: 'en', resolved: 'en', revision: 9 } });
+  assert.match(ui.app.innerHTML, /Game mode|Nickname|Server route|Character/);
+  assert.match(ui.app.innerHTML, /value="测试"/);
+  assert.match(ui.app.innerHTML, /select id="launch-server"/);
+});
+
+test('线路输入只显示接口域名端口，候选使用raw address而实际启动保留WSS代理路径', async () => {
+  const ui = await launcher();
+  publish(ui, { source: 'remote', config: { latest_version: '0.2.5', servers: [{ name: '公共战局', role: '主线路', address: 'gtaserver.2t.hk:47485', health_url: 'https://gtaserver.2t.hk:47485/47485/health' }] } });
+  assert.match(ui.app.innerHTML, /select id="launch-server"/);
+  assert.match(ui.app.innerHTML, /option value="gtaserver.2t.hk:47485" selected/);
+  assert.match(ui.app.innerHTML, /option value="gtaserver.2t.hk:47485"/);
+  assert.doesNotMatch(ui.app.innerHTML, /id="launch-server"[^>]*value="wss?:/);
+  await ui.launchChange('server', 'gtaserver.2t.hk:47485'); await ui.click('launch');
+  assert.equal(ui.calls.find(call => call.command === 'start_game').args.launch.server, 'wss://gtaserver.2t.hk:47485/47485/ws');
+});
+
+test('探测期间全部线路禁止选择，健康结果显示延迟且只允许远程可用线路', async () => {
+  const ui = await launcher(), finish = ui.hold('browser_health');
+  const checking = ui.click('check-servers'); await tick();
+  assert.match(ui.app.innerHTML, /select id="launch-server"[^>]*disabled/);
+  assert.match(ui.app.innerHTML, /option value="gtaserver.2t.hk:47485" selected disabled/);
+  assert.match(ui.app.innerHTML, /id="launch"[^>]*disabled/);
+  const before = ui.calls.filter(call => call.command === 'start_game').length;
+  await ui.launchChange('server', 'another.example:47485');
+  finish([{ address: 'gtaserver.2t.hk:47485', available: true, latency_ms: 42 }]); await checking;
+  assert.match(ui.app.innerHTML, /线路可用 · 延迟 0 ms/);
+  assert.doesNotMatch(ui.app.innerHTML, /id="launch"[^>]*disabled/);
+  assert.equal(ui.calls.filter(call => call.command === 'start_game').length, before);
+  assert.doesNotMatch(ui.app.innerHTML, /<input id="launch-server"|datalist/);
+});
+
+test('当前线路失效不自动换线，离线模式与资源校验仍可用，启动前再次探测拒绝失效线路', async () => {
+  const ui = await launcher();
+  ui.setAvailability([{ address: 'gtaserver.2t.hk:47485', available: false, latency_ms: null, error: 'timeout' }]);
+  await ui.click('check-servers');
+  assert.match(ui.app.innerHTML, /option value="gtaserver.2t.hk:47485" selected disabled/);
+  assert.match(ui.app.innerHTML, /不可用/); assert.match(ui.app.innerHTML, /id="launch"[^>]*disabled/);
+  assert.doesNotMatch(ui.app.innerHTML, /id="verify"[^>]*disabled/);
+  const before = ui.calls.filter(call => call.command === 'start_game').length;
+  await ui.click('launch'); assert.equal(ui.calls.filter(call => call.command === 'start_game').length, before);
+  assert.match(ui.app.innerHTML, /所选服务器不可用/);
+  await ui.click('', { launchMode: 'story' }); assert.doesNotMatch(ui.app.innerHTML, /id="launch"[^>]*disabled/);
+  await ui.click('launch'); assert.equal(ui.calls.find(call => call.command === 'start_game').args.launch.mode, 'story');
+});
+
+test('启动前fresh探测失败就不start_game，已有运行客户端仍可直接打开', async () => {
+  const ui = await launcher();
+  ui.setAvailability([{ address: 'gtaserver.2t.hk:47485', available: false, latency_ms: null }]);
+  const before = ui.calls.length; await ui.click('launch');
+  assert.equal(ui.healthRequests.at(-1).url, 'https://gtaserver.2t.hk:47485/47485/health');
+  assert.equal(ui.calls.slice(before).some(call => call.command === 'start_game'), false);
+  ui.setAvailability([{ address: 'gtaserver.2t.hk:47485', available: true, latency_ms: 12 }]); await ui.click('check-servers'); await ui.click('launch');
+  ui.setAvailability([{ address: 'gtaserver.2t.hk:47485', available: false, latency_ms: null }]); await ui.click('check-servers');
+  assert.doesNotMatch(ui.app.innerHTML, /id="launch"[^>]*disabled/);
+  const reopen = ui.calls.length; await ui.click('launch');
+  assert.deepEqual(ui.calls.slice(reopen).map(call => call.command), ['open_game']);
+});
+
+test('初次无选择可选首个健康线路，失败线路或未列入catalog不可能通过change成为选择', async () => {
+  const ui = await launcher(true, { launch: { mode: 'online', name: '玩家1', server: '', preset: 'npc_male', map: 'gtav' }, availability: [] });
+  ui.setAvailability([{ address: 'bad.example:47485', available: false, latency_ms: null }, { address: 'good.example:47485', available: true, latency_ms: 15 }]);
+  publish(ui, { source: 'remote', config: { latest_version: '0.2.5', servers: [{ address: 'bad.example:47485', name: 'A', health_url: 'https://bad.example:47485/health' }, { address: 'good.example:47485', name: 'B', health_url: 'https://good.example:47485/health' }] } }); await tick();
+  assert.match(ui.app.innerHTML, /option value="good.example:47485" selected/);
+  await ui.launchChange('server', 'bad.example:47485'); await ui.launchChange('server', 'unknown.example:47485');
+  assert.match(ui.app.innerHTML, /option value="good.example:47485" selected/);
+  await ui.click('launch'); assert.equal(ui.calls.find(call => call.command === 'start_game').args.launch.server, 'wss://good.example:47485/ws');
+});
+
+test('remote失效立即撤销available，旧探测响应不覆盖新catalog，30秒及恢复前台复查', async () => {
+  const ui = await launcher(), finish = ui.hold('browser_health');
+  const checking = ui.click('check-servers'); await tick();
+  publish(ui, { source: 'unavailable', stale: true, config: {} });
+  assert.match(ui.app.innerHTML, /id="launch"[^>]*disabled/);
+  finish([{ address: 'gtaserver.2t.hk:47485', available: true, latency_ms: 1 }]); await checking;
+  assert.match(ui.app.innerHTML, /id="launch"[^>]*disabled/);
+  assert.doesNotMatch(ui.app.innerHTML, /线路可用 · 延迟 1 ms/);
+  publish(ui, { source: 'remote', config: { latest_version: '0.2.5', servers: [{ address: 'gtaserver.2t.hk:47485', health_url: 'https://gtaserver.2t.hk:47485/47485/health' }] } }); await tick();
+  const before = ui.healthRequests.length;
+  const interval = ui.intervals.find(item => item.delay === 30000); assert.ok(interval);
+  interval.callback(); await tick();
+  ui.document.visibilityState = 'visible'; ui.events.get('document:visibilitychange')(); await tick();
+  assert.equal(ui.healthRequests.length, before + 2);
+});
+
+test('启动新模式失败保留待提交选择，已有primary重试必须重新start_game而非打开旧模式', async () => {
+  const ui = await launcher(); await ui.click('launch');
+  await ui.click('', { launchMode: 'story' });
+  ui.failCommand('start_game');
+  const failed = ui.calls.length; await ui.click('launch');
+  assert.equal(ui.calls.slice(failed).filter(call => call.command === 'start_game').length, 1);
+  assert.equal(ui.calls.slice(failed).some(call => call.command === 'open_game'), false);
+  assert.match(ui.app.innerHTML, /data-launch-mode="story" aria-pressed="true"/);
+  ui.failCommand('start_game', false);
+  const retry = ui.calls.length; await ui.click('launch');
+  assert.deepEqual(ui.calls.slice(retry).map(call => call.command), ['start_game', 'open_game']);
+  assert.equal(ui.calls[retry].args.launch.mode, 'story');
 });

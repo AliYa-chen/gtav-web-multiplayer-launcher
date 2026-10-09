@@ -1464,3 +1464,26 @@ test('首次加入的满员与握手错误使用英语，未知服务端诊断�
   assert.ok(!page.statuses.at(-1).text.includes('future_error'));
   page.api.close();
 });
+
+test('重复成员与同步快照保留界面回调，HTTP日志按阶段独立去重且人数及重连变化仍记录', async () => {
+  const page = await harness(); const socket = page.enter(); await page.api.ready;
+  const statusesBefore = page.statuses.length;
+  for (let repeat = 0; repeat < 20; repeat++) {
+    socket.receive({ type:'room_state',room:room() });
+    socket.receive({ type:'world_state',room_id:'PUBLIC',states:[] });
+  }
+  const logs = () => page.logs.filter(line => line.startsWith('[public-session] '))
+    .map(line => JSON.parse(line.slice('[public-session] '.length)));
+  assert.equal(logs().filter(value => value.phase === 'membership').length, 1);
+  assert.equal(logs().filter(value => value.phase === 'sync').length, 1);
+  assert.equal(page.statuses.length - statusesBefore, 40, 'phase changes still reach the existing callback');
+  socket.receive({ type:'room_state',room:room('LOCAL',[{id:'REMOTE',name:'玩家乙'}]) });
+  socket.receive({ type:'world_state',room_id:'PUBLIC',states:[] });
+  assert.equal(logs().filter(value => value.phase === 'membership').length, 2);
+  assert.equal(logs().filter(value => value.phase === 'sync').length, 2);
+  assert.equal(logs().findLast(value => value.phase === 'membership').members, 2);
+  socket.close();page.advance(500);
+  assert.equal(logs().filter(value => value.phase === 'connecting').length, 2, 'new transport lifecycle remains observable');
+  assert.ok(page.logs.every(line => !line.includes('private-resume-token')));
+  page.api.close();
+});
