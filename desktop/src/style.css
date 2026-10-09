@@ -31,6 +31,9 @@ header { display: flex; justify-content: space-between; align-items: center; gap
 .status-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; background: #8a9ca6; }
 .status-dot.live { background: var(--mint); box-shadow: 0 0 10px rgba(177, 243, 205, .45); }
 .settings { position: relative; }
+.repository-button { display: grid; place-items: center; width: 44px; height: 44px; flex: 0 0 44px; padding: 0; border: 1px solid var(--line); border-radius: 50%; transition: color .18s ease, border-color .18s ease; }
+.repository-button:hover { color: var(--mint); border-color: rgba(177, 243, 205, .55); }
+.repository-button > svg { fill: currentColor; stroke: none; }
 .settings-toggle { display: flex; align-items: center; gap: 8px; padding: 11px 16px; border: 1px solid var(--line); border-radius: 30px; font-size: 12px; }
 .settings-toggle > svg:first-child { width: 17px; height: 17px; }
 .settings-toggle > svg:last-child { width: 13px; height: 13px; transition: transform .2s; }
@@ -38,7 +41,7 @@ header { display: flex; justify-content: space-between; align-items: center; gap
 
 /* Shared recipe for panels, nested cards and floating controls. */
 .glass, .background-picker, .background-option, .directory,
-.pill, .settings-toggle, .scene-label {
+.pill, .settings-toggle, .repository-button, .scene-label {
   background: var(--glass);
   backdrop-filter: blur(24px) saturate(180%);
   -webkit-backdrop-filter: blur(24px) saturate(180%);

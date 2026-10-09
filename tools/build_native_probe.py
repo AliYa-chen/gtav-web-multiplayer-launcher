@@ -100,6 +100,10 @@ ENTITY_EXPORTS = {
     "mpGetVehiclePedIsIn": (57184, "ped_commands::CommandGetVehiclePedIsIn(int, bool)", ["i32", "i32"], ["i32"]),
     "mpGetPedInSeat": (61366, "vehicle_commands::CommandGetPedInVehicleSeat(int, int, bool)", ["i32", "i32", "i32"], ["i32"]),
     "mpSetPedIntoVehicle": (57201, "ped_commands::CommandSetPedIntoVehicle(int, int, int)", ["i32", "i32", "i32"], []),
+    # 用 184/PreventAutoShuffleToDriversSeat 暂停自动换驾驶位，挂接解除时恢复原值。
+    # 两者沿用原 native 的 GUID/flag 范围检查，不改写 CPed 内存布局或会话标志。
+    "mpSetPedConfigFlag": (57558, "ped_commands::CommandSetPedConfigFlag(int, int, bool)", ["i32", "i32", "i32"], []),
+    "mpGetPedConfigFlag": (57560, "ped_commands::CommandGetPedConfigFlag(int, int, bool)", ["i32", "i32", "i32"], ["i32"]),
     "mpTryingVehicle": (57306, "ped_commands::CommandGetVehiclePedIsTryingToEnter(int)", ["i32"], ["i32"]),
     "mpTryingSeat": (57305, "ped_commands::CommandGetSeatPedIsTryingToEnter(int)", ["i32"], ["i32"]),
     "mpLeaveVehicle": (60572, "task_commands::CommandTaskLeaveVehicle(int, int, int)", ["i32", "i32", "i32"], []),

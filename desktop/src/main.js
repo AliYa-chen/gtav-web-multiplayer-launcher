@@ -8,6 +8,7 @@ import { checkBrowserServers } from './server-health.js';
 import './style.css';
 
 const app = document.querySelector('#app');
+const PROJECT_REPOSITORY_URL = 'https://github.com/AliYa-chen/gtav-web-multiplayer-launcher';
 const backgroundIds = backgrounds.map((item) => item.id);
 const storage = { getItem: (key) => localStorage.getItem(key), setItem: (key, value) => localStorage.setItem(key, value) };
 const state = {
@@ -105,6 +106,7 @@ const icons = {
   arrow: '<svg viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></svg>',
   check: '<svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg>',
   settings: '<svg viewBox="0 0 24 24"><path d="m10 3-.6 2.5-2 .9L5 5.7 3.5 8.3l1.8 1.8-.2 2.3-2.1 1.5 1.5 2.6 2.6-.6 1.9 1.2.5 2.9h3l.6-2.6 2-.9 2.4.7 1.5-2.6-1.8-1.8.2-2.3 2.1-1.5-1.5-2.6-2.6.6-1.9-1.2L13 3z"/><circle cx="11.5" cy="11.5" r="3"/></svg>',
+  github: '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.65 7.65 0 0 1 8 3.86c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>',
   chevron: '<svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>',
   refresh: '<svg viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6 7a7 7 0 0 1 12-1l2 6M4 12l2 6a7 7 0 0 0 12-1"/></svg>',
   download: '<svg viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/></svg>',
@@ -221,6 +223,7 @@ function render() {
   document.documentElement.style.setProperty('--scene', `url("${background.image}")`);
   app.innerHTML = `<div class="scene" aria-hidden="true"></div><div class="shell" ${state.updateRequired || state.lanOpen ? 'inert aria-hidden="true"' : ''}>
     <main><header><div class="brand"><span class="brand__mark">V<span>ONLINE</span></span><div>GTA5DATA<span>${t('app.brand')}</span></div></div><div class="header-actions"><span class="pill"><span class="status-dot ${running ? 'live' : ''}"></span>${running ? t('app.clientsRunning', { count: state.urls.length }) : t('app.ready')}</span>
+      <button id="project-repository" type="button" class="repository-button" aria-label="${t('app.repository')}" title="${t('app.repository')}">${icons.github}</button>
       <div class="settings"><button id="settings-toggle" class="settings-toggle ${state.settingsOpen ? 'is-open' : ''}" aria-expanded="${state.settingsOpen}" aria-controls="background-picker">${icons.settings} ${t('settings.title')} ${icons.chevron}</button>
         ${state.settingsOpen ? `<button class="picker-backdrop" id="picker-dismiss" aria-label="${t('settings.close')}"></button><section id="background-picker" class="background-picker" role="dialog" aria-modal="true" aria-labelledby="picker-title"><div class="picker-heading"><div><p class="eyebrow">${t('settings.eyebrow')}</p><h2 id="picker-title">${t('settings.scenery')}</h2><span>${t('settings.scenes')}</span></div><button id="picker-close" class="icon-button" aria-label="${t('settings.close')}">${icons.close}</button></div><div class="language-setting"><label for="launcher-language">${t('language.label')}</label><select id="launcher-language" ${state.languageBusy || (state.desktop && !state.languageInitialized) ? 'disabled' : ''}><option value="system" ${state.language.preference === 'system' ? 'selected' : ''}>${t('language.system')}</option><option value="zh-CN" ${state.language.preference === 'zh-CN' ? 'selected' : ''}>${t('language.zhCN')}</option><option value="en" ${state.language.preference === 'en' ? 'selected' : ''}>${t('language.en')}</option></select><small role="status">${state.languageError ? html(localText(state.languageError)) : state.languageBusy ? t('language.saving') : t('language.help')}</small></div><div class="background-grid">${backgrounds.map((item) => `<button class="background-option ${item.id === state.background ? 'selected' : ''}" data-background="${item.id}" aria-pressed="${item.id === state.background}" aria-label="${html(t('settings.chooseBackground', { name: t(item.labelKey) }))}"><img src="${item.image}" alt="${html(t(item.labelKey))}" loading="lazy"><span>${html(t(item.labelKey))}${item.id === state.background ? icons.check : ''}</span></button>`).join('')}</div></section>` : ''}
       </div></div></header>
@@ -308,7 +311,15 @@ app.addEventListener('click', async (event) => {
   const target = event.target.closest('button'); if (!target || target.disabled) return;
   if (state.updateRequired && !['mandatory-update-download', 'mandatory-update-check'].includes(target.id)) return;
   if (target.dataset.launchMode) { if (state.busy) return; state.launch.mode = target.dataset.launchMode; state.launchDirty = true; render(); return; }
-  if (target.id === 'get-game-resources') {
+  if (target.id === 'project-repository') {
+    try {
+      if (state.desktop) await invoke('open_project_repository');
+      else window.open(PROJECT_REPOSITORY_URL, '_blank', 'noopener,noreferrer');
+    } catch {
+      state.error = message('message.repositoryFailed'); render();
+      document.querySelector('#project-repository')?.focus({ preventScroll: true });
+    }
+  } else if (target.id === 'get-game-resources') {
     if (!state.desktop) return;
     try { await invoke('open_game_resource_page'); }
     catch { state.error = message('message.resourcePageFailed'); render(); }

@@ -256,6 +256,82 @@ class VehicleWorldTests(world_tests.WorldV2Harness):
             self.assertEqual(entity["components"]["transform"]["position"], destination)
         self.assertEqual(moved["owner_id"], driver.player_id)
 
+    def test_three_passengers_join_with_old_basis_during_driver_updates(self):
+        driver, car = self.drive()
+        basis, owner_epoch = car["revision"], car["owner_epoch"]
+        passengers = [self.client("共享乘客" + str(index)) for index in range(3)]
+        for passenger in passengers:
+            self.state(passenger)
+        for index, passenger in enumerate(passengers):
+            current = self.entity(car["entity_id"])
+            self.input(driver, current, sequence=index + 1)
+            self.delta(driver, car["entity_id"], lambda item: item["last_input_seq"] == index + 1)
+            self.accepted_interaction(passenger, "enter_vehicle", car["entity_id"],
+                seat="passenger:" + str(index), revision=basis, target_generation=car["generation"])
+        current = self.entity(car["entity_id"])
+        self.assertGreater(current["revision"], basis)
+        self.assertEqual(current["owner_id"], driver.player_id)
+        self.assertEqual(current["owner_epoch"], owner_epoch)
+        self.assertEqual(current["ownership"], "active")
+        self.assertEqual(current["components"]["vehicle"]["seats"],
+            {"driver": driver.entity_id, **{"passenger:" + str(index): passenger.entity_id
+                for index, passenger in enumerate(passengers)}})
+        destination = [current["components"]["transform"]["position"][0] + .5, -1088.1, 22.4]
+        self.input(driver, current, sequence=4, position=destination)
+        self.delta(driver, car["entity_id"], lambda item: item["last_input_seq"] == 4)
+        snapshot = self.world()
+        for player in [driver, *passengers]:
+            self.assertEqual(self.entity(player.entity_id, snapshot)["components"]["transform"]["position"], destination)
+
+    def test_passenger_seat_race_uses_current_occupancy_and_rejects_invalid_baselines(self):
+        driver, car = self.drive()
+        first, second = self.client("竞争乘客一"), self.client("竞争乘客二")
+        self.state(first); self.state(second)
+        basis = car["revision"]
+        self.input(driver, car)
+        self.delta(driver, car["entity_id"], lambda item: item["last_input_seq"] == 1)
+        left = self.interaction(first, "enter_vehicle", car["entity_id"], seat="passenger:0", revision=basis)
+        right = self.interaction(second, "enter_vehicle", car["entity_id"], seat="passenger:0", revision=basis)
+        left_result = first.expect("interaction_result", lambda event: event.get("request_id") == left["request_id"])
+        right_result = second.expect("interaction_result", lambda event: event.get("request_id") == right["request_id"])
+        self.assertEqual(sum(bool(result["accepted"]) for result in (left_result, right_result)), 1)
+        winner, loser = (first, second) if left_result["accepted"] else (second, first)
+        failure = right_result if left_result["accepted"] else left_result
+        self.assertEqual(failure["reason"], "seat_unavailable")
+        self.error(loser, "seat_unavailable")
+        current = self.entity(car["entity_id"])
+        self.assertEqual(current["components"]["vehicle"]["seats"]["passenger:0"], winner.entity_id)
+        self.assertEqual(current["owner_id"], driver.player_id)
+        self.assertEqual(current["owner_epoch"], car["owner_epoch"])
+        self.assertNotIn("attachment", self.entity(loser.entity_id)["components"])
+        for fields, reason in (({"revision": current["revision"] + 1000}, "invalid_revision"),
+                               ({"target_generation": current["generation"] + 1}, "stale_generation")):
+            request = self.interaction(loser, "enter_vehicle", car["entity_id"], seat="passenger:1", **fields)
+            result = loser.expect("interaction_result", lambda event: event.get("request_id") == request["request_id"])
+            self.assertFalse(result["accepted"])
+            self.assertEqual(result["reason"], reason)
+            self.error(loser, reason)
+        self.assertIsNone(self.entity(car["entity_id"])["components"]["vehicle"]["seats"]["passenger:1"])
+
+    def test_passenger_leave_preserves_drivers_pending_ready_offer(self):
+        driver = self.client("尚在加载的驾驶员"); self.state(driver)
+        car = self.car()
+        self.accepted_interaction(driver, "enter_vehicle", car["entity_id"], seat="driver")
+        _, offered = self.delta(driver, car["entity_id"], lambda item: item["ownership"] == "offered")
+        passenger = self.client("离车乘客"); self.state(passenger)
+        self.accepted_interaction(passenger, "enter_vehicle", car["entity_id"], seat="passenger:0")
+        self.accepted_interaction(passenger, "leave_vehicle", car["entity_id"])
+        current = self.entity(car["entity_id"])
+        self.assertEqual(current["components"]["vehicle"]["seats"]["driver"], driver.entity_id)
+        self.assertIsNone(current["components"]["vehicle"]["seats"]["passenger:0"])
+        self.assertEqual(current["owner_id"], driver.player_id)
+        self.assertEqual(current["owner_epoch"], offered["owner_epoch"])
+        self.assertEqual(current["ownership"], "offered", "乘客离车不能取消驾驶员的资源ready邀请")
+        self.input(driver, current); self.error(driver, "simulation_not_ready")
+        active = self.ready(driver, offered)
+        self.input(driver, active)
+        self.delta(driver, car["entity_id"], lambda item: item["last_input_seq"] == 1)
+
     def test_attached_player_v1_input_cannot_override_confirmed_vehicle_pose(self):
         driver, car = self.drive()
         passenger = self.client("座位位置保护"); self.state(passenger)

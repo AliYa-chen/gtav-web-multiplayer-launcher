@@ -3,6 +3,7 @@
 self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPlayerAnimation }) {
   const replicas = new Map();
   const requestedModels = new Map();
+  const seatConfig = new Map();
   let epoch = null, buffer = 0, requestNumber = 0, lastInteractionAt = -Infinity;
   let lastLifeAt = -Infinity, pendingLife = null, lastMelee = false, fadesPaused = false;
   let lastSeat = null, leavePendingAt = -Infinity;
@@ -29,8 +30,10 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     else ex.mpDeletePed(BigInt(buffer + 120));
   }
   function clear() {
+    for (const handle of seatConfig.keys()) protectSeat(handle, false);
     for (const replica of replicas.values()) erase(replica);
     replicas.clear(); requestedModels.clear(); epoch = null; pendingLife = null; lastMelee = false; localGeneration = null;
+    lastSeat = null; leavePendingAt = lastInteractionAt = -Infinity;
     pendingMelee = []; lastMeleeInput = false; lastMeleePhase = null;
     consumedWorldEvents.clear(); animationEvents.clear();
   }
@@ -56,6 +59,37 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     ex.mpSetAngularVelocity?.(handle, vector(48, value.angular_velocity));
   }
   function seatNumber(seat) { return seat === 'driver' ? -1 : Number(String(seat).split(':')[1]); }
+  function protectSeat(handle, attached) {
+    if (!ex.mpSetPedConfigFlag || !ex.mpGetPedConfigFlag) return;
+    if (!ex.mpExists(handle)) { seatConfig.delete(handle); return; }
+    if (attached) {
+      if (!seatConfig.has(handle)) seatConfig.set(handle, Boolean(ex.mpGetPedConfigFlag(handle, 184, 0)));
+      if (!ex.mpGetPedConfigFlag(handle, 184, 0)) ex.mpSetPedConfigFlag(handle, 184, 1);
+    } else if (seatConfig.has(handle)) {
+      ex.mpSetPedConfigFlag(handle, 184, seatConfig.get(handle) ? 1 : 0); seatConfig.delete(handle);
+    }
+  }
+  function seatedAt(handle, vehicle, seat) {
+    return Boolean(vehicle && ex.mpGetVehiclePedIsIn?.(handle, 0) === vehicle
+      && (!ex.mpGetPedInSeat || ex.mpGetPedInSeat(vehicle, seatNumber(seat), 0) === handle));
+  }
+  function requestedSeat(vehicle, nativeSeat, localEntityId, entities) {
+    const seats = vehicle?.components?.vehicle?.seats;
+    if (!seats || !Number.isInteger(nativeSeat) || nativeSeat < -1 || nativeSeat > 15) return null;
+    const requested = nativeSeat === -1 ? 'driver' : 'passenger:' + nativeSeat;
+    if (!Object.hasOwn(seats, requested)) return null;
+    if (seats[requested] === null || seats[requested] === localEntityId) return requested;
+    const occupant = entities.get(seats[requested]);
+    // The server permits taking an NPC driver's seat, but never another
+    // player's seat. Keep that existing interaction when there is no player.
+    if (requested === 'driver' && occupant?.kind === 'ped' && !occupant.player_id) return requested;
+    // GTA returns -1 when the automatic enter task targets an occupied driver
+    // seat. Use the server snapshot to choose a real empty passenger seat so
+    // the request is not rejected as a second driver attempt.
+    return Object.keys(seats).filter((seat) => /^passenger:(?:[0-9]|1[0-5])$/.test(seat))
+      .sort((left, right) => seatNumber(left) - seatNumber(right))
+      .find((seat) => seats[seat] === null || seats[seat] === localEntityId) || null;
+  }
   function request(action, entity, seat) {
     post({ type: 'interaction_request', request_id: 'engine:' + (++requestNumber), action,
       ...(entity ? { entity_id: entity.entity_id, expected_revision: entity.revision } : {}),
@@ -420,26 +454,53 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
         }
       }
     }
-    // 附件引用统一实体 ID；本机 ped/vehicle 句柄在每端单独解析。
-    for (const entity of entities.values()) {
-      if (entity.kind !== 'ped') continue;
+    // Release removed occupants before attaching their replacements. Native
+    // SetPedIntoVehicle refuses an occupied seat even after the server freed it.
+    const occupants = [];
+    for (const entity of entities.values()) if (entity.kind === 'ped') {
       const handle = entity.player_id === packet.client_id ? localPed
         : entity.player_id ? playerReplica(entity.player_id) : replicas.get(entity.entity_id)?.handle;
+      if (!handle || !ex.mpExists(handle)) continue;
+      occupants.push({ entity, handle });
+      protectSeat(handle, Boolean(entity.components.attachment));
+      const current = ex.mpGetVehiclePedIsIn?.(handle, 0) || 0;
+      if (!entity.components.attachment && current
+          && [...replicas.values()].some((entry) => entry.kind === 'vehicle' && entry.handle === current)) {
+        ex.mpLeaveVehicle?.(handle, current, 16);
+      }
+    }
+    const handles = new Set(occupants.map(({ handle }) => handle));
+    for (const handle of seatConfig.keys()) if (!handles.has(handle)) protectSeat(handle, false);
+    // Two replicated occupants can cross seats while their server attachments
+    // remain valid. Release only the mismatched native occupants first; this
+    // makes both target seats available for the following attach pass.
+    for (const { entity, handle } of occupants) {
       const attachment = entity.components.attachment;
       const vehicle = attachment ? replicas.get(attachment.entity_id)?.handle : 0;
-      if (!handle || !ex.mpExists(handle)) continue;
+      if (attachment && vehicle && ex.mpGetVehiclePedIsIn?.(handle, 0) === vehicle
+          && !seatedAt(handle, vehicle, attachment.seat)) {
+        if (entity.player_id === packet.client_id) { lastSeat = null; leavePendingAt = -Infinity; }
+        ex.mpLeaveVehicle?.(handle, vehicle, 16);
+      }
+    }
+    // Attachments use shared IDs; each client resolves its own native handles.
+    for (const { entity, handle } of occupants) {
+      const attachment = entity.components.attachment;
+      const vehicle = attachment ? replicas.get(attachment.entity_id)?.handle : 0;
       const current = ex.mpGetVehiclePedIsIn?.(handle, 0) || 0;
-      if (entity.player_id === packet.client_id && attachment && lastSeat === attachment.entity_id && !current
+      const seatKey = attachment ? entity.generation + ':' + attachment.entity_id + ':' + attachment.seat : null;
+      if (entity.player_id === packet.client_id && attachment && lastSeat === seatKey && !current
           && now - leavePendingAt >= 1000) {
         leavePendingAt = now; request('leave_vehicle', entity);
       }
       const leaving = entity.player_id === packet.client_id && now - leavePendingAt < 1500 && !current;
-      if (vehicle && current !== vehicle && !leaving) ex.mpSetPedIntoVehicle?.(handle, vehicle, seatNumber(attachment.seat));
-      else if (!attachment && current && [...replicas.values()].some((entry) => entry.kind === 'vehicle' && entry.handle === current)) {
-        ex.mpLeaveVehicle?.(handle, current, 16);
+      const correctSeat = attachment && seatedAt(handle, vehicle, attachment.seat);
+      if (vehicle && !correctSeat && !leaving) ex.mpSetPedIntoVehicle?.(handle, vehicle, seatNumber(attachment.seat));
+      if (entity.player_id === packet.client_id) {
+        if (!attachment) lastSeat = null;
+        else if (seatedAt(handle, vehicle, attachment.seat)) lastSeat = seatKey;
+        else if (lastSeat !== seatKey) lastSeat = null;
       }
-      if (entity.player_id === packet.client_id) lastSeat = attachment && (current === vehicle || lastSeat === attachment.entity_id)
-        ? attachment.entity_id : null;
       if (!entity.player_id) {
         const replica = replicas.get(entity.entity_id);
         if (replica) applyAiTask(entity, replica, entities, packet, now, localPed);
@@ -500,12 +561,16 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     }
     sampleMelee(packet, now, localPed, { localReady });
     const tryingVehicle = ex.mpTryingVehicle?.(localPed) || 0;
-    if (tryingVehicle && now - lastInteractionAt >= 1000) {
+    if (tryingVehicle && !local.components.attachment) {
       const target = [...entities.values()].find((entity) => replicas.get(entity.entity_id)?.handle === tryingVehicle);
-      if (target) {
-        lastInteractionAt = now; const seat = ex.mpTryingSeat?.(localPed) ?? -1;
+      if (target?.kind === 'vehicle') {
+        const seat = requestedSeat(target, ex.mpTryingSeat?.(localPed) ?? -1, local.entity_id, entities);
+        // Cancel every native attempt before it can evict a confirmed occupant.
+        // Only the server-approved attachment is allowed to put a player inside.
         ex.mpClearTasksImmediately?.(localPed);
-        request('enter_vehicle', target, seat === -1 ? 'driver' : 'passenger:' + seat);
+        if (seat && now - lastInteractionAt >= 1000) {
+          lastInteractionAt = now; request('enter_vehicle', target, seat);
+        }
       }
     }
     return { active: true, localEntity: local, awaitingLife: Boolean(pendingLife),

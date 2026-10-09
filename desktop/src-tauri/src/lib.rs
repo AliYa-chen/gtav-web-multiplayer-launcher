@@ -474,6 +474,13 @@ fn open_project_website(state: State<'_, LauncherState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_project_repository() -> Result<(), String> {
+    // 仓库入口由启动器固定提供，不接受前端 URL，也不依赖远程线路配置。
+    open::that("https://github.com/AliYa-chen/gtav-web-multiplayer-launcher")
+        .map_err(|_| "无法打开 GitHub，请检查默认浏览器设置。".to_string())
+}
+
+#[tauri::command]
 fn open_game_resource_page() -> Result<(), String> {
     open::that("https://archive.org/download/gta5-wasm/")
         .map_err(|_| "无法打开游戏资源页面，请检查默认浏览器设置。".to_string())
@@ -552,7 +559,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![launcher_status, choose_game_directory, prepare_game, start_game, stop_game, stop_game_client, open_game,
-            remote_configuration, open_update_download, open_project_website, open_game_resource_page,
+            remote_configuration, open_update_download, open_project_website, open_project_repository, open_game_resource_page,
             save_lan_settings, check_lan_ca_status, install_lan_ca, save_lan_ca_certificate, set_language])
         .build(tauri::generate_context!()).expect("启动桌面界面失败")
         .run(|app, event| {

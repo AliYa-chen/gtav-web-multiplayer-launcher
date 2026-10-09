@@ -517,7 +517,9 @@ final class WorldService {
             if("driver".equals(seat)){if(populationEntities.contains(target))claimedPopulationVehicles.add(target);offer(target,actor);}
         }else if("leave_vehicle".equals(action)){
             if(player.components().attachment()==null || !player.components().attachment().entityId().equals(target))throw new Problem("invalid_seat","目标不是当前乘坐的车辆");
-            registry.leaveSeat(actor,player.entityId(),player.ownerEpoch(),now());offers.remove(target);
+            boolean driver="driver".equals(player.components().attachment().seat());
+            registry.leaveSeat(actor,player.entityId(),player.ownerEpoch(),now());
+            if(driver)offers.remove(target);
         }else if("melee".equals(action)){
             if(input.containsKey("seat"))throw new Problem("invalid_message","近战不接受座位字段");
             if(!actor.equals(player.ownerId()) || player.leaseUntilTick()<=now())throw new Problem("stale_owner","玩家角色需要有效活动租约");

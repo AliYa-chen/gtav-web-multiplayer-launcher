@@ -29,7 +29,7 @@ function harness() {
   const memory = { buffer: new SharedArrayBuffer(8192) }, entities = new Map(), calls = [], messages = [], animationWindows = [];
   const local = { position: [711, -1088, 22.4], health: 200, arrested: false, dead: false, vehicle: 0 };
   entities.set(7, local); entities.set(8, { position: [713, -1088, 22.4], health: 200 });
-  let allocated = 256, next = 100, loaded = true, melee = false, meleeTarget = 8, trying = 0;
+  let allocated = 256, next = 100, loaded = true, melee = false, meleeTarget = 8, trying = 0, tryingSeat = -1;
   let attackInput = false, animationLoaded = true, animationFailure = false;
   const playing = new Map();
   const v = () => new DataView(memory.buffer);
@@ -57,6 +57,8 @@ function harness() {
     mpIsDead: handle => entities.get(handle).dead ? 1 : 0,
     mpResurrect: handle => { entities.get(handle).dead = false; }, mpRevive() {},
     mpFreeze: (handle, enabled) => { entities.get(handle).frozen = Boolean(enabled); },
+    mpGetPedConfigFlag: (handle, flag) => entities.get(handle).config?.[flag] ? 1 : 0,
+    mpSetPedConfigFlag: (handle, flag, enabled) => { (entities.get(handle).config ??= {})[flag] = Boolean(enabled); },
     mpSetInvincible: (handle, enabled) => { entities.get(handle).invincible = Boolean(enabled); },
     mpSetCanRagdoll() {},
     mpDefaultVariation() {}, mpBlockEvents() {}, mpSetEngineHealth() {}, mpSetBodyHealth() {}, mpSetEngineOn() {},
@@ -65,8 +67,13 @@ function harness() {
     mpTaskGoStraight() {}, mpTaskStandStill() {}, mpSetProofs() {}, mpDrawSphere() {}, mpVisualExplosion() {},
     mpSetPedAsCop() {}, mpTaskCombatPed() {}, mpHasWeaponAsset: () => 1, mpRequestWeaponAsset() {}, mpGiveWeapon() {}, mpSetCurrentWeapon() {}, mpShootBullet() {},
     mpGetVehiclePedIsIn: handle => entities.get(handle).vehicle || 0,
-    mpSetPedIntoVehicle: (handle, vehicle) => { entities.get(handle).vehicle = vehicle; },
-    mpLeaveVehicle: handle => { entities.get(handle).vehicle = 0; },
+    mpGetPedInSeat: (vehicle, seat) => [...entities].find(([_handle, entity]) => entity.vehicle === vehicle && entity.seat === seat)?.[0] || 0,
+    mpSetPedIntoVehicle: (handle, vehicle, seat) => {
+      const occupant = [...entities].find(([_handle, entity]) => entity.vehicle === vehicle && entity.seat === seat)?.[0];
+      if (occupant && occupant !== handle) return;
+      entities.get(handle).vehicle = vehicle; entities.get(handle).seat = seat;
+    },
+    mpLeaveVehicle: handle => { entities.get(handle).vehicle = 0; entities.get(handle).seat = null; },
     mpPlayerId: () => 0, mpIsArrested: () => local.arrested ? 1 : 0,
     mpMeleeAction: () => melee ? 1 : 0, mpMeleeTarget: () => meleeTarget,
     mpCachedMeleeInputs: (first, second) => { v().setUint8(Number(first), attackInput ? 1 : 0); v().setUint8(Number(second), 0); },
@@ -76,7 +83,7 @@ function harness() {
     mpTaskPlayAnim: (handle, dict, clip) => { if (!animationFailure) playing.set(handle, { dict, clip }); },
     mpIsPlayingAnim: (handle, dict, clip) => playing.get(handle)?.dict === dict && playing.get(handle)?.clip === clip ? 1 : 0,
     mpAnimTime: () => .4,
-    mpTryingVehicle: () => trying, mpTryingSeat: () => -1, mpClearTasksImmediately() {},
+    mpTryingVehicle: () => trying, mpTryingSeat: () => tryingSeat, mpClearTasksImmediately() {},
     mpFadeAfterDeath() {}, mpFadeAfterArrest() {}, mpFadeAfterRestart() {},
     mpPedDensity() {}, mpScenarioDensity() {}, mpVehicleDensity() {}, mpRandomVehicleDensity() {}, mpParkedVehicleDensity() {},
     mpPopulationType: handle => entities.get(handle).population || 0,
@@ -97,7 +104,8 @@ function harness() {
   const bridge = self.createWorldEntityBridge({ ex, memory, post: value => messages.push(copy(value)), playerReplica: id => id === 'REMOTE' ? 8 : 0,
     onPlayerAnimation: (...args) => animationWindows.push(args) });
   return { bridge, memory, entities, calls, messages, animationWindows, local, setLoaded: value => { loaded = value; },
-    setMelee: (value, target = 8) => { melee = value; meleeTarget = target; }, setTrying: value => { trying = value; },
+    setMelee: (value, target = 8) => { melee = value; meleeTarget = target; },
+    setTrying: (value, seat = -1) => { trying = value; tryingSeat = seat; },
     setAttackInput: value => { attackInput = value; }, setAnimationLoaded: value => { animationLoaded = value; },
     setAnimationFailure: value => { animationFailure = value; }, playing };
 }
@@ -136,6 +144,128 @@ test('附件经实体ID解析到本机句柄；未经批准入车只请求服务
   h.bridge.update(state, 1700, 7); assert.equal(h.local.vehicle, vehicle);
   h.bridge.update(state, 1800, 7); h.local.vehicle = 0; h.bridge.update(state, 2900, 7);
   assert.ok(h.messages.some(m => m.action === 'leave_vehicle')); assert.equal(h.local.vehicle, 0);
+});
+test('已有玩家司机时自动上车选择服务器确认的空乘客位', () => {
+  const h = harness();
+  const driver = player({ entity_id: 'p2', player_id: 'REMOTE' });
+  const state = packet([player(), driver, car({ components: { ...car().components,
+    vehicle: { ...car().components.vehicle, seats: { driver: 'p2', 'passenger:0': null, 'passenger:1': 'NPC' } } } })]);
+  h.bridge.update(state, 100, 7);
+  h.setTrying(h.bridge.entityHandle('v1')); h.bridge.update(state, 1500, 7);
+  const enter = h.messages.find(m => m.type === 'interaction_request');
+  assert.equal(enter.action, 'enter_vehicle');
+  assert.equal(enter.seat, 'passenger:0');
+  assert.equal(h.local.vehicle, 0, '请求不能在服务器确认前把本机玩家塞入车辆');
+  driver.components.attachment = { entity_id: 'v1', seat: 'driver' };
+  state.world.entities[0].components.attachment = { entity_id: 'v1', seat: enter.seat };
+  state.world.entities[2].components.vehicle.seats['passenger:0'] = 'p1';
+  h.setTrying(0); h.bridge.update(state, 1600, 7);
+  const vehicle = h.bridge.entityHandle('v1');
+  assert.equal(h.local.vehicle, vehicle); assert.equal(h.local.seat, 0);
+  assert.equal(h.entities.get(8).vehicle, vehicle); assert.equal(h.entities.get(8).seat, -1);
+});
+test('空驾驶位和NPC抢车保留驾驶请求，显式空乘客位保持原选择', () => {
+  for (const [occupant, requested, expected] of [[null, -1, 'driver'], ['n1', -1, 'driver'], [null, 0, 'passenger:0']]) {
+    const h = harness(), vehicle = car(), driver = npc();
+    vehicle.components.vehicle.seats.driver = occupant;
+    const state = packet([player(), vehicle, driver]); h.bridge.update(state, 100, 7);
+    h.setTrying(h.bridge.entityHandle('v1'), requested); h.bridge.update(state, 1500, 7);
+    assert.equal(h.messages.find(m => m.type === 'interaction_request').seat, expected);
+  }
+});
+test('占用的乘客位按真实编号找后排空位，满车和无原生入座意图不发请求', () => {
+  for (const [seats, requested, expected] of [
+    [{ driver: 'other', 'passenger:2': null, 'passenger:0': 'a', 'passenger:1': null }, 0, 'passenger:1'],
+    [{ driver: 'other', 'passenger:0': 'a' }, -1, null],
+    [{ driver: null, 'passenger:0': null }, -3, null],
+    [{ driver: null, 'passenger:0': null }, 16, null],
+    [{ driver: null, 'passenger:0': null }, 1, null],
+  ]) {
+    const h = harness(), vehicle = car(); vehicle.components.vehicle.seats = seats;
+    const state = packet([player(), vehicle]); h.bridge.update(state, 100, 7);
+    h.setTrying(h.bridge.entityHandle('v1'), requested); h.bridge.update(state, 1500, 7);
+    assert.equal(h.messages.find(m => m.type === 'interaction_request')?.seat || null, expected);
+    assert.equal(h.local.vehicle, 0);
+    assert.ok(h.calls.some(c => c.name === 'mpClearTasksImmediately' && c.arguments[0] === 7));
+  }
+});
+test('上车请求限频期间仍取消本地抢座任务；已入座不再请求另一个座位', () => {
+  const h = harness(), state = packet([player(), car()]); h.bridge.update(state, 100, 7);
+  h.setTrying(h.bridge.entityHandle('v1')); h.bridge.update(state, 1500, 7); h.bridge.update(state, 1540, 7);
+  assert.equal(h.messages.filter(m => m.type === 'interaction_request').length, 1);
+  assert.equal(h.calls.filter(c => c.name === 'mpClearTasksImmediately' && c.arguments[0] === 7).length, 2);
+  state.world.entities[0].components.attachment = { entity_id: 'v1', seat: 'driver' };
+  h.bridge.update(state, 3000, 7);
+  assert.equal(h.messages.filter(m => m.action === 'enter_vehicle').length, 1);
+});
+test('原生自动换座后纠正到服务端确认乘客位，同车不同座不能被当作已经挂接', () => {
+  const h = harness(), local = player(), vehicle = car();
+  local.components.attachment = { entity_id: 'v1', seat: 'passenger:0' };
+  vehicle.components.vehicle.seats['passenger:0'] = local.entity_id;
+  const state = packet([local, vehicle]); h.bridge.update(state, 100, 7);
+  const handle = h.bridge.entityHandle('v1'); assert.equal(h.local.seat, 0);
+  h.local.seat = -1; h.bridge.update(state, 200, 7);
+  assert.equal(h.local.vehicle, handle); assert.equal(h.local.seat, 0);
+  assert.equal(h.messages.filter(m => m.action === 'leave_vehicle').length, 0);
+});
+test('确认座位期间阻止自动挪到驾驶位，解除挂接及断线恢复角色原配置', () => {
+  for (const original of [false, true]) {
+    const h = harness(), local = player(), vehicle = car();
+    h.local.config = { 184: original };
+    local.components.attachment = { entity_id: 'v1', seat: 'passenger:0' };
+    const state = packet([local, vehicle]); h.bridge.update(state, 100, 7);
+    assert.equal(h.local.config[184], true);
+    delete local.components.attachment; h.bridge.update(state, 200, 7);
+    assert.equal(h.local.config[184], original);
+    local.components.attachment = { entity_id: 'v1', seat: 'driver' }; h.bridge.update(state, 300, 7);
+    assert.equal(h.local.config[184], true);
+    h.bridge.clear(); assert.equal(h.local.config[184], original);
+  }
+});
+test('服务器清掉NPC座位先让旧司机离车，再把玩家放入真实空位', () => {
+  const h = harness(), local = player(), driver = npc({ ownership: 'active' }), vehicle = car();
+  driver.components.attachment = { entity_id: 'v1', seat: 'driver' };
+  const state = packet([local, vehicle, driver]); h.bridge.update(state, 100, 7);
+  const npcHandle = h.bridge.entityHandle('n1'); assert.equal(h.entities.get(npcHandle).seat, -1);
+  delete driver.components.attachment; local.components.attachment = { entity_id: 'v1', seat: 'driver' };
+  h.calls.length = 0; h.bridge.update(state, 200, 7);
+  const leave = h.calls.findIndex(c => c.name === 'mpLeaveVehicle' && c.arguments[0] === npcHandle);
+  const enter = h.calls.findIndex(c => c.name === 'mpSetPedIntoVehicle' && c.arguments[0] === 7);
+  assert.ok(leave >= 0 && enter > leave);
+  assert.equal(h.local.seat, -1); assert.equal(h.entities.get(npcHandle).vehicle, 0);
+});
+test('两个已挂接乘员互换座位时先释放错座，再恢复各自服务端座位', () => {
+  const h = harness(), local = player(), remote = player({ entity_id: 'p2', player_id: 'REMOTE' }), vehicle = car();
+  local.components.attachment = { entity_id: 'v1', seat: 'passenger:0' };
+  remote.components.attachment = { entity_id: 'v1', seat: 'passenger:1' };
+  vehicle.components.vehicle.seats = { driver: null, 'passenger:0': 'p1', 'passenger:1': 'p2' };
+  const state = packet([local, remote, vehicle]); h.bridge.update(state, 100, 7);
+  const handle = h.bridge.entityHandle('v1');
+  h.entities.get(7).vehicle = handle; h.entities.get(7).seat = 1;
+  h.entities.get(8).vehicle = handle; h.entities.get(8).seat = 0;
+  h.calls.length = 0; h.bridge.update(state, 200, 7);
+  assert.equal(h.entities.get(7).seat, 0); assert.equal(h.entities.get(8).seat, 1);
+  assert.equal(h.messages.filter(m => m.action === 'leave_vehicle').length, 0);
+});
+test('同车错座而目标位尚占用时不能记作成功，也不能把纠正失败当成玩家主动离车', () => {
+  const h = harness(), local = player(), vehicle = car();
+  local.components.attachment = { entity_id: 'v1', seat: 'passenger:0' };
+  const state = packet([local, vehicle]); h.setLoaded(false); h.bridge.update(state, 100, 7);
+  h.setLoaded(true); h.bridge.update(state, 200, 7);
+  const handle = h.bridge.entityHandle('v1');
+  // Reproduce a native failed warp while the desired seat is still occupied.
+  h.bridge.clear(); h.bridge.update(state, 300, 7);
+  const nextHandle = h.bridge.entityHandle('v1');
+  h.local.vehicle = nextHandle; h.local.seat = -1;
+  h.entities.get(8).vehicle = nextHandle; h.entities.get(8).seat = 0;
+  // A new lifecycle has not successfully confirmed this seat in native state.
+  local.generation++; h.bridge.update(state, 400, 7);
+  assert.equal(h.local.vehicle, 0, '目标位仍占用时先释放错座，等待实际空位后重试');
+  h.local.vehicle = 0; h.bridge.update(state, 1500, 7);
+  assert.equal(h.messages.filter(m => m.action === 'leave_vehicle').length, 0);
+  h.entities.get(8).vehicle = 0; h.bridge.update(state, 1600, 7);
+  assert.equal(h.local.vehicle, nextHandle); assert.equal(h.local.seat, 0);
+  assert.notEqual(handle, nextHandle);
 });
 test('服务器人口唯一生成，获租约NPC才运行wander，迁移和范围卸载释放副本', () => {
   const h = harness(), state = packet([player(), npc()]); h.bridge.update(state, 100, 7);

@@ -153,8 +153,8 @@ function publishedDownloads(array $candidates): stdClass
 
 // ── 配置内容：维护者只需要修改这一段 ──
 $site = 'https://gtav.2t.hk';
-$latestVersion = '0.2.14';
-$releaseNotes = "启动器 0.2.14 统一中国与美国正式、实验战局线路，所有线路地址、端口、健康接口和 WSS 路径均由远程配置提供，不再内置公网默认地址。保留地区及中英文线路信息，浏览器健康检测后才可选择；故事、自由沙盒、公共战局与共享朋友入口沿用 0.2.13 的加载流程。中美服务端均为 0.4.2，使用维护者提供的证书。原游戏资源保持只读；macOS 包为开发签名、未公证。";
+$latestVersion = '0.2.15';
+$releaseNotes = "启动器 0.2.15 修复多个玩家乘坐同一载具：已有玩家司机时自动申请空乘客位，按服务器座位纠正挂接并阻止本地自动换驾驶位；乘客离车不影响司机控制授权。新增 GitHub 项目入口，仓库更名为 GTAV Web Multiplayer Launcher，并提供英文默认 README、中文 README 与强制保留官网和仓库链接的自定义署名许可。中美线路仍从接口获取；原游戏资源保持只读，macOS 为未公证开发签名包。";
 $servers = [
     ['id' => 'main', 'name' => '公共战局', 'role' => '主线路', 'address' => 'gtaserver-cn.2t.hk:47485',
         'health_url' => 'https://gtaserver-cn.2t.hk:47485/47485/health',
@@ -200,7 +200,7 @@ $translations = [
     'zh-CN' => ['oltitle' => $site, 'release_notes' => $releaseNotes, 'announcements' => $announcements],
     'en' => [
         'oltitle' => $site,
-        'release_notes' => 'Launcher 0.2.14 unifies the China and US main and experimental session routes. Server addresses, ports, health endpoints and WSS paths come from remote configuration, with no built-in public fallback. Region labels and Chinese/English route metadata are preserved; routes require a successful browser health check before selection. Story, sandbox, public sessions and shared guest entry retain the 0.2.13 loading flow. Both regions run server 0.4.2 using maintainer-provided certificates. Original game resources remain read-only; the macOS development build is not notarized.',
+        'release_notes' => 'Launcher 0.2.15 fixes shared vehicle seating: when another player is driving, enter requests choose a free passenger seat; attachments follow server-confirmed seats and prevent automatic driver shuffling. Passenger exits preserve the driver control offer. A GitHub shortcut opens GTAV Web Multiplayer Launcher, with an English default README, a Chinese README and a custom attribution license requiring the project website and repository links. China and US routes still come from remote configuration. Original game resources remain read-only; the macOS development build is not notarized.',
         'announcements' => [
             ['title' => 'Welcome to the GTA V public session',
                 'body' => "Select Public Session in the launcher, enter your nickname and choose an available route. Shared guests select online mode on the web page and enter their own details.\nPlayers must use the same server; each port has a separate session.",
@@ -212,16 +212,10 @@ $translations = [
     ],
 ];
 $downloadCandidates = [
-    'macos_arm64' => [
-        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-macOS-arm64-v0.2.14-development.zip',
-        'sha256' => 'a5556a5dc9e94a15daf1a49378e72212164ce3f2f60466ef3c269bac598e9c04',
-    ],
-    'windows_x64' => [
-        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-Windows-x64-v0.2.14.exe',
-        'sha256' => '6d609c7ea7ebb31017abb8c22926d52ad333dfb453021693b1ef0983231ad15c',
-    ],
+    'macos_arm64' => ['url' => '', 'sha256' => ''],
+    'windows_x64' => ['url' => '', 'sha256' => ''],
 ];
-// 两平台 0.2.14 产物已核验；由维护者先上传客户端，再覆盖本配置。
+// 完成 0.2.15 两平台构建后填入真实 URL 与 SHA-256；客户端先上传，配置最后覆盖。
 // ── 配置内容结束 ──
 
 try {

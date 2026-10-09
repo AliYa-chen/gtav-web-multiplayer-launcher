@@ -3,6 +3,8 @@ export default Object.freeze({
   "app.brand": "Public Session Launcher",
   "app.ready": "Launcher ready",
   "app.clientsRunning": "{count} clients running",
+  "app.repository": "View the project on GitHub",
+  "message.repositoryFailed": "Unable to open GitHub. Visit https://github.com/AliYa-chen/gtav-web-multiplayer-launcher.",
   "settings.eyebrow": "YOUR LOS SANTOS",
   "settings.title": "Settings",
   "settings.close": "Close settings",

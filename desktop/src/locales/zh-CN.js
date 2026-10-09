@@ -3,6 +3,8 @@ export default Object.freeze({
   "app.brand": "公共战局启动器",
   "app.ready": "启动器就绪",
   "app.clientsRunning": "{count} 个客户端已启动",
+  "app.repository": "在 GitHub 上查看项目",
+  "message.repositoryFailed": "无法打开 GitHub，请访问 https://github.com/AliYa-chen/gtav-web-multiplayer-launcher。",
   "settings.eyebrow": "你的洛圣都",
   "settings.title": "设置",
   "settings.close": "关闭设置",

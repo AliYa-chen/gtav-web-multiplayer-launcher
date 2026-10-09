@@ -120,6 +120,43 @@ class PublicEnginePatchTests(unittest.TestCase):
         self.assertIn("mpNetworkScriptHandler", self.audits["public"].exports[index])
         self.assertEqual(self.body(self.original, index), self.body(self.audits["public"], index))
 
+    def test_vehicle_seat_config_flags_use_checked_native_abis_and_unchanged_bodies(self):
+        expected = {
+            'mpSetPedConfigFlag': (57558, 'ped_commands::CommandSetPedConfigFlag(int, int, bool)',
+                                   ['i32', 'i32', 'i32'], []),
+            'mpGetPedConfigFlag': (57560, 'ped_commands::CommandGetPedConfigFlag(int, int, bool)',
+                                   ['i32', 'i32', 'i32'], ['i32']),
+        }
+        for name, specification in expected.items():
+            with self.subTest(export=name):
+                self.assertEqual(export_map(True)[name], specification)
+                index, native_name, parameters, results = specification
+                self.assertEqual(self.original.descriptor(index)['name'], native_name)
+                self.assertEqual(self.original.descriptor(index)['signature'],
+                                 {'parameters': parameters, 'results': results})
+                self.assertIn(name, self.audits['public'].exports[index])
+                self.assertEqual(self.body(self.original, index), self.body(self.audits['public'], index))
+                self.assertNotIn(name, export_map(False))
+
+        getter = self.original.instructions(57560)
+        setter = self.original.instructions(57558)
+        motion = self.original.instructions(76396)
+        self.assertTrue(getter['decode_complete'] and setter['decode_complete'] and motion['decode_complete'])
+        # 184 在原 flag 位图中是 CPed+5307 的最低位；getter 输出规范化为 0/1。
+        getter_ops = {op['instruction_offset']: op for op in getter['instructions']}
+        self.assertEqual(getter_ops[90]['memory']['offset'], 5284)
+        self.assertEqual(getter_ops[100]['operation'], 'local.tee')
+        self.assertEqual(getter_ops[104]['operation'], 'i32.ne')
+        # SET 的 switch 中 184 跳过 readonly 标记分支，随后进入原生位图写入。
+        setter_table = next(op for op in setter['instructions'] if op['operation'] == 'br_table')
+        self.assertEqual(setter_table['labels'][184 - 2], 1)
+        # 原 motion task 在这个 flag 为 true 时跳过自动换到驾驶位的逻辑。
+        motion_ops = {op['instruction_offset']: op for op in motion['instructions']}
+        self.assertEqual(motion_ops[2841]['memory']['offset'], 5307)
+        self.assertEqual(motion_ops[2845]['value'], 1)
+        self.assertEqual(motion_ops[2847]['operation'], 'i32.and')
+        self.assertEqual(motion_ops[2848]['operation'], 'br_if')
+
     @classmethod
     def setUpClass(cls):
         cls.source_digest = hashlib.sha256(DEFAULT_WASM.read_bytes()).hexdigest()

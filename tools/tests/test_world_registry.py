@@ -162,6 +162,29 @@ public class WorldRegistryHarness {
         check(w.playerEntity(driver.playerId())!=null,"Driver identity preserved");
     }
 
+    static void seatBaselineUsesCurrentFacts() throws Exception {
+        WorldRegistry w=world();Entity driver=ped(w,"driver",0),first=ped(w,"first",1),second=ped(w,"second",1),far=ped(w,"far",20);
+        Entity car=vehicle(w,2);long basis=car.revision();
+        w.enterSeat("driver",driver.entityId(),driver.ownerEpoch(),car.entityId(),"driver",basis,100);
+        Entity driving=w.entity(car.entityId());
+        Entity moved=w.propose("driver",proposal(driving,1,at(2.5),null),101).entities().get(0);
+        long ownerEpoch=moved.ownerEpoch();
+        denied("stale_owner",()->w.enterSeat("other",first.entityId(),first.ownerEpoch(),car.entityId(),"passenger:0",basis,102));
+        denied("invalid_revision",()->w.enterSeat("first",first.entityId(),first.ownerEpoch(),car.entityId(),"passenger:0",moved.revision()+1,103));
+        denied("too_far",()->w.enterSeat("far",far.entityId(),far.ownerEpoch(),car.entityId(),"passenger:0",basis,104));
+        w.enterSeat("first",first.entityId(),first.ownerEpoch(),car.entityId(),"passenger:0",basis,105);
+        Entity occupied=w.entity(car.entityId());
+        check(occupied.ownerEpoch()==ownerEpoch && occupied.ownerId().equals("driver"),"Passenger old-basis join must preserve current driver ownership");
+        check(occupied.components().vehicle().seats().get("passenger:0").equals(first.entityId()),"Old basis reserves current free passenger seat");
+        long cut=w.snapshot().cutRevision();
+        denied("seat_unavailable",()->w.enterSeat("second",second.entityId(),second.ownerEpoch(),car.entityId(),"passenger:0",basis,106));
+        check(w.snapshot().cutRevision()==cut && w.entity(second.entityId()).components().attachment()==null,"Old free-seat snapshot cannot displace its current occupant");
+        w.leaveSeat("first",first.entityId(),first.ownerEpoch(),107);
+        Entity released=w.entity(car.entityId());
+        check(released.ownerEpoch()==ownerEpoch && released.ownerId().equals("driver"),"Passenger exit must preserve driver ownership");
+
+    }
+
     static void healthRespawnAndDeletion() throws Exception {
         WorldRegistry w=world();Entity p=ped(w,"p1",0),v=vehicle(w,2);
         w.setVehicleHealthTrusted(v.entityId(),400,350,v.revision(),100);
@@ -260,6 +283,7 @@ public class WorldRegistryHarness {
             case "proposal" -> proposalsAndMovement();
             case "lease" -> leaseFencingAndMigration();
             case "seats" -> atomicSeatsAndDisconnect();
+            case "seat-basis" -> seatBaselineUsesCurrentFacts();
             case "lifecycle" -> healthRespawnAndDeletion();
             case "history" -> boundedHistoryAndEpoch();
             case "concurrent" -> snapshotTransactionsUnderConcurrency();
@@ -301,6 +325,7 @@ class WorldRegistryTests(unittest.TestCase):
     def test_owner_proposal_cannot_write_health_or_bypass_movement(self): self.run_scenario("proposal")
     def test_lease_expiry_migration_and_old_owner_fencing(self): self.run_scenario("lease")
     def test_atomic_seat_race_disconnect_and_vehicle_deletion(self): self.run_scenario("seats")
+    def test_seat_old_basis_rechecks_ownership_occupancy_distance_and_lifecycle(self): self.run_scenario("seat-basis")
     def test_server_health_respawn_generation_and_deleted_identity(self): self.run_scenario("lifecycle")
     def test_bounded_history_tombstones_and_epoch_recovery(self): self.run_scenario("history")
     def test_snapshot_never_observes_half_seat_transaction(self): self.run_scenario("concurrent")

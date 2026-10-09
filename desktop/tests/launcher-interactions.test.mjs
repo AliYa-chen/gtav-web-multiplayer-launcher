@@ -10,7 +10,7 @@ const source = (await readFile(new URL('../src/main.js', import.meta.url), 'utf8
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 const caFingerprint = 'AB:'.repeat(31) + 'CD';
 async function launcher(desktop = true, options = {}) {
-  const calls = [], values = new Map(), events = new Map(), intervals = [], held = new Map(), failures = new Set(), copied = [], requests = [], healthRequests = [], timers = new Map();
+  const calls = [], values = new Map(), events = new Map(), intervals = [], held = new Map(), failures = new Set(), copied = [], requests = [], healthRequests = [], timers = new Map(), opened = [];
   let timerId = 0, frameId = 0;
   const frames = new Map(), observers = [];
   let clients = options.clients || (options.urls || []).map((url, index) => ({ id: index + 1, number: index + 1, primary: index === 0, running_url: url, invitation_url: options.invitationUrls?.[index] || '' }));
@@ -49,6 +49,7 @@ async function launcher(desktop = true, options = {}) {
     if (selector === '.launch-details') return details;
     if (selector === '.addresses') return app.innerHTML.includes('class="addresses"') ? addresses : null;
     if (selector === '.lan-overlay') return app.innerHTML.includes('class="lan-overlay"') ? lanDialog : null;
+    if (selector === '#project-repository') return app.innerHTML.includes('id="project-repository"') ? button('project-repository') : null;
     const field = /^#(lan-[^:]+)$/.exec(selector)?.[1];
     if (field) return app.innerHTML.includes(`id="${field}"`) ? button(field) : null;
     if (!app.innerHTML.includes('class="mandatory-update"')) return null;
@@ -59,7 +60,8 @@ async function launcher(desktop = true, options = {}) {
   }, addEventListener(name, callback) { events.set(`document:${name}`, callback); } };
   const context = vm.createContext({
     ...presentation, ...internationalization, html: presentation.escapeHtml, metadata: { version: '0.2.5' }, backgrounds: [{ id: 'sunglasses', labelKey: 'background.sunglasses', image: '/sunglasses.webp' }, { id: 'beach', labelKey: 'background.beach', image: '/beach.webp' }],
-    document, localStorage: { getItem: (key) => values.get(key), setItem: (key, value) => values.set(key, value) }, isTauri: () => desktop,
+    document, window: { open: (...args) => { opened.push(args); return null; } },
+    localStorage: { getItem: (key) => values.get(key), setItem: (key, value) => values.set(key, value) }, isTauri: () => desktop,
     navigator: { language: options.browserLanguage || 'zh-CN', languages: [options.browserLanguage || 'zh-CN'], ...(options.clipboard === false ? {} : { clipboard: { writeText: async (text) => { copied.push(text); } } }) },
     listen: async (name, callback) => { events.set(`tauri:${name}`, callback); return () => {}; }, invoke: async (command, args) => {
       calls.push({ command, args });
@@ -121,7 +123,7 @@ async function launcher(desktop = true, options = {}) {
   vm.runInContext(source, context);
   await tick();
   flushFrames();
-  return { calls, app, values, events, intervals, document, status, copied, requests, healthRequests, timers,
+  return { calls, app, values, events, intervals, document, status, copied, requests, healthRequests, timers, opened,
     renderCount: () => renderCount,
     resize(value) { layout = { ...layout, ...value }; observers.forEach((observer) => observer.callback()); flushFrames(); },
     setCaSystemStatus(value) { caSystemStatus = value; },
@@ -159,7 +161,7 @@ test('新版本强制全屏更新，阻止所有后台操作且 Esc 和点击遮
   assert.match(ui.app.innerHTML, /最新版本 <strong>0\.2\.6<\/strong>/);
   assert.doesNotMatch(ui.app.innerHTML, /id="background-picker"|class="reader-overlay"|id="mandatory-update-(?:close|dismiss)"/);
   const before = ui.calls.length;
-  for (const [id, dataset] of [['choose'], ['verify'], ['launch'], ['additional'], ['stop'], ['settings-toggle'], ['get-game-resources'], ['website'], ['update-download'], ['check-updates'], ['', { open: '0' }], ['', { read: 'release' }], ['', { background: 'beach' }], ['mandatory-update-dismiss']]) {
+  for (const [id, dataset] of [['choose'], ['verify'], ['launch'], ['additional'], ['stop'], ['settings-toggle'], ['project-repository'], ['get-game-resources'], ['website'], ['update-download'], ['check-updates'], ['', { open: '0' }], ['', { read: 'release' }], ['', { background: 'beach' }], ['mandatory-update-dismiss']]) {
     await ui.click(id, dataset);
   }
   let prevented = false, stopped = false;
@@ -289,6 +291,39 @@ test('实际设置点击持久化背景，检查更新与下载始终交给受�
   await ui.click('mandatory-update-check');
   await ui.click('website');
   assert.equal(ui.calls.at(-1).command, 'open_project_website');
+});
+
+test('GitHub仓库按钮有中英无障碍提示，配置不可用时仍调用无参数专用命令', async () => {
+  const ui = await launcher();
+  assert.match(ui.app.innerHTML, /id="project-repository" type="button"[^>]*aria-label="在 GitHub 上查看项目"[^>]*title="在 GitHub 上查看项目"/);
+  assert.match(ui.app.innerHTML, /id="project-repository"[^>]*><svg[^>]*aria-hidden="true"[^>]*focusable="false"/);
+  assert.ok(ui.app.innerHTML.indexOf('id="project-repository"') < ui.app.innerHTML.indexOf('id="settings-toggle"'));
+  ui.failRemote(); await ui.click('check-updates');
+  const before = ui.calls.length;
+  await ui.click('project-repository');
+  assert.equal(ui.calls.length, before + 1);
+  assert.equal(ui.calls.at(-1).command, 'open_project_repository');
+  assert.equal(ui.calls.at(-1).args, undefined);
+  assert.deepEqual(ui.opened, []);
+  await ui.changeLanguage('en');
+  assert.match(ui.app.innerHTML, /id="project-repository"[^>]*aria-label="View the project on GitHub"[^>]*title="View the project on GitHub"/);
+});
+
+test('网页预览只打开固定GitHub仓库并隔离opener，null返回不算失败', async () => {
+  const ui = await launcher(false, { browserLanguage: 'en-US' });
+  await ui.click('project-repository');
+  assert.deepEqual(ui.opened, [['https://github.com/AliYa-chen/gtav-web-multiplayer-launcher', '_blank', 'noopener,noreferrer']]);
+  assert.deepEqual(ui.calls, []);
+  assert.doesNotMatch(ui.app.innerHTML, /Unable to open GitHub/);
+});
+
+test('GitHub打开失败显示可翻译地址并恢复键盘焦点', async () => {
+  const ui = await launcher();
+  ui.failCommand('open_project_repository'); await ui.click('project-repository');
+  assert.match(ui.app.innerHTML, /无法打开 GitHub，请访问 https:\/\/github\.com\/AliYa-chen\/gtav-web-multiplayer-launcher。/);
+  assert.equal(ui.document.activeElement.id, 'project-repository');
+  await ui.changeLanguage('en');
+  assert.match(ui.app.innerHTML, /Unable to open GitHub\. Visit https:\/\/github\.com\/AliYa-chen\/gtav-web-multiplayer-launcher\./);
 });
 
 test('后台远程配置刷新事件立即更新公告，文字不会变为HTML', async () => {
