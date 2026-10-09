@@ -154,7 +154,7 @@ function publishedDownloads(array $candidates): stdClass
 // ── 配置内容：维护者只需要修改这一段 ──
 $site = 'https://gtav.2t.hk';
 $latestVersion = '0.2.15';
-$releaseNotes = "启动器 0.2.15 修复多个玩家乘坐同一载具：已有玩家司机时自动申请空乘客位，按服务器座位纠正挂接并阻止本地自动换驾驶位；乘客离车不影响司机控制授权。新增 GitHub 项目入口，仓库更名为 GTAV Web Multiplayer Launcher，并提供英文默认 README、中文 README 与强制保留官网和仓库链接的自定义署名许可。中美线路仍从接口获取；原游戏资源保持只读，macOS 为未公证开发签名包。";
+$releaseNotes = "启动器 0.2.15 修复多个玩家乘坐同一载具：已有玩家司机时自动申请空乘客位，按服务器座位纠正挂接并阻止本地自动换驾驶位；乘客离车不影响司机控制授权。新增 GitHub 项目入口，仓库更名为 GTAV Web Multiplayer Launcher，并提供英文默认 README、中文 README 和标准 MIT 许可，版权声明保留官网与仓库链接。中美线路仍从接口获取；原游戏资源保持只读，macOS 为未公证开发签名包。";
 $servers = [
     ['id' => 'main', 'name' => '公共战局', 'role' => '主线路', 'address' => 'gtaserver-cn.2t.hk:47485',
         'health_url' => 'https://gtaserver-cn.2t.hk:47485/47485/health',
@@ -200,7 +200,7 @@ $translations = [
     'zh-CN' => ['oltitle' => $site, 'release_notes' => $releaseNotes, 'announcements' => $announcements],
     'en' => [
         'oltitle' => $site,
-        'release_notes' => 'Launcher 0.2.15 fixes shared vehicle seating: when another player is driving, enter requests choose a free passenger seat; attachments follow server-confirmed seats and prevent automatic driver shuffling. Passenger exits preserve the driver control offer. A GitHub shortcut opens GTAV Web Multiplayer Launcher, with an English default README, a Chinese README and a custom attribution license requiring the project website and repository links. China and US routes still come from remote configuration. Original game resources remain read-only; the macOS development build is not notarized.',
+        'release_notes' => 'Launcher 0.2.15 fixes shared vehicle seating: when another player is driving, enter requests choose a free passenger seat; attachments follow server-confirmed seats and prevent automatic driver shuffling. Passenger exits preserve the driver control offer. A GitHub shortcut opens GTAV Web Multiplayer Launcher, with an English default README, a Chinese README and the standard MIT License; the copyright notice preserves the project website and repository links. China and US routes still come from remote configuration. Original game resources remain read-only; the macOS development build is not notarized.',
         'announcements' => [
             ['title' => 'Welcome to the GTA V public session',
                 'body' => "Select Public Session in the launcher, enter your nickname and choose an available route. Shared guests select online mode on the web page and enter their own details.\nPlayers must use the same server; each port has a separate session.",

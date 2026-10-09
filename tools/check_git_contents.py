@@ -39,6 +39,11 @@ def main():
         total += size
         if name.startswith(DENIED_PREFIXES) or path.suffix.lower() in DENIED_SUFFIXES:
             errors.append('禁止提交资源或生成文件：' + name)
+        if (any(part in ('tests', 'test', '__tests__', 'fixtures', '__fixtures__') for part in path.parts)
+                or path.name.startswith('test_') or '.test.' in path.name
+                or ('.spec.' in path.name and name != 'desktop/src-tauri/assets/engine-spec.json')
+                or name == 'tools/world_protocol_soak.py'):
+            errors.append('禁止提交测试目录或测试专用文件：' + name)
         if '__pycache__' in path.parts or path.name == '.DS_Store' or path.name.startswith('.env'):
             errors.append('禁止提交缓存或环境配置：' + name)
         if mode == '120000':

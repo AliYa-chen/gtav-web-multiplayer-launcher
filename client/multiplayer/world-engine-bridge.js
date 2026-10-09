@@ -316,6 +316,7 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     prepareMeleeAnimation(now);
     const entities = new Map(world.entities.map((entity) => [entity.entity_id, entity]));
     const local = world.entities.find((entity) => entity.player_id === packet.client_id);
+    if (!localReady) { lastSeat = null; leavePendingAt = -Infinity; }
     if (localPed && ex.mpPopulationType && now - lastPopulationCleanup >= 1000) {
       lastPopulationCleanup = now;
       if (!enumerationBuffer) enumerationBuffer = Number(ex.mpAlloc(520n));
@@ -458,6 +459,7 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     // SetPedIntoVehicle refuses an occupied seat even after the server freed it.
     const occupants = [];
     for (const entity of entities.values()) if (entity.kind === 'ped') {
+      if (entity.player_id === packet.client_id && !localReady) continue;
       const handle = entity.player_id === packet.client_id ? localPed
         : entity.player_id ? playerReplica(entity.player_id) : replicas.get(entity.entity_id)?.handle;
       if (!handle || !ex.mpExists(handle)) continue;
@@ -477,10 +479,12 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     for (const { entity, handle } of occupants) {
       const attachment = entity.components.attachment;
       const vehicle = attachment ? replicas.get(attachment.entity_id)?.handle : 0;
-      if (attachment && vehicle && ex.mpGetVehiclePedIsIn?.(handle, 0) === vehicle
+      const current = ex.mpGetVehiclePedIsIn?.(handle, 0) || 0;
+      const managed = current && [...replicas.values()].some((entry) => entry.kind === 'vehicle' && entry.handle === current);
+      if (attachment && vehicle && managed
           && !seatedAt(handle, vehicle, attachment.seat)) {
         if (entity.player_id === packet.client_id) { lastSeat = null; leavePendingAt = -Infinity; }
-        ex.mpLeaveVehicle?.(handle, vehicle, 16);
+        ex.mpLeaveVehicle?.(handle, current, 16);
       }
     }
     // Attachments use shared IDs; each client resolves its own native handles.

@@ -272,13 +272,7 @@ python3 -B tools/build_server_bundle.py --skip-build
 
 工具核对 `java -jar server/multiplayer-server.jar --help` 版本与源码一致后输出 `archive/packages/`，逐文件校验 SHA-256。包内 `VERSION.json` 记录基础协议 1、世界协议 2、最低启动器 0.2.0 和 Java 17 要求。
 
-完整项目中的测试位于 `tools/tests/test_multiplayer.py`：
-
-```sh
-python3 -B tools/tests/test_multiplayer.py
-```
-
-测试使用真实 JAR 和多个 WebSocket 客户端，验证公共战局自动加入、晚加入快照、状态/射击/聊天转发、序号与字段范围、退出清理和帧格式。它验证服务协议；真实游戏角色互见、伤害及载具需要另外使用实际游戏客户端验证。
+维护者本地协议回归文件不随源码分发。已有验证使用真实 JAR 和多个 WebSocket 客户端，验证公共战局自动加入、晚加入快照、状态/射击/聊天转发、序号与字段范围、退出清理和帧格式。它验证服务协议；真实游戏角色互见、伤害及载具需要另外使用实际游戏客户端验证。
 
 ## 权威战斗与连接恢复（0.2）
 
@@ -310,7 +304,7 @@ python3 -B tools/tests/test_multiplayer.py
 不会重置玩家身份、生命值、分数或消息序号。浏览器客户端每五秒心跳、十秒快照，
 二十五秒没有服务器响应则自动重连；网络恢复与页面激活时及时尝试恢复连接。
 
-新增回归测试：`python3 -B tools/tests/test_combat_world.py`。测试覆盖公共协议、权威战斗、身份恢复和严格字段验证。
+维护者本地战斗回归已覆盖公共协议、权威战斗、身份恢复和严格字段验证。
 
 ## 无响应连接清理（0.2.2）
 
@@ -326,10 +320,9 @@ HTTP 升级握手最多等待八秒。WebSocket 建立后，默认十五秒内�
 
 ```sh
 java -jar multiplayer-server.jar --host 127.0.0.1 --port 8787 --idle-timeout 2 --hello-timeout 1
-python3 -B tools/tests/test_connection_timeout.py
 ```
 
-测试覆盖空连接、静默玩家、半帧阻塞、无效消息、五秒应用心跳、只有自动 `pong` 的连接、身份恢复及读写资源释放。实际部署保留三十秒默认值，允许加载和网络的短暂波动。
+维护者本地回归已覆盖空连接、静默玩家、半帧阻塞、无效消息、五秒应用心跳、只有自动 `pong` 的连接、身份恢复及读写资源释放。实际部署保留三十秒默认值，允许加载和网络的短暂波动。
 
 ## 行为同步与射击回执（0.2.3）
 
@@ -409,17 +402,14 @@ python3 -B tools/tests/test_connection_timeout.py
 
 上述候选都不是完整物理反作弊；服务器目前没有独立重算环境碰撞和 GTA AI。近战原型使用存活、两米距离、最多一点五米高度差、前方向量余弦至少0.15和七百毫秒冷却验证，单次最多二十点伤害；没有骨骼接触、格挡或武器近战规则。普通枪械射线可作用于同一登记表里的玩家及有模拟者的 NPC，但仍不包含墙体遮挡。
 
-本机实验构建与测试：
+本机实验构建与启动：
 
 ```sh
 python3 -B tools/build_multiplayer_server.py --output server/multiplayer-world-experimental.jar
 java -jar server/multiplayer-world-experimental.jar --host 127.0.0.1 --port 47486 --max-clients 8
-python3 -B tools/tests/test_world_registry.py
-python3 -B tools/tests/test_world_v2.py --jar server/multiplayer-world-experimental.jar
-python3 -B tools/tests/test_vehicle_world.py --jar server/multiplayer-world-experimental.jar
-python3 -B tools/tests/test_entity_batch.py --jar server/multiplayer-world-experimental.jar
 ```
 
+统一世界、注册表、座位与实体批次回归由维护者本地保留，不随源码分发。
 
 ## 近战动作事件（0.3.1）
 
@@ -435,10 +425,4 @@ python3 -B tools/tests/test_entity_batch.py --jar server/multiplayer-world-exper
 
 攻击者必须存活并持有自己的有效租约，每次确认动作均消耗七百毫秒近战冷却，包括挥空。成功请求幂等缓存只重发原 `interaction_result`，不会再次产生动作事件、伤害或世界提交。没有声明动作能力的旧客户端不会收到新增事件类型；原伤害广播继续来自同一注册表。
 
-`GET /health` 增加 `melee_requests_received`、`melee_events_approved` 和 `melee_hits` 三个汇总计数，用于区分意图没到服务器、被拒绝和确认动作未命中。计数不包含身份凭据、坐标或玩家名字。新增验证：
-
-```sh
-python3 -B tools/tests/test_melee_events.py --jar server/multiplayer-world-experimental.jar
-```
-
-这些测试验证消息、命中与幂等规则；游戏内实际挥拳动画仍由 native 适配器执行，需要真实客户端验证。
+`GET /health` 增加 `melee_requests_received`、`melee_events_approved` 和 `melee_hits` 三个汇总计数，用于区分意图没到服务器、被拒绝和确认动作未命中。计数不包含身份凭据、坐标或玩家名字。维护者本地回归已验证消息、命中与幂等规则，相关回归文件不随源码分发；游戏内实际挥拳动画仍由 native 适配器执行，需要真实客户端验证。

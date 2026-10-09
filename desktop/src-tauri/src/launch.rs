@@ -101,39 +101,3 @@ pub fn valid_online_query(query: &str) -> bool {
     let value=LaunchPreferences { name:pairs.get("name").cloned().unwrap_or_default(), server:pairs.get("server").cloned().unwrap_or_default(),preset:pairs.get("preset").cloned().unwrap_or_default(),..Default::default() };
     !value.server.is_empty() && value.validate().is_ok() && pairs.get("seed").and_then(|value|value.parse::<u32>().ok()).is_some()
 }
-#[cfg(test)] mod tests {
-    use super::*;
-    #[test] fn entry_modes_encode_values_without_paths_or_flags() {
-        let value=LaunchPreferences { name:"A & 中文".into(),server:"wss://example.com:47485/47485/ws".into(),..Default::default() }.validate().unwrap();
-        let path=value.entry_path(123).unwrap(); let url=Url::parse(&game_url("https://192.168.1.2:8443/",&path).unwrap()).unwrap();
-        assert_eq!(url.path(),"/play/");let query=url.query_pairs().collect::<std::collections::HashMap<_,_>>();assert_eq!(query["name"],"A & 中文");assert_eq!(query["seed"],"123");
-        for mode in ["story","sandbox"] { let value=LaunchPreferences {mode:mode.into(),..Default::default()};assert!(value.entry_path(1).unwrap().contains(&format!("mode={mode}"))); }
-        assert!(game_url("https://192.168.1.2/","https://attacker.example/").is_err());
-    }
-    #[test] fn validation_and_old_defaults_are_safe() {
-        assert_eq!(serde_json::from_str::<LaunchPreferences>("{}").unwrap(),LaunchPreferences::default());
-        for server in ["ws://example.com/ws","wss://user:password@example.com/","https://example.com/","/play/","wss://example.com/#x"] { assert!(normalize_server(server).is_err(),"{server}"); }
-        assert_eq!(normalize_server("example.com:47485").unwrap(),"wss://example.com:47485/ws");
-        assert!(LaunchPreferences {name:"x".repeat(25),..Default::default()}.validate().is_err());
-    }
-    #[test] fn launcher_queries_require_complete_unique_owner_settings() {
-        let valid=LaunchPreferences {server:"wss://example.com:47485/47485/ws".into(),..Default::default()}.entry_path(10).unwrap();
-        let query=valid.split_once('?').unwrap().1;
-        assert!(valid_online_query(query));
-        for extra in ["&debug=1","&name=duplicate","&mode=story","&seed=99"] {assert!(!valid_online_query(&format!("{query}{extra}")));}
-        assert!(!valid_online_query("launcher=1&name=A&server=ws%3A%2F%2Fexample.com&seed=1&preset=npc_male"));
-        for normalized in ["launcher=1","launcher=1&mode=online"] {assert!(valid_online_query(normalized));}
-        for invalid in ["launcher=1&debug=1","launcher=1&launcher=1","launcher=1&mode=story",
-            "launcher=1&name=A","launcher=1&mode=online&seed=1"] {assert!(!valid_online_query(invalid),"{invalid}");}
-        let invite=guide_url("http://192.168.1.2:8442/","/").unwrap();
-        assert!(invite.ends_with("target=%2F"));assert!(!invite.contains("name")&&!invite.contains("seed")&&!invite.contains("server"));
-    }
-    #[test] fn online_launch_can_only_select_the_current_remote_catalog() {
-        let config=crate::remote_config::parse_config(br#"{"servers":[{"id":"main","address":"example.com:47485","health_url":"https://example.com:47485/47485/health"}]}"#).unwrap();
-        assert_eq!(configured_server(&config,"example.com:47485").unwrap().id.as_deref(),Some("main"));
-        assert!(configured_server(&config,"wss://example.com:47485/47485/ws").is_some());
-        assert!(configured_server(&config,"wss://example.com:47485/wrong/ws").is_none());
-        assert!(configured_server(&config,"attacker.example:47485").is_none());
-        assert!(configured_server(&config,"").is_some());
-    }
-}

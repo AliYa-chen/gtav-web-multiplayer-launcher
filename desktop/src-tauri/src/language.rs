@@ -59,22 +59,3 @@ pub fn shared() -> SharedLanguage { Arc::new(RwLock::new(LanguageConfig::default
 pub fn snapshot(shared: &SharedLanguage) -> LanguageConfig {
     shared.read().unwrap_or_else(|error| error.into_inner()).clone()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn supported_preferences_and_system_fallback_are_bounded() {
-        assert_eq!(resolve("zh-Hant-TW"), "zh-CN"); assert_eq!(resolve("EN-us"), "en");
-        assert_eq!(resolve("fr-FR"), "en");
-        assert!(LanguageConfig::with_preference("../../data",2).is_err());
-        assert_eq!(LanguageConfig::with_preference("en",2).unwrap().resolved,"en");
-        assert_eq!(LanguageConfig::with_preference("zh-CN",3).unwrap().revision,3);
-    }
-    #[test]
-    fn all_ports_observe_one_live_language_setting() {
-        let language=shared();let another=language.clone();
-        *language.write().unwrap()=LanguageConfig::with_preference("en",2).unwrap();
-        assert_eq!(snapshot(&another).resolved,"en");assert_eq!(snapshot(&another).revision,2);
-    }
-}

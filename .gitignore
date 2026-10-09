@@ -49,3 +49,15 @@ node_modules/
 /desktop/src-tauri/target/
 /desktop/src-tauri/gen/
 /desktop/releases/
+
+# 用户要求：测试代码仅在本地保留，禁止提交。
+**/tests/
+**/test/
+**/__tests__/
+**/__fixtures__/
+**/fixtures/
+**/test_*
+**/*.test.*
+**/*.spec.*
+/tools/world_protocol_soak.py
+!desktop/src-tauri/assets/engine-spec.json

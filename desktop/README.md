@@ -182,7 +182,7 @@ npm run tauri -- build --no-bundle
 运行用户不需要上传证书；朋友仅从 HTTP 引导页下载公共 CA 并手动安装信任。
 工作流只上传构建 Artifact，不创建 GitHub Releases。
 
-构建工作流使用中文步骤名称，只保留环境准备、依赖安装、编译缓存和产物打包上传，以及 macOS 签名校验。打包时不运行 `npm test` 或 `cargo test --locked`，也不单独重复执行前端构建；Tauri 的 `beforeBuildCommand` 会自动构建前端。测试可在本地按需运行。
+构建工作流使用中文步骤名称，只保留环境准备、依赖安装、编译缓存和产物打包上传，以及 macOS 签名校验。打包时不执行维护者本地回归，也不单独重复执行前端构建；Tauri 的 `beforeBuildCommand` 会自动构建前端。维护者本地验证文件不随源码分发。
 
 维护者更新已支持的引擎适配描述：
 
@@ -194,13 +194,7 @@ python3 -B tools/generate_launcher_engine_spec.py --check
 
 ## 验证
 
-```sh
-cd desktop
-npm test
-cargo test --manifest-path src-tauri/Cargo.toml
-```
-
-测试覆盖目录名变化与 b/data/外层选择、资源路径安全、版本不兼容、嵌入首页优先、Range/HEAD、gzip 批读取、端口复用与冲突回退、退出释放端口、引擎构建等。默认测试使用临时虚拟资源，不依赖游戏数据。
+维护者本地回归文件不随源码分发。已有验证覆盖目录名变化与 b/data/外层选择、资源路径安全、版本不兼容、嵌入首页优先、Range/HEAD、gzip 批读取、端口复用与冲突回退、退出释放端口、引擎构建等。默认测试使用临时虚拟资源，不依赖游戏数据。
 
 维护者可让编译出的程序执行无窗口后端检查，不打开游戏或浏览器：
 

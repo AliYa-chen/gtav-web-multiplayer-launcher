@@ -6,10 +6,9 @@
 
 ```sh
 python3 -B tools/audit_world_ai.py
-python3 -m unittest tools.tests.test_world_ai -v
 ```
 
-完整证据保存到忽略提交的 `docs/snapshot/world-ai-evidence.json`。工具记录资源 SHA-256、全部场景名称、每条触发规则的事件/条件/动作，以及 WASM 任务接口真实类型。
+维护者本地回归文件不随源码分发。完整证据保存到忽略提交的 `docs/snapshot/world-ai-evidence.json`。工具记录资源 SHA-256、全部场景名称、每条触发规则的事件/条件/动作，以及 WASM 任务接口真实类型。
 
 ## 本地 AI 实际包含什么
 

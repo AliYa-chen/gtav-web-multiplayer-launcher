@@ -197,11 +197,6 @@ async fn prepare_game(app: tauri::AppHandle, state: State<'_, LauncherState>, se
     Ok(snapshot(&inner, &state))
 }
 
-#[cfg(test)]
-fn start_client(prepared: &Prepared, lan: lan::PreparedLan, index: usize, log_dir: &Path,
-    remote: Arc<RwLock<serde_json::Value>>, multiplayer_server: String) -> Result<GameClient, String> {
-    start_client_with_identity(prepared, lan, ClientIdentity { id: index as u64, primary: index == 1 }, log_dir, remote, multiplayer_server, language::shared())
-}
 
 fn start_client_with_identity(prepared: &Prepared, lan: lan::PreparedLan, identity: ClientIdentity,
     log_dir: &Path, remote: Arc<RwLock<serde_json::Value>>, multiplayer_server: String, language: language::SharedLanguage) -> Result<GameClient, String> {
@@ -606,107 +601,4 @@ pub fn verify_resources(selected: &Path, cache: &Path) -> Result<serde_json::Val
         "remote_http_source": remote_http["source"], "remote_http_error": remote_http["error"],
         "remote_http_servers": remote_http["config"]["servers"],
         "remote_http_announcements": remote_http["config"]["announcements"].as_array().map(Vec::len) }))
-}
-
-#[cfg(test)]
-mod update_gate_tests {
-    use super::*;
-
-    #[test]
-    fn older_preferences_keep_the_selected_resources_and_default_to_system_language() {
-        let old: Preferences=serde_json::from_str(r#"{"selected_directory":"/games/player-data"}"#).unwrap();
-        assert_eq!(old.selected_directory.as_deref(),Some("/games/player-data"));
-        assert!(old.language.is_none());
-        let saved=Preferences { language:Some("en".into()), launch: None,..old };
-        let reloaded:Preferences=serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap();
-        assert_eq!(reloaded.language.as_deref(),Some("en"));
-    }
-
-    #[test]
-    fn preferences_replace_atomically_without_rewriting_linked_files() {
-        let temp=tempfile::tempdir().unwrap();
-        let path=temp.path().join("launcher.json");
-        fs::write(&path,b"previous preferences").unwrap();
-        let linked=temp.path().join("player-original");
-        fs::hard_link(&path,&linked).unwrap();
-        write_preferences(&path,&Preferences { language:Some("en".into()), launch: None,..Default::default() }).unwrap();
-        assert_eq!(fs::read(&linked).unwrap(),b"previous preferences");
-        let saved:Preferences=serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(saved.language.as_deref(),Some("en"));
-        let blocked=temp.path().join("directory");fs::create_dir(&blocked).unwrap();
-        assert!(write_preferences(&blocked,&saved).is_err());
-        assert_eq!(fs::read(&path).unwrap(),serde_json::to_vec_pretty(&saved).unwrap());
-    }
-
-    fn fresh_release(version: &str) -> remote_config::ConfigSnapshot {
-        remote_config::ConfigSnapshot {
-            config: remote_config::parse_config(&serde_json::to_vec(&serde_json::json!({
-                "latest_version": version
-            })).unwrap()).unwrap(),
-            source: remote_config::ConfigSource::Remote, stale: false,
-            fetched_at: Some(123), checked_at: 123, error: None,
-        }
-    }
-
-    #[test]
-    fn publish_latches_before_status_and_failure_cannot_unlock_game_commands() {
-        let state = LauncherState::default();
-        assert!(ensure_current_launcher(&state).is_ok());
-        publish_remote_snapshot(&state.remote, &state.update_required, fresh_release("99.0.0")).unwrap();
-        assert!(state.update_required.load(Ordering::Acquire));
-        assert_eq!(ensure_current_launcher(&state).unwrap_err(), "请先更新启动器至最新版本。");
-        assert!(snapshot(&Inner::default(), &state).update_required);
-        publish_remote_snapshot(&state.remote, &state.update_required, remote_config::ConfigSnapshot::default()).unwrap();
-        assert!(ensure_current_launcher(&state).is_err());
-        publish_remote_snapshot(&state.remote, &state.update_required, fresh_release(env!("CARGO_PKG_VERSION"))).unwrap();
-        assert!(ensure_current_launcher(&state).is_ok());
-        assert!(!snapshot(&Inner::default(), &state).update_required);
-    }
-
-    #[test]
-    fn game_command_gate_observes_the_local_http_proxy_shared_snapshot() {
-        let state = LauncherState::default();
-        *state.remote.write().unwrap() = serde_json::to_value(fresh_release("99.0.0")).unwrap();
-        assert!(!state.update_required.load(Ordering::Acquire));
-        assert!(ensure_current_launcher(&state).is_err());
-        *state.remote.write().unwrap() = serde_json::to_value(remote_config::ConfigSnapshot::default()).unwrap();
-        assert!(ensure_current_launcher(&state).is_err());
-        *state.remote.write().unwrap() = serde_json::to_value(fresh_release(env!("CARGO_PKG_VERSION"))).unwrap();
-        assert!(ensure_current_launcher(&state).is_ok());
-    }
-
-
-}
-
-#[cfg(test)]
-mod public_ca_export_tests {
-    use super::*;
-
-    #[test]
-    fn export_contains_only_the_public_certificate_and_refuses_game_paths() {
-        let temp = tempfile::tempdir().unwrap();
-        let game = temp.path().join("game");
-        fs::create_dir(&game).unwrap();
-        let protected = game.join("original.data");
-        fs::write(&protected, b"original data").unwrap();
-        assert!(write_public_ca(&game.join("ca.cer"), Some(&game)).is_err());
-        assert!(write_public_ca(&protected, Some(&game)).is_err());
-        assert_eq!(fs::read(&protected).unwrap(), b"original data");
-        let target = temp.path().join("public.cer");
-        write_public_ca(&target, Some(&game)).unwrap();
-        assert_eq!(fs::read(&target).unwrap(), ca_trust::public_certificate_der().unwrap());
-        assert!(x509_parser::parse_x509_certificate(&fs::read(target).unwrap()).is_ok());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn export_cannot_follow_a_symbolic_link_into_resources() {
-        let temp = tempfile::tempdir().unwrap();
-        let original = temp.path().join("original.data");
-        fs::write(&original, b"read only resources").unwrap();
-        let alias = temp.path().join("ca.cer");
-        std::os::unix::fs::symlink(&original, &alias).unwrap();
-        assert!(write_public_ca(&alias, None).is_err());
-        assert_eq!(fs::read(original).unwrap(), b"read only resources");
-    }
 }
