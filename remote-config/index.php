@@ -100,6 +100,18 @@ function configUrl($value, bool $httpsOnly = true): string
     return $value;
 }
 
+function configTitle($value): string
+{
+    $value = configText($value, 160, 'i18n.oltitle');
+    if (preg_match('/[<>\r\n\t]/', $value) === 1) {
+        throw new InvalidArgumentException('Invalid translated title.');
+    }
+    if (preg_match('/^[a-z][a-z0-9+.-]*:/i', $value) === 1) {
+        configUrl($value);
+    }
+    return $value;
+}
+
 function publishedDownloads(array $candidates): stdClass
 {
     // 返回 JSON 对象 {}，不能用空数组 []；桌面启动器按 Map 读取 downloads。
@@ -125,37 +137,56 @@ function publishedDownloads(array $candidates): stdClass
 
 // ── 配置内容：维护者只需要修改这一段 ──
 $site = 'https://gtav.2t.hk';
-$latestVersion = '0.2.11';
-$releaseNotes = "客户端 0.2.11 配套公共战局服务端 0.4.1：统一 NPC 行为、武器伤害与地图碰撞查询，支持投射物和爆炸；高频射击、攻击改为排队处理，减少重复拒绝提示。公共战局由服务器策略停用本地剧情，修复小地图底图空白。所有适配由启动器在独立缓存完成，原游戏资源保持只读。当前仍为实验版，macOS 包为开发签名、未公证。";
+$latestVersion = '0.2.12';
+$releaseNotes = "启动器 0.2.12 加入中文、English 和跟随系统；游戏网页与局域网证书引导页自动使用同一语言，已经打开的页面同步更新。原游戏菜单语言在下次进入游戏时生效。配套服务端 0.4.2 补充公共出生区步行导航、卡住恢复、尸体清理与人口补充。所有适配由启动器和服务端完成，原游戏资源保持只读。当前仍为实验版，macOS 包为开发签名、未公证。";
 $servers = [
     ['id' => 'main', 'name' => '公共战局', 'role' => '主线路', 'address' => 'gtaserver.2t.hk:47485',
-        'health_url' => 'https://gtaserver.2t.hk:47485/47485/health'],
+        'health_url' => 'https://gtaserver.2t.hk:47485/47485/health',
+        'i18n' => ['zh-CN' => ['name' => '公共战局', 'role' => '主线路'],
+            'en' => ['name' => 'Public Session', 'role' => 'Main']]],
     ['id' => 'experimental', 'name' => '实验战局', 'role' => '实验线路', 'address' => 'gtaserver.2t.hk:47486',
-        'health_url' => 'https://gtaserver.2t.hk:47486/47486/health'],
+        'health_url' => 'https://gtaserver.2t.hk:47486/47486/health',
+        'i18n' => ['zh-CN' => ['name' => '实验战局', 'role' => '实验线路'],
+            'en' => ['name' => 'Experimental Session', 'role' => 'Experimental']]],
 ];
 // health_url 使用游戏服务器域名的 HTTPS 反向代理；status_url 是网页，不是健康接口。
 $announcements = [
     [
         'title' => '欢迎来到 GTA V 公共战局',
         'body' => "使用启动器选择自己的游戏资源目录，进入游戏后按 O 加入公共战局。\n所有玩家需连接同一条线路；不同端口是独立战局。",
-        'date' => '2026-10-08',
+        'date' => '2026-10-09',
         'url' => $site,
     ],
     [
         'title' => '实验功能说明',
-        'body' => "共同世界同步仍在测试中，警力派遣目前限定公共出生区附近。\n若遇到同步异常，可记录双方操作与发生时间后反馈。",
-        'date' => '2026-10-08',
+        'body' => "共同世界同步仍在测试中，步行导航和警力派遣目前限定公共出生区附近。\n若遇到同步异常，可记录双方操作与发生时间后反馈。",
+        'date' => '2026-10-09',
         'url' => $site,
+    ],
+];
+$translations = [
+    'zh-CN' => ['oltitle' => $site, 'release_notes' => $releaseNotes, 'announcements' => $announcements],
+    'en' => [
+        'oltitle' => $site,
+        'release_notes' => 'Launcher 0.2.12 adds Chinese and English throughout the launcher, game pages and LAN certificate guide. Select a language in Settings; open pages follow automatically. Native game menus use the chosen language on the next game entry. Server 0.4.2 adds pedestrian navigation, stuck recovery, corpse cleanup and population refill near the public spawn area. Original game resources remain read-only. Experimental release; the macOS development build is not notarized.',
+        'announcements' => [
+            ['title' => 'Welcome to the GTA V public session',
+                'body' => "Select your own game resources folder in the launcher, then press O in game to join.\nPlayers must use the same server; each port has a separate session.",
+                'date' => '2026-10-09', 'url' => $site],
+            ['title' => 'Experimental features',
+                'body' => "Shared world synchronization is still being tested. Pedestrian navigation and police dispatch currently cover the public spawn area.\nIf synchronization fails, report both players' actions and the time it occurred.",
+                'date' => '2026-10-09', 'url' => $site],
+        ],
     ],
 ];
 $downloadCandidates = [
     'macos_arm64' => [
-        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-macOS-arm64-v0.2.11-development.zip',
-        'sha256' => '404e589c028662dd044aad2acddc9c4f6220c5f69fcf4cb732bbb74a93929a20',
+        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-macOS-arm64-v0.2.12-development.zip',
+        'sha256' => 'fdb1b1f888994967ee4cece4822d03a9d9d4bd940a71709f6c4baaa4ccb469c7',
     ],
     'windows_x64' => [
-        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-Windows-x64-v0.2.11.exe',
-        'sha256' => 'd5f0d18c4b69c9c759a5aad75c0e332b4ab23aeb8d0aeba971ec28685850a957',
+        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-Windows-x64-v0.2.12.exe',
+        'sha256' => 'a06b610965da839bc6160ebdc137fc5d9baa46db89d58e594d69ef7a1b9bd8a8',
     ],
 ];
 // ── 配置内容结束 ──
@@ -188,6 +219,13 @@ try {
             throw new InvalidArgumentException('Empty server name.');
         }
         configText($server['role'], 80, 'server.role');
+        foreach ($server['i18n'] ?? [] as $locale => $translation) {
+            if (!in_array($locale, ['zh-CN', 'en'], true) || !is_array($translation)
+                || trim(configText($translation['name'] ?? '', 80, 'server.i18n.name')) === '') {
+                throw new InvalidArgumentException('Invalid server translation.');
+            }
+            configText($translation['role'] ?? '', 80, 'server.i18n.role');
+        }
         if (isset($server['health_url'])) {
             configUrl($server['health_url'], false);
         }
@@ -207,6 +245,22 @@ try {
             configUrl($announcement['url']);
         }
     }
+    foreach ($translations as $locale => $translation) {
+        if (!in_array($locale, ['zh-CN', 'en'], true) || !is_array($translation)
+            || !is_array($translation['announcements'] ?? null) || count($translation['announcements']) > 24) {
+            throw new InvalidArgumentException('Invalid configuration translation.');
+        }
+        configTitle($translation['oltitle']);
+        configText($translation['release_notes'], 8192, 'i18n.release_notes');
+        foreach ($translation['announcements'] as $announcement) {
+            if (!is_array($announcement) || trim(configText($announcement['title'] ?? '', 120, 'i18n.announcement.title')) === '') {
+                throw new InvalidArgumentException('Invalid translated announcement.');
+            }
+            configText($announcement['body'] ?? '', 4096, 'i18n.announcement.body');
+            if (isset($announcement['date'])) { configText($announcement['date'], 40, 'i18n.announcement.date'); }
+            if (isset($announcement['url'])) { configUrl($announcement['url']); }
+        }
+    }
     $config = [
         'schema_version' => 1,
         'oltitle' => $site,
@@ -215,6 +269,7 @@ try {
         'server' => $servers,
         'servers' => $servers,
         'announcements' => $announcements,
+        'i18n' => $translations,
         'update' => ['latest_version' => $latestVersion, 'release_notes' => $releaseNotes,
             'downloads' => publishedDownloads($downloadCandidates)],
     ];
