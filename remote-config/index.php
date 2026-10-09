@@ -142,10 +142,12 @@ $releaseNotes = "启动器 0.2.12 加入中文、English 和跟随系统；游�
 $servers = [
     ['id' => 'main', 'name' => '公共战局', 'role' => '主线路', 'address' => 'gtaserver.2t.hk:47485',
         'health_url' => 'https://gtaserver.2t.hk:47485/47485/health',
+        'region' => 'CN',
         'i18n' => ['zh-CN' => ['name' => '公共战局', 'role' => '主线路'],
             'en' => ['name' => 'Public Session', 'role' => 'Main']]],
     ['id' => 'experimental', 'name' => '实验战局', 'role' => '实验线路', 'address' => 'gtaserver.2t.hk:47486',
         'health_url' => 'https://gtaserver.2t.hk:47486/47486/health',
+        'region' => 'CN',
         'i18n' => ['zh-CN' => ['name' => '实验战局', 'role' => '实验线路'],
             'en' => ['name' => 'Experimental Session', 'role' => 'Experimental']]],
 ];
@@ -219,12 +221,18 @@ try {
             throw new InvalidArgumentException('Empty server name.');
         }
         configText($server['role'], 80, 'server.role');
+        if (array_key_exists('region', $server)) {
+            configText($server['region'], 64, 'server.region');
+        }
         foreach ($server['i18n'] ?? [] as $locale => $translation) {
             if (!in_array($locale, ['zh-CN', 'en'], true) || !is_array($translation)
                 || trim(configText($translation['name'] ?? '', 80, 'server.i18n.name')) === '') {
                 throw new InvalidArgumentException('Invalid server translation.');
             }
             configText($translation['role'] ?? '', 80, 'server.i18n.role');
+            if (array_key_exists('region', $translation)) {
+                configText($translation['region'], 64, 'server.i18n.region');
+            }
         }
         if (isset($server['health_url'])) {
             configUrl($server['health_url'], false);
@@ -265,7 +273,7 @@ try {
         'schema_version' => 1,
         'oltitle' => $site,
         'website' => $site,
-        // server 保持单对象，兼容现有桌面启动器；servers 提供完整线路目录。
+        // server 与 servers 返回同一完整线路目录，保留可选地区与翻译字段。
         'server' => $servers,
         'servers' => $servers,
         'announcements' => $announcements,
