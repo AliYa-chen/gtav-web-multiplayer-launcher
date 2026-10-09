@@ -16,9 +16,42 @@ The repository contains project source and documentation. **It does not provide 
 - Public-session endpoints, names, announcements, and download metadata come from the [configuration API](https://oss.2t.hk/gtav/). Public server addresses are not compiled into the client.
 - A standalone Java 17+ server owns player/entity identity, seats, ownership leases, combat decisions, respawning, population, weather, and law rules. Authorized client engines execute assigned native movement and vehicle simulation.
 
-**Development versions: client 0.2.15 and server 0.4.3-world-experimental.** This revision includes passenger-seat reconciliation and ownership fixes; these versions are pending release/deployment. The previous recorded release is client 0.2.14 with server 0.4.2; see its [build and deployment record](docs/0.2.14中美线路与构建记录.md). A version in source does not establish which version is currently installed on a public server or download site.
+**Client 0.2.15 and server 0.4.3-world-experimental.** This revision includes passenger-seat reconciliation and ownership fixes. The macOS build was verified locally, the Windows build was produced by GitHub Actions and verified, and server 0.4.3 is deployed to the main and experimental sessions in both China and the US (four routes). Uploading the client packages and configuration to the download website remains a manual step. See the [0.2.15 build and deployment record](docs/0.2.15多人同乘与公开源码.md); source and build versions alone do not establish the version currently offered by the download site.
 
 Multiplayer remains experimental. Static collision and pedestrian navigation cover roughly **600 × 600 metres around the test spawn**, not the whole map. There is no complete server-side RAGE physics runtime or migration of every single-player script, tool, mission, or vehicle weapon. This uses a custom protocol and does not implement native GTA Online or FiveM compatibility. Protocol tests do not establish complete gameplay synchronization; `game_sync` and `native_clone_transport` remain false. Final page and in-game acceptance are performed by the user.
+
+## Gameplay screenshots
+
+These screenshots were provided by the user from earlier gameplay demonstrations. They show the recorded scenes and are not acceptance results for this release. Game content remains subject to its owners' terms; see [NOTICE.md](NOTICE.md).
+
+![Two browser clients showing a vehicle and nearby players outside Los Santos Customs](docs/images/multiplayer-vehicles.jpg)
+
+*Vehicle and nearby players rendered in two browser clients.*
+
+![A nighttime gameplay scene with a police vehicle and its flashing lights](docs/images/police-response.jpg)
+
+*Police presence and wanted-level indicators during the earlier demonstration.*
+
+<details>
+<summary>More gameplay screenshots</summary>
+
+![Two browser clients showing players aiming toward one another](docs/images/player-combat.jpg)
+
+*Player combat viewed from two clients.*
+
+![The in-game map with separate markers for two players](docs/images/map-player-markers.jpg)
+
+*Player markers on the in-game map.*
+
+![Two client views of a firefight with visible hit feedback](docs/images/combat-hit.jpg)
+
+*Hit feedback during a player firefight.*
+
+![One client showing a fallen player and the other showing the death screen](docs/images/combat-death.jpg)
+
+*The same combat scene and a player's death screen.*
+
+</details>
 
 ## Quick start
 
@@ -143,7 +176,7 @@ The detailed technical reports are currently in Chinese. Older version sections 
 - [Weapon catalog and authoritative combat](docs/武器目录与权威战斗.md) · [AI and script migration](docs/AI行为与事件迁移.md)
 - [Population and pedestrian AI](docs/服务端人口与步行AI.md) · [Collision and physics](docs/服务端碰撞与物理实现.md)
 - [Native-network feasibility](docs/原生网络复制可行性审计.md) · [Browser/FiveM boundaries](docs/FiveM参考与浏览器实现边界.md)
-- [Loading flow](docs/加载流程与启动器入口.md) · [0.2.14 release record](docs/0.2.14中美线路与构建记录.md)
+- [Loading flow](docs/加载流程与启动器入口.md) · [0.2.15 release record](docs/0.2.15多人同乘与公开源码.md) · [0.2.14 release record](docs/0.2.14中美线路与构建记录.md)
 
 ## License
 

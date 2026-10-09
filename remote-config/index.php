@@ -212,10 +212,16 @@ $translations = [
     ],
 ];
 $downloadCandidates = [
-    'macos_arm64' => ['url' => '', 'sha256' => ''],
-    'windows_x64' => ['url' => '', 'sha256' => ''],
+    'macos_arm64' => [
+        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-macOS-arm64-v0.2.15-development.zip',
+        'sha256' => '0aa1d2a626704c2400b5ce7dcb39a164b623e6992398a809786c16724a7cfc45',
+    ],
+    'windows_x64' => [
+        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-Windows-x64-v0.2.15.exe',
+        'sha256' => '7e7767cbd0973496ebc786c0bf43dda1824388048baae844623787140e97a274',
+    ],
 ];
-// 完成 0.2.15 两平台构建后填入真实 URL 与 SHA-256；客户端先上传，配置最后覆盖。
+// 0.2.15 两平台产物与 SHA-256 已核验；维护者先上传客户端，再覆盖本配置。
 // ── 配置内容结束 ──
 
 try {
