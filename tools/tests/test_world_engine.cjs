@@ -147,6 +147,45 @@ test('服务器人口唯一生成，获租约NPC才运行wander，迁移和范�
   h.bridge.update(state, 500, 7); assert.ok(h.entities.get(handle).frozen);
   state.world.entities.pop(); h.bridge.update(state, 600, 7); assert.ok(!h.entities.has(handle));
 });
+test('死亡NPC固定在服务器确认位置，禁止本地尸体物理、任务和重复复活', () => {
+  for (const ownership of ['active', 'unowned']) {
+    const h = harness(), actor = npc({ ownership }), state = packet([player(), actor]);
+    h.bridge.update(state, 100, 7); const handle = h.bridge.entityHandle('n1');
+    h.entities.get(handle).position = [999, 0, 20];
+    actor.revision++; actor.components.combat = life(0);
+    actor.components.transform.velocity = [4, 0, -2];
+    h.calls.length = 0; h.messages.length = 0; h.bridge.update(state, 200, 7);
+    assert.ok(h.entities.get(handle).position.every((value, index) => Math.abs(value - actor.components.transform.position[index]) < .00001));
+    assert.deepEqual(h.entities.get(handle).velocity, [0, 0, 0]);
+    assert.equal(h.entities.get(handle).frozen, true);
+    assert.equal(h.entities.get(handle).health, 0);
+    assert.equal(h.entities.get(handle).invincible, true);
+    assert.deepEqual(h.calls.filter(c => c.name === 'mpSetCanRagdoll').at(-1).arguments, [handle, 0]);
+    assert.equal(h.calls.filter(c => c.name === 'mpClearTasksImmediately').length, 1);
+    h.entities.get(handle).health = 200; h.entities.get(handle).dead = false;
+    h.bridge.update(state, 700, 7);
+    assert.equal(h.entities.get(handle).health, 0, '本机误恢复生命必须被服务端死亡状态覆盖');
+    assert.equal(h.calls.filter(c => c.name === 'mpClearTasksImmediately').length, 1);
+    assert.equal(h.calls.filter(c => ['mpTaskWander', 'mpTaskGoStraight', 'mpTaskStandStill', 'mpResurrect', 'mpRevive'].includes(c.name)).length, 0);
+    assert.equal(h.messages.filter(m => m.type === 'entity_input' || m.kind === 'entity_health').length, 0);
+  }
+});
+test('NPC新代次重建句柄，服务器删除尸体后不会在同一世界重新出现', () => {
+  const h = harness(), actor = npc({ ownership: 'active' }), state = packet([player(), actor]);
+  actor.components.combat = life(0); h.bridge.update(state, 100, 7);
+  const corpse = h.bridge.entityHandle('n1');
+  actor.generation = 2; actor.owner_epoch = 2; actor.revision = 2;
+  actor.components.combat = life(200); actor.ai_task = ai({ generation: 2, owner_epoch: 2 });
+  h.bridge.update(state, 200, 7); const replacement = h.bridge.entityHandle('n1');
+  assert.notEqual(replacement, corpse); assert.equal(h.entities.has(corpse), false);
+  assert.equal(h.entities.get(replacement).health, 200); assert.equal(h.entities.get(replacement).frozen, false);
+  actor.components.combat = life(0); actor.revision++; h.bridge.update(state, 300, 7);
+  state.world.entities.pop(); h.bridge.update(state, 400, 7); h.bridge.update(state, 600, 7);
+  assert.equal(h.entities.has(replacement), false); assert.equal(h.bridge.entityHandle('n1'), 0);
+  state.world.entities.push(npc({ entity_id: 'n2', ownership: 'active', ai_task: ai({ entity_id: 'n2' }) }));
+  h.bridge.update(state, 700, 7);
+  assert.ok(h.bridge.entityHandle('n2')); assert.equal(h.bridge.entityHandle('n1'), 0);
+});
 test('环境伤害、死亡和逮捕只提交候选，等待服务器，不在适配器里宣布重生', () => {
   const h = harness(), state = packet([player()]); h.local.health = 175;
   let status = h.bridge.update(state, 100, 7); assert.equal(status.awaitingLife, true);
@@ -302,6 +341,53 @@ test('已授权司机坐进确认车辆后才执行定点驾驶且迁移立即�
   const handle=h.bridge.entityHandle('n1');assert.equal(h.entities.get(handle).vehicle,h.bridge.entityHandle('v1'));
   driver.owner_id='REMOTE';driver.owner_epoch++;h.bridge.update(state,200,7);
   assert.equal(h.calls.filter(c=>c.name==='mpDriveToCoord').length,1);assert.equal(h.entities.get(handle).frozen,true);
+});
+test('司机和车辆必须都由本端主动模拟，车辆失权立即停止旧驾驶任务', () => {
+  const h = harness(), vehicle = car({ ownership: 'offered' }), driver = npc({ ownership: 'active' });
+  driver.components.attachment = { entity_id: 'v1', seat: 'driver' };
+  driver.ai_task = ai({ action: 'drive', vehicle_entity_id: 'v1', destination: [740, -1050, 22], speed: 15 });
+  const state = packet([player(), vehicle, driver]); h.bridge.update(state, 100, 7);
+  assert.equal(h.calls.filter(c => c.name === 'mpDriveToCoord').length, 0);
+  vehicle.ownership = 'active'; h.bridge.update(state, 200, 7);
+  assert.equal(h.calls.filter(c => c.name === 'mpDriveToCoord').length, 1);
+  h.calls.length = 0; vehicle.owner_id = 'REMOTE'; vehicle.owner_epoch++; vehicle.revision++;
+  h.bridge.update(state, 300, 7); h.bridge.update(state, 500, 7);
+  assert.equal(h.calls.filter(c => c.name === 'mpDriveToCoord').length, 0);
+  const driverHandle = h.bridge.entityHandle('n1');
+  assert.equal(h.calls.filter(c => c.name === 'mpClearTasksImmediately' && c.arguments[0] === driverHandle).length, 1);
+  assert.ok(h.calls.some(c => c.name === 'mpTaskStandStill' && c.arguments[0] === driverHandle));
+  vehicle.owner_id = 'LOCAL'; vehicle.owner_epoch++; vehicle.revision++;
+  h.bridge.update(state, 600, 7);
+  assert.equal(h.calls.filter(c => c.name === 'mpDriveToCoord').length, 1);
+});
+test('服务器漫游逃跑和追逐路点持续执行，同revision不会在三秒后永久停止', () => {
+  for (const action of ['wander', 'flee', 'pursue']) {
+    const h = harness(), actor = npc({ ownership: 'active', ai_task: ai({ action, destination: [750, -1088, 22.4], speed: 2 }) });
+    const state = packet([player(), actor]); h.bridge.update(state, 100, 7);
+    assert.equal(h.calls.filter(c => c.name === 'mpTaskGoStraight').length, 1);
+    assert.equal(h.calls.filter(c => c.name === 'mpTaskWander').length, 0, '有服务器路点时禁止引擎自行漫游');
+    h.bridge.update(state, 500, 7); h.bridge.update(state, 2599, 7);
+    assert.equal(h.calls.filter(c => c.name === 'mpTaskGoStraight').length, 1);
+    h.bridge.update(state, 2600, 7); h.bridge.update(state, 3100, 7); h.bridge.update(state, 5100, 7);
+    assert.equal(h.calls.filter(c => c.name === 'mpTaskGoStraight').length, 3);
+    actor.components.transform.position = [750, -1088, 22.4]; h.bridge.update(state, 7600, 7);
+    assert.equal(h.calls.filter(c => c.name === 'mpTaskGoStraight').length, 3, '已到确认路点不反复重发');
+    actor.ai_task = ai({ action, revision: 2, destination: [775, -1088, 22.4], speed: 2 });
+    h.bridge.update(state, 7700, 7);
+    assert.equal(h.calls.filter(c => c.name === 'mpTaskGoStraight').length, 4, '新路点立即执行');
+    actor.owner_id = 'REMOTE'; actor.owner_epoch++; h.bridge.update(state, 7800, 7); h.bridge.update(state, 11000, 7);
+    assert.equal(h.calls.filter(c => c.name === 'mpTaskGoStraight').length, 4, '失去租约后不得续发旧路点');
+  }
+});
+test('等待目标模型的AI重试最多每秒一次，目标就绪后能使用同一任务版本', () => {
+  const h = harness(), actor = npc({ ownership: 'active', ai_task: ai({ action: 'combat', target_entity_id: 'p2', target_generation: 1 }) });
+  const target = player({ entity_id: 'p2', player_id: 'NOT_READY' }), state = packet([player(), actor, target]);
+  h.bridge.update(state, 100, 7); const handle = h.bridge.entityHandle('n1');
+  h.bridge.update(state, 200, 7); h.bridge.update(state, 1000, 7);
+  assert.equal(h.calls.filter(c => c.name === 'mpClearTasksImmediately' && c.arguments[0] === handle).length, 1);
+  assert.equal(h.calls.filter(c => c.name === 'mpTaskCombatPed').length, 0);
+  target.player_id = 'REMOTE'; h.bridge.update(state, 1100, 7);
+  assert.equal(h.calls.filter(c => c.name === 'mpTaskCombatPed').length, 1);
 });
 test('玩家及NPC对本机枪弹火焰爆炸和近战免疫，碰撞溺水继续走环境候选', () => {
   const h=harness(),state=packet([player(),npc({ownership:'active'})]);h.bridge.update(state,100,7);

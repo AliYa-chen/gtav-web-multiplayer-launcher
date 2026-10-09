@@ -74,6 +74,8 @@ class VehicleWorldTests(world_tests.WorldV2Harness):
         started = time.monotonic(); sequence = 0
         while time.monotonic() - started < duration:
             sequence += 1
+            # Population ownership also requires the simulator's player lease to stay active.
+            self.state(player, sequence)
             current = self.entity(car["entity_id"])
             self.input(player, current, sequence=sequence)
             self.delta(player, car["entity_id"], lambda item: item["last_input_seq"] == sequence)

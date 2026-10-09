@@ -13,10 +13,14 @@ final class WorldService {
     private final CombatWorld combat;
     private final WorldCollision collision;
     private final RoadNetwork roads;
+    private final PedNavigation pedestrian;
     private final long epochMillis=System.currentTimeMillis(),started=System.nanoTime();
     private final WorldEnvironment environment=new WorldEnvironment(epochMillis);
     private final WorldLaw law;
     private final WorldAi ai;
+    private final WorldPopulation population=new WorldPopulation();
+    private final Set<String> claimedPopulationVehicles=new HashSet<>();
+    private long populationRemoved,populationRefilled;
     private final Map<String,Long> npcShots=new HashMap<>();
     private long worldShotEvents;
     private record WorldCut(Snapshot entities,long tick,Map<String,Object> environment,Map<String,Object> law) {}
@@ -40,7 +44,11 @@ final class WorldService {
     }
     WorldService(){this(StaticCollision.empty(),RoadNetwork.empty());}
     WorldService(StaticCollision geometry,RoadNetwork roads){
+        this(geometry,roads,PedNavigation.empty());
+    }
+    WorldService(StaticCollision geometry,RoadNetwork roads,PedNavigation pedestrian){
         this.roads=Objects.requireNonNull(roads);
+        this.pedestrian=Objects.requireNonNull(pedestrian);
         Set<Long> weapons=new HashSet<>(Set.of(0L,UNARMED));
         for(Map<String,Object> rule:CombatWorld.weaponRules())weapons.add(((Number)rule.get("weapon")).longValue());
         registry=new WorldRegistry(UUID.randomUUID().toString(),Map.of(
@@ -49,7 +57,7 @@ final class WorldService {
         collision=new WorldCollision(registry.worldEpoch());collision.geometry(geometry);
         combat=new CombatWorld(registry,collision);
         law=new WorldLaw(registry.worldEpoch());
-        ai=new WorldAi(registry.worldEpoch(),roads);
+        ai=new WorldAi(registry.worldEpoch(),roads,pedestrian);
         try{registry.createTrusted(Kind.VEHICLE,BLISTA,null,Components.vehicle(
             Transform.at(new Vector(715.5,-1088.1,22.4),90),Vehicle.empty(3)),null,0,now());}
         catch(WorldRegistry.Rejection error){throw new IllegalStateException(error);}
@@ -69,37 +77,78 @@ final class WorldService {
         if(populationCells.size()>=8)retireDistantCell(origin);
         if(populationCells.size()>=8)return;
         populationCells.add(cell);cellOrigins.put(cell,origin);
+        for(int i=0;i<8;i++){
+            WorldPopulation.Slot walker=new WorldPopulation.Slot(cell,i,WorldPopulation.Type.WALKER,
+                new Vector(origin.x()+8+i*3,origin.y()-10,origin.z()));
+            WorldPopulation.Slot traffic=new WorldPopulation.Slot(cell,i,WorldPopulation.Type.TRAFFIC,
+                new Vector(origin.x()+18+i*9,origin.y()+18,origin.z()));
+            population.register(walker,List.of());population.register(traffic,List.of());
+            spawnPopulationSlot(walker,false);spawnPopulationSlot(traffic,false);
+        }
+    }
+    private boolean spawnPopulationSlot(WorldPopulation.Slot slot,boolean refill){
+        if(!populationCells.contains(slot.cell()) || registry.snapshot().entities().size()+slot.type().entityCost()>256)return false;
+        Vector point=slot.anchor();double heading=90;
+        if(slot.type()==WorldPopulation.Type.WALKER && pedestrian.polygonCount()>0){
+            PedNavigation.Snap ground=pedestrian.nearest(new PedNavigation.Point(point.x(),point.y(),point.z()),4);
+            if(ground==null)return false;
+            point=new Vector(ground.position().x(),ground.position().y(),ground.position().z()+.05);
+        }
+        if(slot.type()==WorldPopulation.Type.TRAFFIC && roads.nodeCount()>0){
+            RoadNetwork.Snap road=roads.nearest(new RoadNetwork.Point(point.x(),point.y(),point.z()),60);
+            if(road==null)return false;
+            point=new Vector(road.position().x(),road.position().y(),road.position().z()+1);heading=roads.heading(road);
+        }
+        if(refill)for(Vector player:activePopulationPlayers())if(player.distance(point)<WorldPopulation.SPAWN_EXCLUSION_DISTANCE)return false;
+        if(slot.type()==WorldPopulation.Type.TRAFFIC && (refill || roads.nodeCount()>0))
+            for(Entity existing:registry.snapshot().entities())if(existing.kind()==Kind.VEHICLE && position(existing).distance(point)<6)return false;
+        List<String> created=new ArrayList<>();
         try{
-            for(int i=0;i<8;i++){
-                Entity walker=registry.createTrusted(Kind.PED,0xc99f21c4L,null,Components.ped(Transform.at(new Vector(origin.x()+8+i*3,origin.y()-10,origin.z()),90),
+            if(slot.type()==WorldPopulation.Type.WALKER){
+                Entity walker=registry.createTrusted(Kind.PED,0xc99f21c4L,null,Components.ped(Transform.at(point,heading),
                     new PedView(null,Actions.idle(),UNARMED,false,null),new Combat(200,200,0,0,0)),null,0,now()).entities().get(0);
-                populationEntities.add(walker.entityId());entityCells.put(walker.entityId(),cell);
-                Vector carPosition=new Vector(origin.x()+18+i*9,origin.y()+18,origin.z());
-                double carHeading=90;
-                if(roads.nodeCount()>0){
-                    RoadNetwork.Snap road=roads.nearest(new RoadNetwork.Point(carPosition.x(),carPosition.y(),carPosition.z()),60);
-                    if(road==null)continue;
-                    carPosition=new Vector(road.position().x(),road.position().y(),road.position().z()+1);
-                    carHeading=roads.heading(road);
-                    boolean crowded=false;
-                    for(Entity existing:registry.snapshot().entities())if(existing.kind()==Kind.VEHICLE
-                        && position(existing).distance(carPosition)<6){crowded=true;break;}
-                    if(crowded)continue;
-                }
-                Entity car=registry.createTrusted(Kind.VEHICLE,i%2==0?BLISTA:ASEA,null,Components.vehicle(
-                    Transform.at(carPosition,carHeading),Vehicle.empty(3)),null,0,now()).entities().get(0);
+                created.add(walker.entityId());
+            }else{
+                Entity car=registry.createTrusted(Kind.VEHICLE,slot.index()%2==0?BLISTA:ASEA,null,
+                    Components.vehicle(Transform.at(point,heading),Vehicle.empty(3)),null,0,now()).entities().get(0);
+                created.add(car.entityId());
                 Entity driver=registry.createTrusted(Kind.PED,0xc99f21c4L,null,Components.ped(car.components().transform(),
                     new PedView(null,Actions.idle(),UNARMED,false,null),new Combat(200,200,0,0,0)),null,0,now()).entities().get(0);
-                registry.assignNpcSeatTrusted(driver.entityId(),car.entityId(),"driver",now());
-                for(Entity value:List.of(car,driver)){populationEntities.add(value.entityId());entityCells.put(value.entityId(),cell);}
+                created.add(driver.entityId());registry.assignNpcSeatTrusted(driver.entityId(),car.entityId(),"driver",now());
             }
-        }catch(WorldRegistry.Rejection error){throw new IllegalStateException(error);}
+            for(String id:created){populationEntities.add(id);entityCells.put(id,slot.cell());}
+            population.register(slot,created);if(refill)populationRefilled+=created.size();return true;
+        }catch(WorldRegistry.Rejection error){
+            for(String id:created){Entity entity=registry.entity(id);if(entity!=null)try{registry.deleteTrusted(id,entity.revision(),now());}
+                catch(WorldRegistry.Rejection rollback){throw new IllegalStateException(rollback);}}
+            return false;
+        }
+    }
+    private List<Vector> activePopulationPlayers(){
+        List<Vector> result=new ArrayList<>();long tick=now();
+        for(String id:worldParticipants){Entity player=registry.playerEntity(id);
+            if(player!=null && player.components().combat().alive() && id.equals(player.ownerId()) && player.leaseUntilTick()>tick)result.add(position(player));}
+        return result;
+    }
+    private void maintainPopulation(){
+        WorldPopulation.Plan plan=population.tick(now(),registry.snapshot().entities(),activePopulationPlayers(),claimedPopulationVehicles,256);
+        for(WorldPopulation.Removal removal:plan.removals()){
+            Entity entity=registry.entity(removal.entityId());if(entity==null || entity.generation()!=removal.generation())continue;
+            if(entity.kind()==Kind.VEHICLE && (claimedPopulationVehicles.contains(entity.entityId()) || playerOccupant(entity)!=null))continue;
+            try{registry.deleteTrusted(entity.entityId(),entity.revision(),now());}
+            catch(WorldRegistry.Rejection error){throw new IllegalStateException(error);}
+            populationEntities.remove(entity.entityId());entityCells.remove(entity.entityId());offers.remove(entity.entityId());
+            npcShots.remove(entity.entityId());populationRemoved++;
+        }
+        for(WorldPopulation.Spawn spawn:plan.spawns())spawnPopulationSlot(spawn.slot(),true);
+        claimedPopulationVehicles.removeIf(id->registry.entity(id)==null);
     }
     private void retireDistantCell(Vector origin){
         String selected=null;double farthest=400;
         for(String cell:populationCells){Vector point=cellOrigins.get(cell);boolean occupied=false;
             for(String actor:worldParticipants){Entity player=registry.playerEntity(actor);if(player!=null && position(player).distance(point)<400)occupied=true;}
             for(Entity entity:registry.snapshot().entities())if(cell.equals(entityCells.get(entity.entityId())) && entity.kind()==Kind.VEHICLE){
+                if(claimedPopulationVehicles.contains(entity.entityId()))occupied=true;
                 if(entity.ownerId()!=null && worldParticipants.contains(entity.ownerId()) && entity.leaseUntilTick()>now())occupied=true;
                 for(String passenger:entity.components().vehicle().seats().values())if(passenger!=null && registry.entity(passenger)!=null
                     && registry.entity(passenger).playerId()!=null)occupied=true;
@@ -112,16 +161,24 @@ final class WorldService {
                 Entity entity=registry.entity(id);if(entity!=null)registry.deleteTrusted(id,entity.revision(),now());
                 populationEntities.remove(id);entityCells.remove(id);offers.remove(id);
             }
-            populationCells.remove(retired);cellOrigins.remove(retired);
+            populationCells.remove(retired);cellOrigins.remove(retired);population.forgetCell(retired);
         }catch(WorldRegistry.Rejection error){throw new IllegalStateException(error);}
     }
     private void assignPopulation(){
-        for(String entityId:populationEntities){
-            Entity entity=registry.entity(entityId);if(entity==null || entity.ownerId()!=null || (entity.components().combat()!=null && !entity.components().combat().alive()))continue;
-            Vector anchor=cellOrigins.get(entityCells.get(entityId));String owner=null;double best=400;
-            for(String id:worldParticipants){Entity player=registry.playerEntity(id);if(player==null)continue;double distance=position(player).distance(anchor);
-                if(distance<best){owner=id;best=distance;}}
-            if(owner!=null)try{offer(entityId,owner);}catch(WorldRegistry.Rejection error){throw new IllegalStateException(error);}
+        Map<String,WorldOwnership.PendingOffer> pending=new HashMap<>();
+        offers.forEach((id,offer)->pending.put(id,new WorldOwnership.PendingOffer(offer.owner,offer.deadline)));
+        for(WorldOwnership.Decision decision:WorldOwnership.decide(now(),registry.snapshot().entities(),populationEntities,worldParticipants,pending)){
+            try{
+                registry.setPopulationOwnersTrusted(decision.entityIds(),decision.ownerId(),now());
+                for(String id:decision.entityIds()){
+                    Entity entity=registry.entity(id);Offer old=offers.get(id);
+                    if(decision.ownerId()==null){offers.remove(id);continue;}
+                    if(old!=null && old.owner.equals(entity.ownerId()) && old.epoch==entity.ownerEpoch() && old.deadline>now())continue;
+                    // Existing active members of a partly repaired group retain their ready state.
+                    if(old==null && entity.lastInputSequence()>=0 && entity.ownerId().equals(decision.ownerId()))continue;
+                    offers.put(id,new Offer(entity.ownerId(),entity.ownerEpoch(),now()+5000));
+                }
+            }catch(WorldRegistry.Rejection error){throw new IllegalStateException(error);}
         }
     }
     long now(){return epochMillis+(System.nanoTime()-started)/1_000_000;}
@@ -160,6 +217,12 @@ final class WorldService {
     }
     Map<String,Object> profile(String id){return combat.profile(id);}
     Map<String,Object> meleeStats(){return map("melee_requests_received",meleeRequests,"melee_events_approved",meleeEvents,"melee_hits",meleeHits);}
+    Map<String,Object> populationStats(){return map("slots",population.slots().size(),"cells",populationCells.size(),
+        "entities",populationEntities.size(),"removed",populationRemoved,"refilled",populationRefilled,
+        "claimed_vehicles",claimedPopulationVehicles.size(),"corpse_min_ms",WorldPopulation.CORPSE_MIN_TICKS,
+        "corpse_max_ms",WorldPopulation.CORPSE_MAX_TICKS,"refill_delay_ms",WorldPopulation.REFILL_DELAY_TICKS,
+        "ownership","current_position_groups");}
+    Map<String,Object> pedestrianStatus(){return ai.pedestrianStatus();}
     int statePlayers(){return combat.statePlayers();}
     Map<String,Object> combatState(){return combat.combatState();}
     Map<String,Object> worldState(){return combat.worldState();}
@@ -206,7 +269,7 @@ final class WorldService {
                 return entity==null || entity.ownerId()==null || now()>=item.getValue().deadline;});
         }catch(WorldRegistry.Rejection error){throw new IllegalStateException(error);}
         npcShots.keySet().removeIf(id->registry.entity(id)==null);
-        runQueuedMelee(events);assignPopulation();maintainLaw();maintainAi();return events;
+        runQueuedMelee(events);maintainPopulation();assignPopulation();maintainLaw();maintainAi();return events;
     }
     private void runQueuedMelee(List<Map<String,Object>> events){
         for(String actor:new ArrayList<>(meleeQueues.keySet())){
@@ -451,7 +514,7 @@ final class WorldService {
             recordCombatEvents(events);
         }else if("enter_vehicle".equals(action)){
             String seat=text(input.get("seat"),32);registry.enterSeat(actor,player.entityId(),player.ownerEpoch(),target,seat,revision,now());
-            if("driver".equals(seat))offer(target,actor);
+            if("driver".equals(seat)){if(populationEntities.contains(target))claimedPopulationVehicles.add(target);offer(target,actor);}
         }else if("leave_vehicle".equals(action)){
             if(player.components().attachment()==null || !player.components().attachment().entityId().equals(target))throw new Problem("invalid_seat","目标不是当前乘坐的车辆");
             registry.leaveSeat(actor,player.entityId(),player.ownerEpoch(),now());offers.remove(target);
@@ -600,7 +663,7 @@ final class WorldService {
         events.add(combatState());return events;
     }
     private void offer(String entityId,String actor)throws WorldRegistry.Rejection{
-        Entity entity=registry.entity(entityId);if(!actor.equals(entity.ownerId()))registry.grantOwnerTrusted(entityId,actor,entity.revision(),now()+5000,now());
+        Entity entity=registry.entity(entityId);if(!actor.equals(entity.ownerId()) || entity.leaseUntilTick()<=now())registry.grantOwnerTrusted(entityId,actor,entity.revision(),now()+5000,now());
         entity=registry.entity(entityId);offers.put(entityId,new Offer(actor,entity.ownerEpoch(),now()+5000));
     }
     private WorldCut capture(){
@@ -613,7 +676,7 @@ final class WorldService {
         for(Tombstone tomb:snapshot.tombstones())deleted.add(tombstone(tomb));
         return map("schema_version",2,"world_epoch",epoch(),"cut_revision",snapshot.cutRevision(),"world_tick",captured.tick(),"environment",captured.environment(),"law",captured.law(),
             "entities",entities,"tombstones",deleted,"source","authoritative_world_registry","shared_population",!populationEntities.isEmpty(),"native_clone_transport",false,"session_policy",sessionPolicy(),
-            "navigation",roads.metadata(),"collision",collision.status(),
+            "navigation",roads.metadata(),"pedestrian_navigation",pedestrianStatus(),"collision",collision.status(),"population",populationStats(),
             "world_policy",map("pvp",true,"ai_decisions","server","navigation","server_roads_with_leased_steering","scripts","server_allowlist_after_ready",
                 "weapons",WeaponCatalog.rules().size(),"weapon_source_sha256",WeaponCatalog.SOURCE_SHA256,"collision","server_triangles_and_native_queries",
                 "input_policy","queued_combat_coalesced_bursts"));

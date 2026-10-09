@@ -11,6 +11,9 @@ const read = (name) => fs.readFileSync(path.join(root, 'client/multiplayer', nam
 const dataUrl = (source) => 'data:text/javascript;base64,' + Buffer.from(source).toString('base64');
 const modulePromise = import(dataUrl(read('world-state.js').replace("'./appearance.js'", JSON.stringify(dataUrl(read('appearance.js'))))));
 const copy = (value) => JSON.parse(JSON.stringify(value));
+const adapterTestSource = () => read('game-adapter.js').replace(/^import .* from '\.\.\/i18n\.js';\n/m, '')
+  .replace('export function installGameAdapter', 'function installGameAdapter');
+const adapterLanguageFixture = { getLanguage: () => 'zh-CN', translateText: value => value, onLanguageChange: () => () => {} };
 const actions = { aiming: false, reloading: false, jumping: false, ducking: false, sprinting: false };
 const transform = (x = 711.5) => ({ position: [x, -1088.1, 22.4], rotation: [0, 0, 0, 1], velocity: [0, 0, 0], angular_velocity: [0, 0, 0] });
 const ped = (changes = {}) => ({ entity_id: 'w:epochA:1', kind: 'ped', player_id: 'LOCAL', model: 0x705e61f2,
@@ -138,11 +141,11 @@ test('旧 stream 包、旧 cut 快照和乱序缺块不会倒退基线', async (
 test('适配器将完整 world 基线交给引擎并保持 v1 信息，游戏输入只送到本页网络会话', () => {
   const messages = [], timers = new Map(), hud = { style: {}, textContent: '' }; let receiver;
   const network = { setReceiver: (callback) => { receiver = callback; }, onWorkerMessage: (value) => messages.push(copy(value)) };
-  const context = vm.createContext({ TextEncoder, Atomics, Int32Array, Uint8Array,
+  const context = vm.createContext({ TextEncoder, Atomics, Int32Array, Uint8Array, ...adapterLanguageFixture,
     BroadcastChannel: class { close() {} }, document: { getElementById: () => hud }, addEventListener() {},
     fetch: () => Promise.resolve({ ok: true }), performance: { now: () => 100 },
     setTimeout: (callback) => { timers.set(timers.size + 1, callback); return timers.size; }, clearTimeout: (id) => timers.delete(id) });
-  vm.runInContext(read('game-adapter.js').replace('export function installGameAdapter', 'function installGameAdapter') + '\nglobalThis.install=installGameAdapter;', context);
+  vm.runInContext(adapterTestSource() + '\nglobalThis.install=installGameAdapter;', context);
   const adapter = context.install({}, network), memory = { buffer: new SharedArrayBuffer(16384) }, block = 128, capacity = 8192;
   adapter.onWorkerMessage({ multiplayer: { type: 'memory', memory, block, capacity } });
   receiver({ type: 'session', connected: true, client_id: 'LOCAL', members: [{ id: 'LOCAL' }], peers: [], world_v2: true });
@@ -165,11 +168,11 @@ test('适配器将完整 world 基线交给引擎并保持 v1 信息，游戏输
 
 function adapterHarness() {
   const timers = new Map(), hud = { style: {}, textContent: '' }; let receiver, timer = 0;
-  const context = vm.createContext({ TextEncoder, Atomics, Int32Array, Uint8Array,
+  const context = vm.createContext({ TextEncoder, Atomics, Int32Array, Uint8Array, ...adapterLanguageFixture,
     BroadcastChannel: class { close() {} }, document: { getElementById: () => hud }, addEventListener() {},
     fetch: () => Promise.resolve({ ok: true }), performance: { now: () => 100 },
     setTimeout: (callback) => { timers.set(++timer, callback); return timer; }, clearTimeout: (id) => timers.delete(id) });
-  vm.runInContext(read('game-adapter.js').replace('export function installGameAdapter', 'function installGameAdapter') + '\nglobalThis.install=installGameAdapter;', context);
+  vm.runInContext(adapterTestSource() + '\nglobalThis.install=installGameAdapter;', context);
   const api = context.install({}, { setReceiver: (callback) => { receiver = callback; }, onWorkerMessage() {} });
   const memory = { buffer: new SharedArrayBuffer(262144) }, block = 128, capacity = 128 * 1024;
   api.onWorkerMessage({ multiplayer: { type: 'memory', memory, block, capacity } });

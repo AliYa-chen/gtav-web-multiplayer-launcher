@@ -219,7 +219,7 @@ class WorldAiTests(unittest.TestCase):
             harness.write_text(HARNESS, encoding="utf-8")
             source = ROOT / "server/src/main/java/offline/multiplayer"
             subprocess.run([JAVAC, "-encoding", "UTF-8", "-d", str(root),
-                            *(str(source / name) for name in ("WorldRegistry.java", "WorldLaw.java", "WorldAi.java", "RoadNetwork.java")),
+                            *(str(source / name) for name in ("WorldRegistry.java", "WorldLaw.java", "WorldAi.java", "RoadNetwork.java", "PedNavigation.java")),
                             str(harness)], check=True, capture_output=True, text=True)
             result = subprocess.run([JAVA, "-cp", str(root), "offline.multiplayer.WorldAiHarness"],
                                     check=True, capture_output=True, text=True)

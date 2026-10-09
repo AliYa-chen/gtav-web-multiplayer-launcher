@@ -54,9 +54,20 @@ public final class WorldAi {
 
     private final String worldEpoch;
     private final RoadNetwork roads;
+    private final PedNavigation pedestrian;
     private final Map<String,Threat> threats = new LinkedHashMap<>();
     private final Map<String,Decision> decisions = new LinkedHashMap<>();
     private final Map<String,Course> courses = new LinkedHashMap<>();
+    private final Map<String,WalkCourse> walks=new LinkedHashMap<>();
+    private long walkReplans,walkRecoveries,walkFailures;
+    private static final class WalkCourse {
+        long generation,ownerEpoch,plannedAt,lastProgress,retryAt,serial;
+        String action,reason;
+        Vector desired,lastPosition;
+        PedNavigation.Route route;
+        int nextPoint;
+        boolean blockedPortal;
+    }
     private long revision, lastTick;
 
     public WorldAi(String worldEpoch) {
@@ -64,13 +75,22 @@ public final class WorldAi {
     }
 
     public WorldAi(String worldEpoch, RoadNetwork roads) {
+        this(worldEpoch,roads,PedNavigation.empty());
+    }
+    public WorldAi(String worldEpoch, RoadNetwork roads,PedNavigation pedestrian) {
         if (worldEpoch == null || !worldEpoch.matches("[A-Za-z0-9_-]{1,64}"))
             throw new IllegalArgumentException("世界 epoch 无效");
         this.worldEpoch = worldEpoch;
         this.roads = Objects.requireNonNull(roads);
+        this.pedestrian=Objects.requireNonNull(pedestrian);
     }
 
     public synchronized long revision() { return revision; }
+    public synchronized Map<String,Object> pedestrianStatus(){
+        Map<String,Object> value=new LinkedHashMap<>(pedestrian.status());
+        value.put("replans",walkReplans);value.put("stuck_recoveries",walkRecoveries);value.put("failed_routes",walkFailures);
+        return Collections.unmodifiableMap(value);
+    }
 
     public synchronized Map<String,Object> taskForEntity(String entityId) {
         Decision decision = decisions.get(entityId);
@@ -125,6 +145,7 @@ public final class WorldAi {
             return now >= value.expires || source == null || source.generation() != value.sourceGeneration;
         });
         List<String> changed = new ArrayList<>();
+        walks.keySet().removeIf(id->!byId.containsKey(id));
         for (String id : new ArrayList<>(decisions.keySet())) {
             Entity entity = byId.get(id);
             if (entity == null || entity.kind() != Kind.PED || entity.playerId() != null) {
@@ -136,6 +157,9 @@ public final class WorldAi {
             && entity.playerId() == null).sorted(Comparator.comparing(Entity::entityId)).toList();
         for (Entity npc : npcs) {
             Plan plan = plan(npc, byId, players, eligibleOwners, law, now);
+            if(Set.of("wander","flee","pursue").contains(plan.action) && npc.components().attachment()==null)
+                plan=walk(npc,plan,now);
+            else walks.remove(npc.entityId());
             Decision old = decisions.get(npc.entityId());
             if (old == null || changed(old, plan, now)) {
                 decisions.put(npc.entityId(), new Decision(++revision, now, plan));
@@ -233,6 +257,55 @@ public final class WorldAi {
         return targeted(npc, "drive", reason, target, progress.waypoint, speed, vehicle.entityId(), expires);
     }
 
+    private Plan walk(Entity npc,Plan requested,long now){
+        // Keep the explicitly limited legacy mode for clients/server tests without navigation data.
+        if(pedestrian.polygonCount()==0)return requested;
+        Vector current=position(npc);WalkCourse course=walks.get(npc.entityId());
+        boolean identity=course==null || course.generation!=npc.generation() || course.ownerEpoch!=npc.ownerEpoch()
+            || !requested.action.equals(course.action) || !requested.reason.equals(course.reason);
+        if(identity){course=new WalkCourse();course.generation=npc.generation();course.ownerEpoch=npc.ownerEpoch();
+            course.action=requested.action;course.reason=requested.reason;course.lastPosition=current;course.lastProgress=now;
+            walks.put(npc.entityId(),course);}
+        if(current.distance(course.lastPosition)>=.35){course.lastPosition=current;course.lastProgress=now;course.blockedPortal=false;}
+        boolean stuck=course.route!=null && course.route.reached() && now-course.lastProgress>=3000;
+        boolean newDestination=course.desired==null?requested.destination!=null:
+            requested.destination==null || course.desired.distance(requested.destination)>3;
+        if(identity || now>=course.retryAt && (course.route==null || !course.route.reached() || newDestination || stuck)){
+            if(newDestination)course.blockedPortal=false;
+            if(stuck){walkRecoveries++;course.serial++;course.blockedPortal=true;}
+            course.desired=requested.destination;course.plannedAt=now;course.lastProgress=now;
+            course.nextPoint=1;course.retryAt=now+1000;walkReplans++;
+            PedNavigation.Point from=navPoint(current);
+            if("wander".equals(requested.action))course.route=pedestrian.wander(from,
+                Objects.hash(worldEpoch,npc.entityId(),npc.generation(),course.serial),30);
+            else course.route=course.blockedPortal?pedestrian.detour(from,navPoint(requested.destination),4,12000):
+                pedestrian.route(from,navPoint(requested.destination),4,12000);
+            if(!course.route.reached())walkFailures++;
+        }
+        if(course.route==null || !course.route.reached())return idle(npc,"walk_navigation_unavailable");
+        List<PedNavigation.Point> points=course.route.points();
+        while(course.nextPoint<points.size() && navPoint(current).distance(points.get(course.nextPoint))<.3)course.nextPoint++;
+        if(course.nextPoint>=points.size()){
+            if("wander".equals(requested.action)){course.route=null;course.serial++;course.retryAt=now+500;}
+            return idle(npc,"walk_destination_reached");
+        }
+        PedNavigation.Point previous=points.get(Math.max(0,course.nextPoint-1)),next=points.get(course.nextPoint);
+        if(distanceToSegment(navPoint(current),previous,next)>2.5){course.route=null;course.retryAt=now+500;return idle(npc,"walk_replanning");}
+        // Never skip a portal around a corner: one straight native task ends at this segment's next portal.
+        double distance=navPoint(current).distance(next),fraction=distance>2?2/distance:1;
+        Vector destination=new Vector(current.x()+(next.x()-current.x())*fraction,
+            current.y()+(next.y()-current.y())*fraction,current.z()+(next.z()-current.z())*fraction);
+        return new Plan(requested.generation,requested.ownerEpoch,requested.action,
+            stuck?"walk_recovery":requested.reason,requested.targetId,requested.targetGeneration,
+            requested.targetPosition,destination,requested.speed,requested.vehicleId,requested.expires);
+    }
+    private static PedNavigation.Point navPoint(Vector p){return new PedNavigation.Point(p.x(),p.y(),p.z());}
+    private static double distanceToSegment(PedNavigation.Point p,PedNavigation.Point a,PedNavigation.Point b){
+        double dx=b.x()-a.x(),dy=b.y()-a.y(),dz=b.z()-a.z(),length=dx*dx+dy*dy+dz*dz;
+        double t=length<1e-9?0:Math.max(0,Math.min(1,((p.x()-a.x())*dx+(p.y()-a.y())*dy+(p.z()-a.z())*dz)/length));
+        return p.distance(new PedNavigation.Point(a.x()+dx*t,a.y()+dy*t,a.z()+dz*t));
+    }
+
     /** Select an ahead point along the accepted road polyline, never along the player-to-driver chord. */
     private static RoadProgress progress(Vector current, RoadNetwork.Route route) {
         if (!route.reached() || route.points().size() < 2) return null;
@@ -310,6 +383,11 @@ public final class WorldAi {
             || (value.expires == 0) != (next.expires == 0)) return true;
         if (next.expires != 0 && next.expires - value.expires >= EXPIRY_REFRESH_INTERVAL) return true;
         if (next.expires > value.expires && value.expires <= now + 1_000) return true;
+        // Walking portals may be less than three metres apart. Publish each new
+        // short segment or the client can reach an obsolete waypoint and stop.
+        if(Set.of("wander","flee","pursue").contains(next.action)
+            && value.destination!=null && next.destination!=null
+            && value.destination.distance(next.destination)>.2)return true;
         return now - old.decidedAt >= REPLAN_INTERVAL
             && (moved(value.targetPosition, next.targetPosition) || moved(value.destination, next.destination));
     }

@@ -81,37 +81,48 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     }
   }
   function applyAiTask(entity, replica, entities, packet, now, localPed) {
+    // 尸体只应用服务器确认的位置；不能被 idle/standstill 重新激活动作。
+    if (entity.components.combat?.alive === false) return;
     const task = entity.ai_task, active = entity.owner_id === packet.client_id && entity.ownership === 'active';
     const valid = task && task.entity_id === entity.entity_id && task.generation === entity.generation
       && task.owner_epoch === entity.owner_epoch
       && (task.expires_at_tick === 0 || task.expires_at_tick >= packet.world.world_tick);
-    const action = active && entity.components.combat?.alive !== false && valid ? task.action : 'idle';
+    const vehicleEntity = entities.get(task?.vehicle_entity_id);
+    const vehicle = replicas.get(task?.vehicle_entity_id)?.handle;
+    const driveReady = vehicle && vehicleEntity?.owner_id === packet.client_id && vehicleEntity?.ownership === 'active'
+      && entity.components.attachment?.entity_id === task?.vehicle_entity_id
+      && entity.components.attachment?.seat === 'driver' && ex.mpGetVehiclePedIsIn?.(replica.handle, 0) === vehicle;
+    const action = active && valid && (task.action !== 'drive' || driveReady) ? task.action : 'idle';
     const key = active + ':' + entity.owner_epoch + ':' + (valid ? task.revision : 0) + ':' + action;
     const target = task?.target_entity_id ? entities.get(task.target_entity_id) : null;
     const targetHandle = target?.player_id === packet.client_id ? localPed : target?.player_id
       ? playerReplica(target.player_id) : replicas.get(task?.target_entity_id)?.handle;
     const targetReady = target && target.generation === task?.target_generation && target.components.combat?.alive !== false
       && targetHandle && ex.mpExists(targetHandle);
-    const vehicle = replicas.get(task?.vehicle_entity_id)?.handle;
-    if (replica.aiKey !== key) {
+    const walking = ['wander', 'flee', 'pursue'].includes(action) && !entity.components.attachment && validPosition(task?.destination);
+    const distance = walking ? Math.hypot(...task.destination.map((part, index) => part - entity.components.transform.position[index])) : 0;
+    // GoStraight 的原生任务会在三秒后结束；同一服务端路点仍未抵达时续发，避免等新 revision 才动。
+    const refreshWalk = walking && distance > .2 && now - (replica.aiAppliedAt ?? -Infinity) >= 2500;
+    if (replica.aiKey !== key || refreshWalk) {
+      // 目标尚未加载时保留重试，但不逐帧清除原生任务。
+      if (replica.aiKey !== key && replica.aiAttemptKey === key && now - replica.aiAttemptAt < 1000) return;
+      replica.aiAttemptKey = key; replica.aiAttemptAt = now;
       ex.mpClearTasksImmediately?.(replica.handle);
       replica.aiKey = null;
-      if (action === 'wander' && !entity.components.attachment) ex.mpTaskWander?.(replica.handle, 10, 0);
-      else if (action === 'drive') {
-        const attachment = entity.components.attachment;
-        if (!vehicle || attachment?.entity_id !== task.vehicle_entity_id || attachment.seat !== 'driver'
-            || ex.mpGetVehiclePedIsIn?.(replica.handle, 0) !== vehicle) return;
+      if (action === 'drive') {
         if (validPosition(task.destination) && ex.mpDriveToCoord) ex.mpDriveToCoord(replica.handle, vehicle, vector(0, task.destination), task.speed, 786603, 4);
         else if (!task.destination) ex.mpDriveWander?.(replica.handle, vehicle, task.speed, 786603);
-      } else if (['flee', 'pursue'].includes(action) && !entity.components.attachment && validPosition(task.destination)) {
+      } else if (walking) {
         const heading = Math.atan2(task.destination[1] - entity.components.transform.position[1],
           task.destination[0] - entity.components.transform.position[0]) * 180 / Math.PI - 90;
         ex.mpTaskGoStraight?.(replica.handle, vector(0, task.destination), task.speed, 3000, heading, .5);
+      } else if (action === 'wander' && !entity.components.attachment) {
+        ex.mpTaskWander?.(replica.handle, 10, 0);
       } else if (action === 'combat' && !entity.components.attachment) {
         if (!targetReady) return; // 等目标模型出现后再应用同一个任务版本。
         ex.mpTaskCombatPed?.(replica.handle, targetHandle, 0, 16);
       } else ex.mpTaskStandStill?.(replica.handle, -1);
-      replica.aiKey = key; replica.task = action;
+      replica.aiKey = key; replica.task = action; replica.aiAppliedAt = now;
       post({ type: 'world_entity_status', entity_id: entity.entity_id, kind: 'ped', phase: 'ai_' + action,
         task_revision: valid ? task.revision : 0 });
     }
@@ -358,13 +369,20 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
       } else {
         const health = state.combat?.health ?? 200;
         const nativeHealth = health > 0 ? 100 + Math.max(1, Math.round(health / 2)) : 0;
-        if (health === 0) ex.mpFreeze(replica.handle, 0);
+        if (health === 0) {
+          if (replica.serverHealth !== 0) ex.mpClearTasksImmediately?.(replica.handle);
+          if (replica.serverHealth !== 0 || replica.revision !== entity.revision) {
+            applyTransform(replica.handle, { ...state.transform, velocity: [0, 0, 0], angular_velocity: [0, 0, 0] });
+          }
+          ex.mpFreeze(replica.handle, 1);
+          replica.aiKey = null; replica.task = 'dead';
+        }
         ex.mpBlockEvents(replica.handle, 1);
-        ex.mpSetCanRagdoll?.(replica.handle, active || health === 0 ? 1 : 0);
-        ex.mpSetInvincible(replica.handle, active || health === 0 ? 0 : 1);
+        ex.mpSetCanRagdoll?.(replica.handle, active && health > 0 ? 1 : 0);
+        ex.mpSetInvincible(replica.handle, active && health > 0 ? 0 : 1);
         // 枪械、火焰、爆炸与近战只消费服务端血量；撞击/摔落/溺水仍可上报环境候选。
         ex.mpSetProofs?.(replica.handle, 1, 1, 1, 0, 1, 0, 0, 0);
-        if (!active || !replica.active || replica.serverHealth !== health) {
+        if (health === 0 || !active || !replica.active || replica.serverHealth !== health) {
           if (health > 0 && ex.mpIsDead(replica.handle, 0)) { ex.mpResurrect?.(replica.handle); ex.mpRevive?.(replica.handle); }
           if (ex.mpGetHealth(replica.handle) !== nativeHealth) ex.mpSetHealth(replica.handle, nativeHealth, 0);
         }

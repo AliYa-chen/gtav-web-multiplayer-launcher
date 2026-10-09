@@ -3,6 +3,8 @@ package offline.multiplayer;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Collection;
+import java.util.HashSet;
 import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -434,6 +436,21 @@ public final class WorldRegistry {
         Entity updated=owned(old, ownerId, leaseUntilTick);
         entities.put(id, updated); motion.put(id, new MotionBudget(nowTick, 2));
         return commit(Change.OWNER, List.of(updated), List.of());
+    }
+    /** Transfer a server-selected population group atomically; never accepts client-selected IDs. */
+    public synchronized Commit setPopulationOwnersTrusted(Collection<String> ids,String ownerId,long nowTick) throws Rejection {
+        tick(nowTick);
+        if(ids==null || ids.isEmpty() || ids.size()>18 || new HashSet<>(ids).size()!=ids.size())
+            throw reject("invalid_owner","人口迁移组无效");
+        lease(ownerId,ownerId==null?0:nowTick+limits.defaultLeaseTicks,nowTick);
+        List<Entity> values=new ArrayList<>();
+        for(String id:ids){Entity entity=require(id);
+            if(entity.playerId!=null || entity.kind==Kind.OBJECT)throw reject("invalid_owner","不能通过人口迁移修改玩家归属");
+            if(!Objects.equals(entity.ownerId,ownerId) || entity.ownerId!=null && entity.leaseUntilTick<=nowTick)
+                values.add(owned(entity,ownerId,ownerId==null?0:nowTick+limits.defaultLeaseTicks));
+        }
+        for(Entity entity:values){entities.put(entity.entityId,entity);motion.put(entity.entityId,new MotionBudget(nowTick,2));}
+        return commit(Change.OWNER,values,List.of());
     }
     /** 服务端撤销指定实体的仿真租约，保留最后确认姿态。 */
     public synchronized Commit revokeOwnerTrusted(String id,long expectedRevision,long nowTick)throws Rejection{

@@ -37,7 +37,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** 独立公共战局服务：鉴权恢复、权威移动校验、伤害、死亡、重生及状态分发。 */
 public final class Main {
-    private static final String VERSION = "0.4.1-world-experimental";
+    private static final String VERSION = "0.4.2-world-experimental";
     private static final List<String> CAPABILITIES = List.of("public_session", "chat", "player_state", "shoot_events", "appearance", "combat", "resume", "heartbeat", "snapshot", "actions", "combat_feedback", "weapon_rules", "world_registry", "world_v2", "entity_batch", "melee_events", "world_environment", "shared_law", "server_ai", "projectiles", "action_queue", "session_policy", "physics_queries");
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final int MAX_MESSAGE_BYTES = 64 * 1024;
@@ -371,7 +371,8 @@ public final class Main {
             Path data=config.worldData();
             StaticCollision geometry=data!=null && Files.isRegularFile(data.resolve("collision.bin"))?StaticCollision.load(data.resolve("collision.bin")):StaticCollision.empty();
             RoadNetwork roads=data!=null && Files.isRegularFile(data.resolve("roads.bin"))?RoadNetwork.load(data.resolve("roads.bin")):RoadNetwork.empty();
-            combat=new WorldService(geometry,roads);world=combat;
+            PedNavigation pedestrian=data!=null && Files.isRegularFile(data.resolve("ped-navigation.bin"))?PedNavigation.load(data.resolve("ped-navigation.bin")):PedNavigation.empty();
+            combat=new WorldService(geometry,roads,pedestrian);world=combat;
             maxClients = config.maxClients();
             idleTimeoutSeconds = config.idleTimeoutSeconds();
             idleTimeoutNanos = TimeUnit.SECONDS.toNanos(idleTimeoutSeconds);
@@ -409,7 +410,8 @@ public final class Main {
                     "world_tick",view.get("world_tick"),"environment",view.get("environment"),"environment_authoritative",true,
                     "world_entities", ((List<?>) view.get("entities")).size(), "shared_population", view.get("shared_population"),
                     "world_policy",view.get("world_policy"),"session_policy",world.sessionPolicy(),"ai_decisions_authoritative",true,
-                    "collision",world.collisionStatus(),"navigation",view.get("navigation"),
+                    "collision",world.collisionStatus(),"navigation",view.get("navigation"),"population",view.get("population"),
+                    "pedestrian_navigation",world.pedestrianStatus(),
                     "melee_requests_received",world.meleeStats().get("melee_requests_received"),
                     "melee_events_approved",world.meleeStats().get("melee_events_approved"),"melee_hits",world.meleeStats().get("melee_hits"));
             }
