@@ -1,5 +1,5 @@
 // 游戏页直接持有公共战局连接；引擎线程通过共享内存读取最新快照，避免阻塞帧循环。
-import { getLanguage, onLanguageChange, translateText } from '../i18n.js';
+import { getLanguage, onLanguageChange, translateText, localizeServerError } from '../i18n.js';
 
 export function installGameAdapter(worker, network = null, { watchOnlineConfiguration } = {}) {
   // 正常在线游戏直接连接本页网络会话，避免同一端口多个标签页串用身份和外观。
@@ -34,6 +34,8 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
   const stopRemoteConfiguration = watchOnlineConfiguration?.((value) => { remoteConfig = value; schedule(); });
   const text = (zh, en, nativeZh = zh) => ({ zh, en, nativeZh });
   function localize(value, native = false) {
+    if (value?.serverError) return localizeServerError(native && value.nativeChinese
+      ? { ...value.serverError, chinese: value.nativeChinese } : value.serverError);
     if (value && typeof value === 'object') return getLanguage() === 'en' ? value.en : native ? value.nativeZh : value.zh;
     return translateText(value || '');
   }
@@ -229,9 +231,8 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
     } else if (data.type === 'interaction_result') {
       if (data.accepted === false && !['rate_limited', 'cooldown', 'stale_seq', 'stale_input', 'stale_generation',
         'stale_revision', 'stale_owner', 'invalid_revision', 'seat_unavailable', 'too_far', 'not_facing', 'player_dead', 'not_ready'].includes(data.reason)) {
-        const reason = data.reason || '';
-        notify(text('互动未完成：' + (reason || '服务器未接受此操作'), 'Interaction could not be completed' + (reason ? ': ' + reason : '. The server could not accept this action.'),
-          '互動未完成：' + (reason || '伺服器未接受此操作')));
+        notify({ serverError: { code: data.reason, chinese: '互动未完成，请稍后重试。' },
+          nativeChinese: '互動未完成，請稍後重試。' });
       }
       return;
     } else if (data.type === 'session') {

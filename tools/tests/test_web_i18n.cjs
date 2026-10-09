@@ -21,7 +21,7 @@ function harness({ language = 'en-US', responses = [] } = {}) {
       if (typeof response === 'function') return response();
       return { ok: response != null, json: async () => response };
     } });
-  vm.runInContext(source + '\nglobalThis.api = { t, getLanguage, resolveLanguage, setLanguage, translateText, onLanguageChange, initLanguage };', context);
+  vm.runInContext(source + '\nglobalThis.api = { t, getLanguage, resolveLanguage, setLanguage, translateText, localizeServerError, onLanguageChange, initLanguage };', context);
   const fire = (type, value = {}) => { for (const callback of events.get(type) || []) callback(value); };
   const poll = async () => {
     const entry = [...timers].find(([, timer]) => timer.delay === 2000);
@@ -100,4 +100,13 @@ test('launcher restart may reset revision without preventing a new authoritative
   const noBrowserLocale = harness({ language: null, responses: [null] });
   await noBrowserLocale.api.initLanguage(); assert.equal(noBrowserLocale.api.getLanguage(), 'en');
   noBrowserLocale.fire('pagehide');
+});
+
+test('typed server errors localize code meanings and keep unknown diagnostics out of English UI', () => {
+  const page = harness();
+  assert.equal(page.api.localizeServerError({ code: 'too_far', message: '角色距离车辆过远' }, 'en'), 'Move closer to the target and try again.');
+  for (const code of ['future_error', '__proto__', 'toString', '中文错误码', null]) {
+    assert.equal(page.api.localizeServerError({ code, message: '中文原始诊断' }, 'en'), 'The server could not complete this action. Please try again.');
+  }
+  assert.equal(page.api.localizeServerError({ code: 'invalid_request', message: '同一请求ID不能复用为不同内容' }, 'zh-CN'), '同一请求ID不能复用为不同内容');
 });

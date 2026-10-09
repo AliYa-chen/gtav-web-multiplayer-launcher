@@ -1,4 +1,4 @@
-import { getLanguage, translateText, onLanguageChange } from '../i18n.js';
+import { getLanguage, translateText, localizeServerError, onLanguageChange } from '../i18n.js';
 import { normalizeServerAddress } from './server-address.js';
 import { modelForPreset, normalizeAppearance, randomAppearance } from './appearance.js';
 import { createWorldState, cleanWorldTransform, cleanSessionPolicy } from './world-state.js';
@@ -224,7 +224,9 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   }
   function status(phase, text) {
     latestStatusSource = { phase, text };
-    const value = { phase, text: translateText(text), server: address, client_id: clientId,
+    const displayText = text && typeof text === 'object' && text.serverError
+      ? localizeServerError(text.serverError) + translateText(text.suffix || '') : translateText(text);
+    const value = { phase, text: displayText, server: address, client_id: clientId,
       connected: Boolean(room && profiled), members: room?.members.length || 0,
       peers: [...peers.keys()].filter((id) => id !== clientId).length };
     const encoded = JSON.stringify(value);
@@ -665,7 +667,8 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     if (stopped) status('closed', '已退出公共战局');
     if (!stopped && retry) {
       const wait = Math.min(5000, 500 * 2 ** Math.min(attempts++, 4));
-      status('reconnecting', text + ' 正在重新连接…');
+      status('reconnecting', text && typeof text === 'object' && text.serverError
+        ? { ...text, suffix: ' 正在重新连接…' } : text + ' 正在重新连接…');
       reconnectTimer = setTimeout(connect, wait);
     }
   }
@@ -951,15 +954,19 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
           'seat_unavailable', 'invalid_seat', 'invalid_component', 'unsupported_interaction', 'stale_owner', 'simulation_not_ready',
           'player_input_required', 'health_increase_denied', 'unsupported_simulation', 'invalid_target', 'invalid_reason', 'not_facing', 'invalid_request',
           'too_far', 'stale_revision', 'stale_generation', 'unknown_entity', 'snapshot_required', 'invalid_batch', 'invalid_message', 'static_entity'].includes(message.code)) {
-          const text = message.code === 'unsupported_weapon' ? '服务器武器目录不识别当前武器，请更新服务端资源目录。'
+          const chinese = message.code === 'unsupported_weapon' ? '服务器武器目录不识别当前武器，请更新服务端资源目录。'
             : message.code === 'weapon_mismatch' ? '武器切换尚未同步，请稍后重新射击。'
             : typeof message.message === 'string' ? message.message : '服务器未接受这次操作';
-          status('notice', text);
+          status('notice', { serverError: { code: message.code, message: message.message, chinese } });
           if (['unsupported_weapon', 'weapon_mismatch'].includes(message.code)) emit({ type: 'combat_feedback', accepted: false,
             hit: false, reason: message.code });
           break;
         }
-        throw new Error(typeof message.message === 'string' ? message.message.slice(0, 300) : '服务器未能完成操作。');
+        // Keep typed diagnostics internally so a visible error can be rendered
+        // again when the launcher changes language without touching player text.
+        const error = new Error(localizeServerError(message));
+        error.serverError = { code: message.code, message: typeof message.message === 'string' ? message.message.slice(0, 300) : undefined };
+        throw error;
       default: throw new Error('服务器消息类型不兼容，请检查服务器版本。');
     }
   }
@@ -980,7 +987,8 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
         if (typeof data !== 'string' || data.length > 1024 * 1024) throw new Error('服务器消息超过允许的大小。');
         receive(JSON.parse(data));
         if (socket === current) lastServerMessageAt = performance.now();
-      } catch (error) { disconnect(error instanceof SyntaxError ? '服务器消息无法解析。' : error.message); }
+      } catch (error) { disconnect(error instanceof SyntaxError ? '服务器消息无法解析。'
+        : error.serverError ? { serverError: error.serverError } : error.message); }
     };
     current.onerror = () => { if (socket === current) disconnect('连接失败，请检查服务器 IP 和端口。'); };
     current.onclose = () => { if (socket === current) disconnect('战局连接已中断。'); };

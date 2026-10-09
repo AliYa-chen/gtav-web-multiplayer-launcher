@@ -132,6 +132,79 @@ export function translateText(value) {
     .replace(/^\[wasm\] hang report (\d+): no engine log line for (\d+) s; blocked threads:/, '[wasm] 卡顿报告 $1：引擎已 $2 秒未输出日志；阻塞线程：');
 }
 
+// These are typed protocol errors, not arbitrary server/player text. Retain the
+// Chinese diagnostic for Chinese UI, and translate stable codes for English UI.
+// Unknown diagnostics never become an untranslated English product message.
+const serverErrorMessages = Object.freeze({
+  invalid_owner: 'This action is not authorized for the current entity owner.',
+  not_owner: 'You do not currently control this entity. Wait for synchronization and try again.',
+  invalid_request: 'This action could not be verified. Please try it again.',
+  too_far: 'Move closer to the target and try again.',
+  room_full: 'The public session is full. Please try again shortly.',
+  server_full: 'The server is full. Please try again shortly.',
+  world_full: 'The world has reached its entity limit. Please try again shortly.',
+  projectile_limit: 'Too many projectiles are active. Wait a moment and try again.',
+  duplicate_player: 'Your character is already present in this session.',
+  invalid_message: 'The server could not verify this message. Update the launcher if this continues.',
+  invalid_json: 'The server could not read this message. Reconnect if this continues.',
+  unknown_type: 'This action requires a compatible launcher and server version.',
+  client_world_rules_required: 'Update the launcher to join this public session.',
+  capability_required: 'Update the launcher to use this session feature.',
+  public_session_only: 'Choose a public session to continue.',
+  not_in_room: 'Join the public session before performing this action.',
+  resume_denied: 'The previous session could not be restored. Join the session again.',
+  invalid_resume: 'The previous session could not be restored. Join the session again.',
+  resume_expired: 'The previous session expired. Join the session again.',
+  invalid_hello: 'The connection could not be verified. Update the launcher and reconnect.',
+  protocol_mismatch: 'The launcher and server versions are incompatible. Update the launcher and reconnect.',
+  handshake_timeout: 'The connection was not confirmed in time. Please reconnect.',
+  rate_limited: 'Wait a moment and try this action again.',
+  cooldown: 'This action is not ready yet. Try again shortly.',
+  stale_seq: 'This action has expired. Please try it again.',
+  stale_input: 'This action has expired. Please try it again.',
+  stale_owner: 'Control of this entity changed. Wait for synchronization and try again.',
+  invalid_lease: 'Control of this entity could not be verified. Wait for synchronization and try again.',
+  invalid_revision: 'This entity is still synchronizing. Try again shortly.',
+  stale_revision: 'This entity changed. Wait for synchronization and try again.',
+  stale_generation: 'The target changed. Select the current target and try again.',
+  wrong_world: 'This action belongs to an earlier session. Wait for synchronization and try again.',
+  attached_entity: 'Leave the vehicle before moving this character independently.',
+  dead_entity: 'This entity is no longer alive. Choose another target.',
+  static_entity: 'This object cannot be moved.',
+  invalid_movement: 'The server corrected this movement. Wait for synchronization and try again.',
+  invalid_component: 'This action is not supported by the selected entity.',
+  invalid_batch: 'The server could not verify this update. Wait for synchronization and try again.',
+  invalid_tick: 'The world is still synchronizing. Try again shortly.',
+  invalid_seat: 'This seat is unavailable for the current character.',
+  seat_unavailable: 'This seat is unavailable. Choose another seat.',
+  unknown_entity: 'The target is no longer available. Choose another target.',
+  unsupported_model: 'This character or vehicle is not supported by the server.',
+  unsupported_weapon: 'The server does not recognize this weapon. Update its weapon catalog.',
+  weapon_mismatch: 'The weapon change has not synchronized yet. Try firing again shortly.',
+  invalid_shot: 'The server could not verify this shot. Aim again and retry.',
+  not_ready: 'Your character is still synchronizing. Try again shortly.',
+  player_dead: 'You died. Wait for the server to respawn your character.',
+  unsupported_interaction: 'This interaction is not currently available.',
+  unsupported_simulation: 'This action is not currently supported by the server.',
+  simulation_not_ready: 'This entity is still loading. Try again shortly.',
+  player_input_required: 'Perform this action with your own character.',
+  health_increase_denied: 'Health recovery must be confirmed by the server.',
+  invalid_target: 'Choose a valid target and try again.',
+  invalid_reason: 'The server could not verify the cause of this action.',
+  not_facing: 'Face the target and try again.',
+  snapshot_required: 'Wait for the world to synchronize before trying again.',
+  invalid_collision: 'The server could not verify this collision. This result was skipped.',
+  stale_collision: 'This collision observation has expired. This result was skipped.',
+  unconfirmed_arrest: 'The arrest has not been confirmed by the server.',
+});
+export function localizeServerError(error, language = getLanguage()) {
+  if (language === 'en') return typeof error?.code === 'string' && Object.hasOwn(serverErrorMessages, error.code)
+    ? serverErrorMessages[error.code] : 'The server could not complete this action. Please try again.';
+  return typeof error?.chinese === 'string' ? error.chinese
+    : typeof error?.message === 'string' ? error.message.slice(0, 300)
+    : '服务器未能完成操作。';
+}
+
 export function setLanguage(value) {
   let next;
   if (typeof value === 'string') {

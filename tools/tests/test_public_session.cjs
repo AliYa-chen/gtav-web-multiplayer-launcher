@@ -1411,3 +1411,56 @@ test('公共战局语言热切换只更新界面和本地桥数据，不重连�
   assert.equal(page.statuses.at(-1).text, '战局连接已中断。 正在重新连接…');
   page.api.close();
 });
+
+function javaErrorMessage(code, relative) {
+  const java = fs.readFileSync(path.join(root, relative), 'utf8');
+  const match = new RegExp('(?:reject|problem|new Problem)\\("' + code + '",\\s*"([^"]+)"').exec(java);
+  assert.ok(match, 'test should use a current Java diagnostic for ' + code);
+  return match[1];
+}
+
+test('实际Java权限与请求拒绝按错误码显示英语，已显示错误中英热切保留战局和玩家原名', async () => {
+  const page = await harness({ language: 'en' }); const socket = page.enter(); await page.api.ready;
+  const packets = []; page.api.setReceiver(value => packets.push(copy(value)));
+  for (const [code, relative, expected] of [
+    ['invalid_owner', 'server/src/main/java/offline/multiplayer/WorldRegistry.java', 'This action is not authorized for the current entity owner.'],
+    ['invalid_request', 'server/src/main/java/offline/multiplayer/WorldService.java', 'This action could not be verified. Please try it again.'],
+  ]) {
+    const original = javaErrorMessage(code, relative);
+    socket.receive({ type: 'error', code, message: original });
+    assert.equal(page.statuses.at(-1).phase, 'notice'); assert.equal(page.statuses.at(-1).text, expected);
+    const sent = socket.sent.length;
+    page.i18nModule.setLanguage('zh-CN'); assert.equal(page.statuses.at(-1).text, original);
+    page.i18nModule.setLanguage('en'); assert.equal(page.statuses.at(-1).text, expected);
+    assert.equal(page.sockets.length, 1); assert.equal(socket.sent.length, sent);
+    assert.equal(packets.findLast(value => value.type === 'session').members[0].name, '玩家甲');
+    assert.ok(!/[\u4e00-\u9fff]/.test(packets.findLast(value => value.type === 'network_status').text));
+  }
+  const count = page.statuses.length;
+  socket.receive({ type: 'error', code: 'too_far', message: javaErrorMessage('too_far', 'server/src/main/java/offline/multiplayer/WorldRegistry.java') });
+  assert.equal(page.statuses.length, count, 'normal distance rejections remain quiet in active sessions');
+  page.api.close();
+});
+
+test('首次加入的满员与握手错误使用英语，未知服务端诊断不泄漏技术枚举或中文', async () => {
+  for (const [code, relative, expected] of [
+    ['room_full', 'server/src/main/java/offline/multiplayer/Main.java', 'The public session is full. Please try again shortly.'],
+    ['client_world_rules_required', 'server/src/main/java/offline/multiplayer/Main.java', 'Update the launcher to join this public session.'],
+    ['invalid_message', 'server/src/main/java/offline/multiplayer/Main.java', 'The server could not verify this message. Update the launcher if this continues.'],
+    ['too_far', 'server/src/main/java/offline/multiplayer/WorldRegistry.java', 'Move closer to the target and try again.'],
+  ]) {
+    const page = await harness({ language: 'en' }); const socket = page.sockets[0];
+    const original = javaErrorMessage(code, relative);
+    socket.receive({ type: 'error', code, message: original });
+    assert.equal(page.statuses.at(-1).text, expected + ' Reconnecting…');
+    assert.equal(socket.readyState, 3);
+    page.i18nModule.setLanguage('zh-CN'); assert.equal(page.statuses.at(-1).text, original + ' 正在重新连接…');
+    page.i18nModule.setLanguage('en'); assert.equal(page.statuses.at(-1).text, expected + ' Reconnecting…');
+    page.api.close();
+  }
+  const page = await harness({ language: 'en' }); const socket = page.sockets[0];
+  socket.receive({ type: 'error', code: 'future_error', message: '以后扩展的服务端诊断，包含自定义玩家文本' });
+  assert.equal(page.statuses.at(-1).text, 'The server could not complete this action. Please try again. Reconnecting…');
+  assert.ok(!page.statuses.at(-1).text.includes('future_error'));
+  page.api.close();
+});

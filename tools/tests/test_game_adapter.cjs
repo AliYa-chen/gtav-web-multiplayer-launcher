@@ -14,6 +14,9 @@ const adapterSource = fs.readFileSync(path.join(root, 'client/multiplayer/game-a
 const appearanceSource = fs.readFileSync(path.join(root, 'client/multiplayer/appearance.js'), 'utf8');
 const worldSource = fs.readFileSync(path.join(root, 'client/multiplayer/world-engine-bridge.js'), 'utf8');
 const uiSource = fs.readFileSync(path.join(root, 'client/multiplayer/native-session-ui.js'), 'utf8');
+const errorI18nContext = vm.createContext({});
+vm.runInContext(fs.readFileSync(path.join(root, 'client/i18n.js'), 'utf8').replace(/^export /gm, '')
+  + '\nglobalThis.errorTranslator = localizeServerError;', errorI18nContext);
 const appearanceModule = import('data:text/javascript;base64,' + Buffer.from(appearanceSource).toString('base64'));
 // 始终读取当前构建器定义，避免旧隔离探针缓存掩盖新增导出；无需游戏二进制。
 const builderManifest = spawnSync(process.env.PYTHON || 'python3', ['-B', '-c',
@@ -359,6 +362,7 @@ function adapter(network = null, options = {}) {
   const context = vm.createContext({ BroadcastChannel: Channel, TextEncoder, TextDecoder, Atomics, Int32Array,
     Uint8Array, DataView, SharedArrayBuffer, performance: { now: () => 100 }, document: { getElementById: () => hud }, addEventListener() {},
     getLanguage: () => language, translateText: value => value,
+    localizeServerError: value => errorI18nContext.errorTranslator(value, language),
     onLanguageChange: callback => { languageListener = callback; return () => { languageListener = null; }; },
     fetch(url, options) { requests.push({ url, ...options }); return Promise.resolve({ ok: true }); },
     setTimeout(callback) { const id = nextTimer++; timers.set(id, callback); return id; },
@@ -448,6 +452,24 @@ test('页面语言即时传入共享快照并翻译现有HUD与未确认通知�
   page.setLanguage('zh-CN'); page.flush();
   assert.match(page.hud.textContent, /命中玩家 · 伤害 25/);
   assert.match(page.read().notices.at(-1).text, /命中玩家 · 傷害 25/);
+});
+
+test('互动拒绝通知保存错误码供语言热切，但用户界面不显示技术枚举且普通距离拒绝保持安静', () => {
+  const page = adapter(directNetwork(), { language: 'en' });
+  page.receive({ type: 'interaction_result', accepted: false, reason: 'unsupported_interaction' });
+  page.flush(); const initial = page.read().notices.at(-1);
+  assert.equal(initial.text, 'This interaction is not currently available.');
+  page.setLanguage('zh-CN'); page.flush();
+  assert.equal(page.read().notices.at(-1).id, initial.id);
+  assert.equal(page.read().notices.at(-1).text, '互動未完成，請稍後重試。');
+  page.setLanguage('en'); page.flush();
+  assert.equal(page.read().notices.at(-1).text, initial.text);
+  const count = page.read().notices.length;
+  page.receive({ type: 'interaction_result', accepted: false, reason: 'too_far' });
+  page.flush(); assert.equal(page.read().notices.length, count);
+  page.receive({ type: 'interaction_result', accepted: false, reason: 'future_interaction' });
+  page.flush(); assert.equal(page.read().notices.at(-1).text, 'The server could not complete this action. Please try again.');
+  assert.ok(!page.read().notices.at(-1).text.includes('future_interaction'));
 });
 
 test('原生子弹脉冲在重帧之间锁存，弹夹减少可补漏单发，附带同武器状态', () => {
