@@ -213,15 +213,15 @@ $translations = [
 ];
 $downloadCandidates = [
     'macos_arm64' => [
-        'url' => '',
-        'sha256' => '',
+        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-macOS-arm64-v0.2.14-development.zip',
+        'sha256' => 'a5556a5dc9e94a15daf1a49378e72212164ce3f2f60466ef3c269bac598e9c04',
     ],
     'windows_x64' => [
-        'url' => '',
-        'sha256' => '',
+        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-Windows-x64-v0.2.14.exe',
+        'sha256' => '6d609c7ea7ebb31017abb8c22926d52ad333dfb453021693b1ef0983231ad15c',
     ],
 ];
-// 新构建验证完成后填入下载 URL 与真实 SHA-256；未完成的包不显示。
+// 两平台 0.2.14 产物已核验；由维护者先上传客户端，再覆盖本配置。
 // ── 配置内容结束 ──
 
 try {
