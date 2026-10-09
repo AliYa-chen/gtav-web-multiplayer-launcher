@@ -18,11 +18,11 @@ The repository contains project source and documentation. **It does not provide 
 
 **Client 0.2.15 and server 0.4.3-world-experimental.** This revision includes passenger-seat reconciliation and ownership fixes. The macOS build was verified locally, the Windows build was produced by GitHub Actions and verified, and server 0.4.3 is deployed to the main and experimental sessions in both China and the US (four routes). Uploading the client packages and configuration to the download website remains a manual step. See the [0.2.15 build and deployment record](docs/0.2.15多人同乘与公开源码.md); source and build versions alone do not establish the version currently offered by the download site.
 
-Multiplayer remains experimental. Static collision and pedestrian navigation cover roughly **600 × 600 metres around the test spawn**, not the whole map. There is no complete server-side RAGE physics runtime or migration of every single-player script, tool, mission, or vehicle weapon. This uses a custom protocol and does not implement native GTA Online or FiveM compatibility. Protocol tests do not establish complete gameplay synchronization; `game_sync` and `native_clone_transport` remain false. Final page and in-game acceptance are performed by the user.
+Multiplayer remains experimental. Static collision and pedestrian navigation cover roughly **600 × 600 metres around the test spawn**, not the whole map. There is no complete server-side RAGE physics runtime or migration of every single-player script, tool, mission, or vehicle weapon. This uses a custom protocol and does not implement native GTA Online or FiveM compatibility. Protocol tests do not establish complete gameplay synchronization; `game_sync` and `native_clone_transport` remain false.
 
 ## Gameplay screenshots
 
-These screenshots were provided by the user from earlier gameplay demonstrations. They show the recorded scenes and are not acceptance results for this release. Game content remains subject to its owners' terms; see [NOTICE.md](NOTICE.md).
+These screenshots record earlier gameplay demonstrations. Game content remains subject to its owners' terms; see [NOTICE.md](NOTICE.md).
 
 ![Two browser clients showing a vehicle and nearby players outside Los Santos Customs](docs/images/multiplayer-vehicles.jpg)
 
@@ -164,7 +164,7 @@ Player resources are **read-only**, including external resource folders, manifes
 
 The launcher intentionally includes a distributable **LAN CA private key** for its existing local sharing design. It is extractable and is not a confidential production identity. Production TLS certificate/private-key files and server login credentials are not part of this repository. See the [desktop LAN HTTPS guide](desktop/README.md#局域网-https-资源共享) for the trust model.
 
-Before contributing, follow [AGENTS.md](AGENTS.md). Check source-only staging with `python3 -B tools/check_git_contents.py`. Published technical reports distinguish static checks, protocol verification, and actual game acceptance.
+Before contributing, follow [AGENTS.md](AGENTS.md). Check source-only staging with `python3 -B tools/check_git_contents.py`. Published technical reports describe the implemented scope and recorded static and protocol checks.
 
 ## Documentation
 

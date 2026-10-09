@@ -14,11 +14,11 @@ Tauri 2 原生界面，Rust 后端直接校验资源、生成运行副本并提�
 游戏内原生“线上”页使用同一配置中的 `oltitle` 显示状态地址与战局连接信息。
 这里只替换已识别线上页的展示，不改变原游戏网络会话标志或资源文件。
 
-启动器 **0.2.14** 统一中美正式、实验线路：地址、端口与连接路径全部来自配置接口，保留地区和双语名称，不再内置公网默认值。两平台客户端构建及下载配置真实哈希核验已完成，macOS 在本机直接构建。原游戏资源只读，页面验收由用户完成；[构建、部署与上传记录](../docs/0.2.14中美线路与构建记录.md)。
+启动器 **0.2.14** 统一中美正式、实验线路：地址、端口与连接路径全部来自配置接口，保留地区和双语名称，不再内置公网默认值。两平台客户端构建及下载配置真实哈希核验已完成，macOS 在本机直接构建。原游戏资源只读；[构建、部署与上传记录](../docs/0.2.14中美线路与构建记录.md)。
 
 **0.2.13**：故事、自由沙盒和公共战局在启动器中选择。公共战局昵称及角色预设也在启动器填写；服务器使用远程配置的纯下拉列表，显示线路地址与浏览器测得的延迟，仅已通过健康检测的线路可选。直达游戏页省去再次选择，朋友共享首页继续保留故事、沙盒和在线表单。
 
-此版本还以原 GPU 发布的真实世界稳定帧作为公共场景写入门槛，修复首帧 76% 时提前暂停加载脚本的问题。诊断请求按实际状态变化去重并有界合并。详细行为和本地游戏验收见 [加载流程与启动器入口](../docs/加载流程与启动器入口.md)；本次不改游戏资源包或服务端，不表示下载站已经上传新版。
+此版本还以原 GPU 发布的真实世界稳定帧作为公共场景写入门槛，修复首帧 76% 时提前暂停加载脚本的问题。诊断请求按实际状态变化去重并有界合并。详细行为和本地运行记录见 [加载流程与启动器入口](../docs/加载流程与启动器入口.md)；本次不改游戏资源包或服务端，不表示下载站已经上传新版。
 
 0.2.0 接入共同环境和执法策略。时间、天气、雨风与通缉读取服务端状态；客户端抑制独立警察调度，
 共同警员只由有效租约的模拟端执行服务器目标。新公共服务要求这些能力，旧启动器需要更新。
@@ -150,7 +150,7 @@ Windows 将证书导入“受信任的根证书颁发机构”；macOS 将 BinGo
 启动器仅允许本机局域网 IPv4 地址提供共享服务，并校验请求目标及来源；不将资源服务作为公网下载站。
 HTTPS 服务保留游戏需要的跨域隔离响应头、Range 和批量资源读取。普通本机 `127.0.0.1` 游戏服务不受影响。
 窗口保持固定大小，禁止最大化和调整尺寸；长内容仅在卡片或设置面板内滚动。
-构建工作流不创建 GitHub Releases；实际浏览器、证书安装与游戏体验由用户验证。
+构建工作流不创建 GitHub Releases。
 
 ## 开发和构建
 
@@ -202,8 +202,6 @@ python3 -B tools/generate_launcher_engine_spec.py --check
 gta5data-launcher --verify-resources "玩家资源包目录" "游戏目录之外的测试缓存"
 ```
 
-实际界面选择、浏览器启动、游戏加载及多人体验仍需要用户验证。
-
 ## macOS 签名与公开分发
 
 网站 HTTPS 的 `fullchain.pem`、`privkey.key` 不能用于 macOS 代码签名。公开分发 App 需要 Apple Developer Program 签发的 **Developer ID Application** 证书及对应私钥，还需要向 Apple 提交公证；普通 Apple Development 开发证书只能用于开发测试。当前尚无付费开发者账户和 Developer ID 证书，因此当前 macOS 产物只能标记为 **Development 测试版**，不能保证其他电脑的 Gatekeeper 接受，也不能宣称已完成正式签名和公证。
@@ -218,7 +216,7 @@ bash sign-macos.sh \
   --keychain-profile 'gta5data-notary'
 ```
 
-脚本先复制 App 到临时目录，逐层签名内嵌代码与 App，开启 Hardened Runtime 并使用可信时间戳；随后执行严格签名验证、公证提交并等待 `Accepted`、附加及验证公证票据、Gatekeeper 验收。全部通过后才生成 `releases/GTA5Data-Launcher-macos-notarized.zip`。输入 App 不会被改写，任何验收失败都不会生成正式 ZIP；已有输出不会被覆盖。
+脚本先复制 App 到临时目录，逐层签名内嵌代码与 App，开启 Hardened Runtime 并使用可信时间戳；随后执行严格签名验证、公证提交并等待 `Accepted`、附加及验证公证票据、Gatekeeper 检查。全部通过后才生成 `releases/GTA5Data-Launcher-macos-notarized.zip`。输入 App 不会被改写，任何检查失败都不会生成正式 ZIP；已有输出不会被覆盖。
 
 可加 `--dry-run` 只检查参数并查看流程；它不签名、不连接公证服务，也不证明具备发布资格。没有正式证书时，开发测试必须显式使用另一条流程：
 
@@ -233,6 +231,6 @@ bash sign-macos.sh --development \
   --identity -
 ```
 
-开发流程只输出以 `-development.zip` 结尾的测试包，验证包内签名完整性，不执行公证和公开分发验收。Ad hoc 签封没有开发者身份背书；Apple Development 签名也不能替代 Developer ID 和公证。不要要求玩家全局关闭 Gatekeeper 或移除下载隔离标记来补足发布流程。Windows Authenticode 是独立的代码签名体系，不复用 Apple 或 HTTPS 证书。
+开发流程只输出以 `-development.zip` 结尾的测试包，验证包内签名完整性，不执行公证和公开分发检查。Ad hoc 签封没有开发者身份背书；Apple Development 签名也不能替代 Developer ID 和公证。不要要求玩家全局关闭 Gatekeeper 或移除下载隔离标记来补足发布流程。Windows Authenticode 是独立的代码签名体系，不复用 Apple 或 HTTPS 证书。
 
 参考核对：Clash Verge Rev 的 [v2.5.7 发布流程](https://github.com/clash-verge-rev/clash-verge-rev/blob/ea509b82363a40c3c32e951d7ce9d66d66da411f/.github/workflows/release.yml#L254-L264) 通过 Secrets 提供 Apple 证书、签名身份与公证凭据。用户提供的 2.5.7 ARM64 DMG 内 App 实测为 `Developer ID Application: won fen (JPH3Z7PPBB)`，有 stapled 公证票据，Gatekeeper 返回 `accepted / Notarized Developer ID`。外层 DMG 未附票据不代表内层 App 未公证。它的开源源码不包含这些私有证书凭据；Tauri 更新包签名密钥也不等于 Apple 代码签名证书。本核对没有运行 Clash Verge，也没有复制其私钥或证书到本项目。

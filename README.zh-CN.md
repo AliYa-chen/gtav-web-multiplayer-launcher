@@ -18,11 +18,11 @@
 
 **客户端 0.2.15、服务端 0.4.3-world-experimental。** 本轮包含乘客座位纠正与所有权修复。macOS 构建已在本机核验，Windows 构建由 GitHub Actions 生成并通过核验；服务端 0.4.3 已部署到中美两地的正式与实验战局，共四条线路。客户端安装包与配置仍需手动上传下载站。详见 [0.2.15 构建与部署记录](docs/0.2.15多人同乘与公开源码.md)；源码和构建版本号不能单独证明下载站当前已经更新。
 
-多人功能仍为实验状态。静态碰撞和行人导航覆盖出生区附近约 **600×600 米**，尚未覆盖整张地图。服务端没有完整 RAGE 物理运行时，全部单机脚本、工具、任务和载具武器也尚未迁移。本项目使用自有协议，不兼容原 GTA Online 或 FiveM。协议测试不能证明完整游戏同步已完成，`game_sync` 和 `native_clone_transport` 仍为 false。页面和实际游戏的最终验收由用户自行完成。
+多人功能仍为实验状态。静态碰撞和行人导航覆盖出生区附近约 **600×600 米**，尚未覆盖整张地图。服务端没有完整 RAGE 物理运行时，全部单机脚本、工具、任务和载具武器也尚未迁移。本项目使用自有协议，不兼容原 GTA Online 或 FiveM。协议测试不能证明完整游戏同步已完成，`game_sync` 和 `native_clone_transport` 仍为 false。
 
 ## 实机截图
 
-以下截图由用户提供，记录此前的实际游戏演示，不是本轮新版的验收结果。游戏画面继续适用其权利人的条款，详见 [NOTICE.zh-CN.md](NOTICE.zh-CN.md)。
+以下截图记录此前的实际游戏演示。游戏画面继续适用其权利人的条款，详见 [NOTICE.zh-CN.md](NOTICE.zh-CN.md)。
 
 ![两个浏览器客户端展示洛圣都改车店前的车辆与附近玩家](docs/images/multiplayer-vehicles.jpg)
 
@@ -164,7 +164,7 @@ npm run tauri -- build --no-bundle
 
 启动器按既有局域网共享设计有意内置可随源码分发的 **LAN CA 私钥**。它可以被提取，不属于保密的生产环境身份。生产 TLS 证书/私钥文件与服务器登录凭据不在本仓库中。信任方式见[局域网 HTTPS 说明](desktop/README.md#局域网-https-资源共享)。
 
-贡献前阅读 [AGENTS.md](AGENTS.md)，使用 `python3 -B tools/check_git_contents.py` 检查暂存区只包含源码。技术记录分别说明静态检查、协议验证与实际游戏验收，不能相互替代。
+贡献前阅读 [AGENTS.md](AGENTS.md)，使用 `python3 -B tools/check_git_contents.py` 检查暂存区只包含源码。技术记录说明实现范围，以及已完成的静态检查和协议验证。
 
 ## 详细资料
 

@@ -66,8 +66,8 @@ systemctl reload nginx
 
 首次开启 stream 前执行 `nginx -t`，确认 Java 已监听内网端口，再 reload Nginx。若已有 Java 占用公网 47485/47486，先验证 Nginx 配置，随后重启 Java 释放公网端口，最后 reload Nginx。回滚时先移除 stream 监听并 reload Nginx，再恢复旧 Java 监听，避免端口冲突。
 
-## 部署验收与线路发布
+## 部署检查与线路发布
 
 每个地区都验证两个 HTTPS 健康接口及两个 WSS 入口，包括 `welcome`、公共战局加入、完整世界快照和应用心跳。验证使用默认可信证书，不能使用 `curl -k` 或关闭 TLS 校验。健康响应须显示实际版本、`world_v2` / `session_policy` / `physics_queries` 能力和实际加载数据数量，不能仅检查 HTTP 200：当前 0.4.2 数据为 301,339 个静态三角形、77,824 个道路节点、92,681 个步行导航单元及 228,074 条有向导航连接。
 
-`game_sync: false` 与 `coverage_complete: false` 如实保留：局部资源和协议检查不表示全地图原生同步或双客户端画面已经验收。完成部署与 TLS 验证后，再发布远程配置接口中的该地区正式/实验两条线路。修改接口即可更新启动器和游戏线路；新增端口时同步调整 Nginx 精确路径和接口 URL，不在客户端添加固定线路。
+`game_sync: false` 与 `coverage_complete: false` 如实保留：当前数据覆盖局部区域，并采用自有世界同步协议。完成部署与 TLS 验证后，再发布远程配置接口中的该地区正式/实验两条线路。修改接口即可更新启动器和游戏线路；新增端口时同步调整 Nginx 精确路径和接口 URL，不在客户端添加固定线路。
