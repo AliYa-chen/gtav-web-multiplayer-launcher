@@ -137,8 +137,8 @@ function publishedDownloads(array $candidates): stdClass
 
 // ── 配置内容：维护者只需要修改这一段 ──
 $site = 'https://gtav.2t.hk';
-$latestVersion = '0.2.12';
-$releaseNotes = "启动器 0.2.12 加入中文、English 和跟随系统；游戏网页与局域网证书引导页自动使用同一语言，已经打开的页面同步更新。原游戏菜单语言在下次进入游戏时生效。配套服务端 0.4.2 补充公共出生区步行导航、卡住恢复、尸体清理与人口补充。所有适配由启动器和服务端完成，原游戏资源保持只读。当前仍为实验版，macOS 包为开发签名、未公证。";
+$latestVersion = '0.2.13';
+$releaseNotes = "启动器 0.2.13 修复公共模式卡在 76% 的加载时序问题：引擎真正显示世界后才接管公共场景。故事、自由沙盒、公共战局及在线昵称、角色和服务器线路统一在启动器选择；线路只显示远程地址，通过浏览器健康检测后才可选择，并显示实测延迟。共享朋友保留网页模式选择和自己的在线表单。减少重复日志请求，游戏原始资源保持只读。服务端仍为 0.4.2；macOS 包为开发签名、未公证。";
 $servers = [
     ['id' => 'main', 'name' => '公共战局', 'role' => '主线路', 'address' => 'gtaserver.2t.hk:47485',
         'health_url' => 'https://gtaserver.2t.hk:47485/47485/health',
@@ -155,7 +155,7 @@ $servers = [
 $announcements = [
     [
         'title' => '欢迎来到 GTA V 公共战局',
-        'body' => "使用启动器选择自己的游戏资源目录，进入游戏后按 O 加入公共战局。\n所有玩家需连接同一条线路；不同端口是独立战局。",
+        'body' => "本机在启动器选择公共战局，填写昵称并选择可用线路；共享朋友在网页选择在线模式后填写自己的信息。\n所有玩家需连接同一条线路；不同端口是独立战局。",
         'date' => '2026-10-09',
         'url' => $site,
     ],
@@ -170,10 +170,10 @@ $translations = [
     'zh-CN' => ['oltitle' => $site, 'release_notes' => $releaseNotes, 'announcements' => $announcements],
     'en' => [
         'oltitle' => $site,
-        'release_notes' => 'Launcher 0.2.12 adds Chinese and English throughout the launcher, game pages and LAN certificate guide. Select a language in Settings; open pages follow automatically. Native game menus use the chosen language on the next game entry. Server 0.4.2 adds pedestrian navigation, stuck recovery, corpse cleanup and population refill near the public spawn area. Original game resources remain read-only. Experimental release; the macOS development build is not notarized.',
+        'release_notes' => 'Launcher 0.2.13 fixes public sessions stopping at 76% by waiting for the real world scene before applying shared state. Choose story, sandbox or public session in the launcher, along with your online nickname, character and server route. Routes display the configured address, require a successful browser health check and show measured latency. Shared guests keep web mode selection and their own online form. Repeated diagnostic requests are reduced. Original game resources remain read-only. The server stays at 0.4.2; the macOS development build is not notarized.',
         'announcements' => [
             ['title' => 'Welcome to the GTA V public session',
-                'body' => "Select your own game resources folder in the launcher, then press O in game to join.\nPlayers must use the same server; each port has a separate session.",
+                'body' => "Select Public Session in the launcher, enter your nickname and choose an available route. Shared guests select online mode on the web page and enter their own details.\nPlayers must use the same server; each port has a separate session.",
                 'date' => '2026-10-09', 'url' => $site],
             ['title' => 'Experimental features',
                 'body' => "Shared world synchronization is still being tested. Pedestrian navigation and police dispatch currently cover the public spawn area.\nIf synchronization fails, report both players' actions and the time it occurred.",
@@ -183,12 +183,12 @@ $translations = [
 ];
 $downloadCandidates = [
     'macos_arm64' => [
-        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-macOS-arm64-v0.2.12-development.zip',
-        'sha256' => 'fdb1b1f888994967ee4cece4822d03a9d9d4bd940a71709f6c4baaa4ccb469c7',
+        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-macOS-arm64-v0.2.13-development.zip',
+        'sha256' => '1e5f625798abf957badeae9ace05d5a29e68e559e7c58f4f2d410945bfbdfc46',
     ],
     'windows_x64' => [
-        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-Windows-x64-v0.2.12.exe',
-        'sha256' => 'a06b610965da839bc6160ebdc137fc5d9baa46db89d58e594d69ef7a1b9bd8a8',
+        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-Windows-x64-v0.2.13.exe',
+        'sha256' => '98385c353680548dd5b7aa5e745f22fa33345e5a525886917aa63655a7b6cd6c',
     ],
 ];
 // ── 配置内容结束 ──
