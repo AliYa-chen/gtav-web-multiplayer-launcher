@@ -22,7 +22,7 @@ const dependencies = Promise.all([
 const source = fs.readFileSync(path.join(root, 'client/multiplayer/public-session.js'), 'utf8')
   .replace(/^import .*$/gm, '').replace('export async function startPublicSession', 'async function startPublicSession');
 const capabilities = ['public_session', 'player_state', 'shoot_events', 'appearance', 'combat', 'resume', 'heartbeat', 'snapshot', 'actions', 'combat_feedback'];
-const preferences = (name = '玩家甲') => ({ server: '183.66.27.21:47485', name, preset: 'npc_male', seed: 73 });
+const preferences = (name = '玩家甲') => ({ server: '198.51.100.21:47485', name, preset: 'npc_male', seed: 73 });
 const playerState = (seq = 1) => ({ seq, position: [711.5, -1088.1, 22.4], heading: 90,
   model: 0x705e61f2, health: 200, weapon: 0x1b06d571, shooting: false });
 const room = (id = 'LOCAL', extras = []) => ({ id: 'PUBLIC', map: 'gta5', phase: 'launched', host_id: null,
@@ -73,7 +73,7 @@ async function harness(options = {}) {
   });
   vm.runInContext(source + '\nglobalThis.startSession = startPublicSession;', context, { filename: 'public-session.js' });
   const profile = options.preferences || preferences();
-  const identityKey = 'gta5.public.identity:ws://183.66.27.21:47485/ws:' + profile.name;
+  const identityKey = 'gta5.public.identity:ws://198.51.100.21:47485/ws:' + profile.name;
   if (options.identity) storage.set(identityKey, JSON.stringify(options.identity));
   const api = await context.startSession(profile, (value) => statuses.push(copy(value)), options.intent);
   api.ready.catch(() => {});
@@ -102,7 +102,7 @@ async function harness(options = {}) {
 
 test('远程连接由游戏页持有，首次接入就交付完整快照与独立状态通道', async () => {
   const page = await harness(); const socket = page.enter(); await page.api.ready;
-  assert.equal(socket.address, 'ws://183.66.27.21:47485/ws');
+  assert.equal(socket.address, 'ws://198.51.100.21:47485/ws');
   socket.receive({ type: 'room_state', room: room('LOCAL', [{ id: 'REMOTE', name: '玩家乙', connected: true }]) });
   socket.receive({ type: 'world_state', room_id: 'PUBLIC', states: [{ player_id: 'REMOTE', state: playerState() }] });
   socket.receive({ type: 'combat_state', players: [{ id: 'LOCAL', health: 200, alive: true, revision: 1 }] });
@@ -116,11 +116,11 @@ test('远程连接由游戏页持有，首次接入就交付完整快照与独�
 
 test('从远程线路取得的 WSS 代理路径在建连和自动重连时保持完整', async () => {
   const [, addresses] = await dependencies;
-  const server = addresses.normalizeRemoteServerAddress({ address: 'gtaserver.2t.hk:47485',
-    health_url: 'https://gtaserver.2t.hk:47485/47485/health' });
+  const server = addresses.normalizeRemoteServerAddress({ address: 'gtaserver-cn.2t.hk:47485',
+    health_url: 'https://gtaserver-cn.2t.hk:47485/47485/health' });
   const page = await harness({ preferences: { ...preferences(), server } });
   const first = page.enter(); await page.api.ready;
-  assert.equal(first.address, 'wss://gtaserver.2t.hk:47485/47485/ws');
+  assert.equal(first.address, 'wss://gtaserver-cn.2t.hk:47485/47485/ws');
   first.close(); page.advance(2500);
   assert.ok(page.sockets.length > 1);
   assert.ok(page.sockets.every((socket) => socket.address === server));

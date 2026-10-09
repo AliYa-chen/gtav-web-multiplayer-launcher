@@ -11,7 +11,8 @@ CLIENT = Path(__file__).resolve().parent / 'client'
 RUNTIME_ROOT = CLIENT / 'runtime'
 BUILD_ID = '8b0b5899ed'
 ORIGINAL_WASM_SHA256 = '11ca8d2c04c5e843d18ff4aea4899d72c86973c6b031df334e67c446b2ae83e0'
-DEFAULT_ROOM_SERVER = '183.66.27.21:47485'
+# Public routes come from REMOTE_URL; only explicit development overrides use local-config.
+DEFAULT_ROOM_SERVER = ''
 LOG_FILE = Path(__file__).resolve().parent / 'docs' / 'snapshot' / 'browser-local.log'
 LOG_LOCK = threading.Lock()
 REMOTE_URL = 'https://oss.2t.hk/gtav/'
@@ -74,7 +75,7 @@ def _remote_server(value):
                 raise ValueError('远程服务器地址无效')
             _remote_host(url.hostname)
     result = {'address': address}
-    for key, limit in (('id', 80), ('name', 80), ('role', 40)):
+    for key, limit in (('id', 80), ('name', 80), ('role', 40), ('region', 64)):
         if key in value:
             result[key] = _remote_text(value[key], limit, optional=True)
     for key in ('health_url', 'status_url', 'websocket_url', 'ws_url'):
@@ -88,6 +89,8 @@ def _remote_server(value):
         for locale, entry in translations.items():
             if not isinstance(entry, dict): raise ValueError('Invalid server translation')
             result['i18n'][locale] = {key: _remote_text(entry.get(key, ''), 80, optional=True) for key in ('name', 'role')}
+            if 'region' in entry:
+                result['i18n'][locale]['region'] = _remote_text(entry['region'], 64, optional=True)
     return result
 
 
@@ -644,7 +647,7 @@ def main(argv=None):
     args.add_argument('--runtime-dir', type=Path, default=RUNTIME_ROOT, help='启动器生成的离线/在线运行目录，默认 client/runtime；浏览器不读取游戏目录内任何 WASM')
     args.add_argument('--multiplayer', action='store_true', help='打开轻量多人大厅；多实例时自动启用')
     args.add_argument('--room-server', default=DEFAULT_ROOM_SERVER,
-                      help='远程公共战局 IP:端口，默认 ' + DEFAULT_ROOM_SERVER + '；客户端无需本地 WebSocket 服务')
+                      help='开发时显式指定战局 IP:端口；默认不提供地址，公共线路通过远程接口读取')
     args.add_argument('--start-room-server', action='store_true', help='一并启动本机 Java 大厅，方便多用户测试；需要 Java 17+')
     args.add_argument('--java', default='java', help='Java 可执行文件路径，用于 --start-room-server')
     args.add_argument('--open', action='store_true', help='服务器就绪后打开默认浏览器')
@@ -657,6 +660,10 @@ def main(argv=None):
         resources = inspect_game_resources(options.game_dir, options.runtime_dir,
                                           require_runtime=options.multiplayer or options.start_room_server or options.instances > 1)
         if options.start_room_server:
+            # Explicit local development startup exposes the same resolved address
+            # to /api/local-config; public mode still has no built-in route.
+            if not options.room_server:
+                options.room_server = '127.0.0.1:8787'
             room_process = start_room_server('127.0.0.1:8787' if options.room_server == 'auto' else options.room_server,
                                              options.java, '127.0.0.1' if options.host == '127.0.0.1' else '0.0.0.0')
         servers = create_local_servers(options.port, options.instances, options.room_server,

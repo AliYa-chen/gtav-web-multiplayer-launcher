@@ -90,7 +90,7 @@ test('更新仅向本机平台提供可用下载，内容作为文字转义', ()
 });
 test('加载失败或旧缓存快照只显示横线，不显示历史公告或下载', () => {
   const config = { oltitle: 'https://gtav.2t.hk', website: 'https://gtav.2t.hk', latest_version: '99.0.0',
-    announcements: [{ title: '旧公告', body: '旧正文' }], server: { address: '183.66.27.21:47485' },
+    announcements: [{ title: '旧公告', body: '旧正文' }], server: { address: '198.51.100.21:47485' },
     release_notes: '旧说明', downloads: { macos_arm64: { url: 'https://example.com/mac.zip', sha256: 'a'.repeat(64) } } };
   for (const snapshot of [null, { config, source: 'cache' }, { config, source: 'unavailable' }, { config, source: 'remote', stale: true }]) {
     const view = remotePresentation(snapshot, '0.2.3', 'macos_arm64');
@@ -100,10 +100,10 @@ test('加载失败或旧缓存快照只显示横线，不显示历史公告或�
   }
 });
 test('远程服务器数组保留两条线路，不把它们当成无效对象', () => {
-  const server = [{ id: 'main', name: '公共战局', role: '主线路', address: '183.66.27.21:47485' },
-    { id: 'experimental', name: '实验战局', role: '实验线路', address: '183.66.27.21:47486' }];
+  const server = [{ id: 'main', name: '公共战局', role: '主线路', address: '198.51.100.21:47485' },
+    { id: 'experimental', name: '实验战局', role: '实验线路', address: '198.51.100.21:47486' }];
   assert.deepEqual(remotePresentation({ config: { server }, source: 'remote' }, '0.2.3').servers.map((item) => item.address),
-    ['183.66.27.21:47485', '183.66.27.21:47486']);
+    ['198.51.100.21:47485', '198.51.100.21:47486']);
 });
 test('版本比较区分数字、正式版本与预发行版本，无效版本不会启动下载', () => {
   assert.equal(isNewerVersion('0.10.0', '0.9.1'), true);
@@ -150,10 +150,14 @@ test('共享设置请求提交不同双端口，空白 IP 表示自动检测', (
 test('启动器线路保留HTTPS反向代理路径，模式默认在线且离线不要求线路', async () => {
   const { launchPreferences, launchServerOptions, launchRequest, launchServer } = await import('../src/view-state.js');
   assert.equal(launchPreferences().mode, 'online');
-  const snapshot = { source: 'remote', config: { servers: [{ address: 'gtaserver.2t.hk:47485', name: '公共战局', health_url: 'https://gtaserver.2t.hk:47485/47485/health' }] } };
-  assert.equal(launchServerOptions(snapshot)[0].server, 'wss://gtaserver.2t.hk:47485/47485/ws');
-  assert.equal(launchRequest({ name: '玩家1', server: 'gtaserver.2t.hk:47485' }, snapshot).server, 'wss://gtaserver.2t.hk:47485/47485/ws');
+  const snapshot = { source: 'remote', config: { servers: [{ address: 'gtaserver-cn.2t.hk:47485', name: '公共战局', health_url: 'https://gtaserver-cn.2t.hk:47485/47485/health' }] } };
+  assert.equal(launchServerOptions(snapshot)[0].server, 'wss://gtaserver-cn.2t.hk:47485/47485/ws');
+  assert.equal(launchRequest({ name: '玩家1', server: 'gtaserver-cn.2t.hk:47485' }, snapshot).server, 'wss://gtaserver-cn.2t.hk:47485/47485/ws');
   assert.equal(launchRequest({ mode: 'story', name: '玩家1' }).mode, 'story');
   assert.equal(launchServer('example.com:47485'), 'wss://example.com:47485/ws');
+  assert.equal(launchServer('example.com'), 'wss://example.com/ws');
+  const dynamic = { source: 'remote', stale: false, config: { servers: [{ address: 'new-route.example:31415',
+    health_url: 'https://new-route.example:31415/route/health', websocket_url: 'wss://socket.example:29999/custom/socket?room=main' }] } };
+  assert.equal(launchServerOptions(dynamic)[0].server, 'wss://socket.example:29999/custom/socket?room=main');
   for (const value of ['ws://example.com/ws', 'wss://name:password@example.com/ws', '/play/', 'https://example.com']) assert.throws(() => launchServer(value));
 });

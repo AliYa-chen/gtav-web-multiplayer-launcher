@@ -41,6 +41,8 @@ pub struct ServerInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_url: Option<String>,
     /// An HTTPS health endpoint can also describe a TLS reverse-proxy prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -53,6 +55,7 @@ pub struct ServerInfo {
 pub struct ServerTranslation {
     #[serde(default)] pub name: String,
     #[serde(default)] pub role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub region: Option<String>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfigTranslation {
@@ -218,6 +221,7 @@ fn clean_server(mut server: ServerInfo) -> Result<ServerInfo, String> {
         if !matches!(locale.as_str(),"zh-CN"|"en") { return Err("Unsupported translation language.".into()); }
         value.name=text(&value.name,80,"server.i18n.name")?;
         value.role=text(&value.role,80,"server.i18n.role")?;
+        value.region=value.region.as_deref().map(|region|text(region,64,"server.i18n.region")).transpose()?;
     }
     server.id = server.id.as_deref().map(|value| -> Result<String, String> {
         let value = text(value, 64, "server.id")?;
@@ -242,6 +246,7 @@ fn clean_server(mut server: ServerInfo) -> Result<ServerInfo, String> {
     }
     server.name = text(&server.name, 80, "server.name")?;
     server.role = server.role.as_deref().map(|value| text(value, 80, "server.role")).transpose()?;
+    server.region = server.region.as_deref().map(|value| text(value, 64, "server.region")).transpose()?;
     server.status_url = server.status_url.as_deref().map(https_url).transpose()?;
     server.health_url = server.health_url.as_deref().map(health_url).transpose()?;
     server.websocket_url = server.websocket_url.as_deref().map(websocket_url).transpose()?;
@@ -314,6 +319,7 @@ fn normalize_servers(server: Option<RawServer>, servers: Option<Vec<ServerInfo>>
             }
             merge_server_field(&mut primary.id, server.id, "ID")?;
             merge_server_field(&mut primary.role, server.role, "角色")?;
+            merge_server_field(&mut primary.region, server.region, "地区")?;
             merge_server_field(&mut primary.status_url, server.status_url, "状态地址")?;
             merge_server_field(&mut primary.health_url, server.health_url, "健康检查地址")?;
             merge_server_field(&mut primary.websocket_url, server.websocket_url, "WebSocket 地址")?;
@@ -495,6 +501,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn arbitrary_remote_routes_preserve_endpoints_and_region_metadata() {
+        let raw = serde_json::json!({"servers":[
+            {"id":"main","address":"new-region.example:31415","region":"NEW",
+             "health_url":"https://new-region.example:31415/routed/health",
+             "websocket_url":"wss://transport.example:32768/session/socket?room=main",
+             "i18n":{"en":{"name":"New Region","region":"New region"}}},
+            {"id":"backup","address":"backup.example:29999","region":"BACKUP",
+             "health_url":"https://backup.example:29999/v2/health"}
+        ]});
+        let config = parse_config(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        assert_eq!(config.servers[0].websocket_url.as_deref(), Some("wss://transport.example:32768/session/socket?room=main"));
+        assert_eq!(config.servers[0].region.as_deref(), Some("NEW"));
+        assert_eq!(config.servers[0].i18n["en"].region.as_deref(), Some("New region"));
+        assert_eq!(config.servers[1].websocket_url.as_deref(), Some("wss://backup.example:29999/v2/ws"));
+        let roundtrip = parse_config(&serde_json::to_vec(&config).unwrap()).unwrap();
+        assert_eq!(roundtrip.servers, config.servers);
+        let mut unsafe_config = raw;
+        unsafe_config["servers"][0]["region"] = serde_json::json!("x".repeat(65));
+        assert!(parse_config(&serde_json::to_vec(&unsafe_config).unwrap()).is_err());
+    }
+
+    #[test]
     fn existing_minimal_document_remains_supported() {
         let config = parse_config(br#"{"oltitle":"https://gtav.2t.hk"}"#).unwrap();
         assert_eq!(config.oltitle, "https://gtav.2t.hk");
@@ -505,7 +533,7 @@ mod tests {
     #[test]
     fn nested_release_and_announcements_are_typed() {
         let value = serde_json::json!({"oltitle":"服务维护中", "announcements":[{"title":"测试","body":"正文"}],
-            "server":{"address":"183.66.27.21:47485","name":"公共战局"},
+            "server":{"address":"198.51.100.21:47485","name":"公共战局"},
             "update":{"latestversion":"v0.2.0","notes":"修复同步", "downloads":{"windows_x64":
                 {"url":"https://oss.2t.hk/launcher.exe","sha256":"a".repeat(64)}}}});
         let config = parse_config(&serde_json::to_vec(&value).unwrap()).unwrap();
@@ -541,7 +569,7 @@ mod tests {
         assert_eq!(config.servers[0].role.as_deref(), Some("主线路"));
         assert_eq!(config.servers[1].id.as_deref(), Some("experimental"));
         assert_eq!(config.servers[1].role.as_deref(), Some("实验线路"));
-        assert_eq!(config.servers[1].address, "183.66.27.21:47486");
+        assert_eq!(config.servers[1].address, "198.51.100.21:47486");
         assert_eq!(config.server.as_ref(), Some(&config.servers[0]));
         assert_eq!(config.announcements.len(), 2);
         assert!(config.announcements[0].body.contains('\n'));
@@ -582,50 +610,50 @@ mod tests {
 
     #[test]
     fn https_health_metadata_preserves_tls_and_reverse_proxy_path() {
-        let config = parse_config(br#"{"servers":[{"id":"main","address":"gtaserver.2t.hk:47485","health_url":"https://gtaserver.2t.hk:47485/47485/health"}]}"#).unwrap();
+        let config = parse_config(br#"{"servers":[{"id":"main","address":"gtaserver-cn.2t.hk:47485","health_url":"https://gtaserver-cn.2t.hk:47485/47485/health"}]}"#).unwrap();
         let server = config.server.as_ref().unwrap();
-        assert_eq!(server.address, "gtaserver.2t.hk:47485");
-        assert_eq!(server.health_url.as_deref(), Some("https://gtaserver.2t.hk:47485/47485/health"));
-        assert_eq!(server.websocket_url.as_deref(), Some("wss://gtaserver.2t.hk:47485/47485/ws"));
+        assert_eq!(server.address, "gtaserver-cn.2t.hk:47485");
+        assert_eq!(server.health_url.as_deref(), Some("https://gtaserver-cn.2t.hk:47485/47485/health"));
+        assert_eq!(server.websocket_url.as_deref(), Some("wss://gtaserver-cn.2t.hk:47485/47485/ws"));
         assert_eq!(parse_config(&serde_json::to_vec(&config).unwrap()).unwrap(), config);
 
-        let default_port = parse_config(br#"{"server":{"address":"gtaserver.2t.hk","health_url":"https://gtaserver.2t.hk/health/"}}"#).unwrap();
-        assert_eq!(default_port.server.unwrap().websocket_url.as_deref(), Some("wss://gtaserver.2t.hk/ws"));
+        let default_port = parse_config(br#"{"server":{"address":"gtaserver-cn.2t.hk","health_url":"https://gtaserver-cn.2t.hk/health/"}}"#).unwrap();
+        assert_eq!(default_port.server.unwrap().websocket_url.as_deref(), Some("wss://gtaserver-cn.2t.hk/ws"));
     }
 
     #[test]
     fn explicit_websocket_endpoint_and_alias_preserve_custom_paths_and_queries() {
         for field in ["websocket_url", "ws_url"] {
-            let mut line = serde_json::json!({"address":"gtaserver.2t.hk:47485",
-                "health_url":"https://gtaserver.2t.hk:47485/47485/health"});
-            line[field] = serde_json::json!("wss://gtaserver.2t.hk/session/socket?line=main");
+            let mut line = serde_json::json!({"address":"gtaserver-cn.2t.hk:47485",
+                "health_url":"https://gtaserver-cn.2t.hk:47485/47485/health"});
+            line[field] = serde_json::json!("wss://gtaserver-cn.2t.hk/session/socket?line=main");
             let config = parse_config(&serde_json::to_vec(&serde_json::json!({"server":line})).unwrap()).unwrap();
-            assert_eq!(config.server.unwrap().websocket_url.as_deref(), Some("wss://gtaserver.2t.hk/session/socket?line=main"));
+            assert_eq!(config.server.unwrap().websocket_url.as_deref(), Some("wss://gtaserver-cn.2t.hk/session/socket?line=main"));
         }
-        let merged = parse_config(br#"{"server":{"address":"gtaserver.2t.hk:47485","health_url":"https://gtaserver.2t.hk:47485/47485/health"},"servers":[{"id":"main","address":"gtaserver.2t.hk:47485","websocket_url":"wss://gtaserver.2t.hk/custom/ws"}]}"#).unwrap();
-        assert_eq!(merged.server.unwrap().websocket_url.as_deref(), Some("wss://gtaserver.2t.hk/custom/ws"));
+        let merged = parse_config(br#"{"server":{"address":"gtaserver-cn.2t.hk:47485","health_url":"https://gtaserver-cn.2t.hk:47485/47485/health"},"servers":[{"id":"main","address":"gtaserver-cn.2t.hk:47485","websocket_url":"wss://gtaserver-cn.2t.hk/custom/ws"}]}"#).unwrap();
+        assert_eq!(merged.server.unwrap().websocket_url.as_deref(), Some("wss://gtaserver-cn.2t.hk/custom/ws"));
     }
 
     #[test]
     fn full_websocket_address_is_supported_without_a_bare_host_fallback() {
-        for address in ["ws://127.0.0.1:47485/ws", "wss://gtaserver.2t.hk:47485/47485/ws?line=main"] {
+        for address in ["ws://127.0.0.1:47485/ws", "wss://gtaserver-cn.2t.hk:47485/47485/ws?line=main"] {
             let config = parse_config(&serde_json::to_vec(&serde_json::json!({"server":{"address":address}})).unwrap()).unwrap();
             let server = config.server.unwrap();
             assert_eq!(server.address, address);
             assert_eq!(server.websocket_url.as_deref(), Some(address));
         }
-        let uppercase = parse_config(br#"{"server":{"address":"WSS://GTASERVER.2T.HK/47485/ws"}}"#).unwrap();
-        assert_eq!(uppercase.server.unwrap().websocket_url.as_deref(), Some("wss://gtaserver.2t.hk/47485/ws"));
+        let uppercase = parse_config(br#"{"server":{"address":"WSS://GTASERVER-CN.2T.HK/47485/ws"}}"#).unwrap();
+        assert_eq!(uppercase.server.unwrap().websocket_url.as_deref(), Some("wss://gtaserver-cn.2t.hk/47485/ws"));
     }
 
     #[test]
     fn absent_unrelated_or_differently_routed_health_metadata_does_not_guess_wss() {
         for line in [
-            serde_json::json!({"address":"183.66.27.21:47485"}),
-            serde_json::json!({"address":"183.66.27.21:47485","health_url":"https://gtaserver.2t.hk:47485/47485/health"}),
-            serde_json::json!({"address":"gtaserver.2t.hk:47485","health_url":"https://gtaserver.2t.hk:47486/47486/health"}),
-            serde_json::json!({"address":"gtaserver.2t.hk:47485","health_url":"https://gtaserver.2t.hk:47485/status"}),
-            serde_json::json!({"address":"gtaserver.2t.hk:47485","status_url":"https://gtaserver.2t.hk:47485/health"}),
+            serde_json::json!({"address":"198.51.100.21:47485"}),
+            serde_json::json!({"address":"198.51.100.21:47485","health_url":"https://gtaserver-cn.2t.hk:47485/47485/health"}),
+            serde_json::json!({"address":"gtaserver-cn.2t.hk:47485","health_url":"https://gtaserver-cn.2t.hk:47486/47486/health"}),
+            serde_json::json!({"address":"gtaserver-cn.2t.hk:47485","health_url":"https://gtaserver-cn.2t.hk:47485/status"}),
+            serde_json::json!({"address":"gtaserver-cn.2t.hk:47485","status_url":"https://gtaserver-cn.2t.hk:47485/health"}),
         ] {
             let config = parse_config(&serde_json::to_vec(&serde_json::json!({"server":line})).unwrap()).unwrap();
             assert!(config.server.unwrap().websocket_url.is_none());
@@ -634,19 +662,19 @@ mod tests {
 
     #[test]
     fn unsafe_transport_metadata_and_conflicting_aliases_are_rejected() {
-        for endpoint in ["https://gtaserver.2t.hk/ws", "wss://user:secret@gtaserver.2t.hk/ws",
-            "wss://gtaserver.2t.hk/ws#fragment", "wss://gtaserver.2t.hk:0/ws", "wss:gtaserver.2t.hk",
-            "wss://gtaserver.2t.hk\\private/ws", "wss://gtaserver.2t.hk/ws?value=a b"] {
-            let value = serde_json::json!({"server":{"address":"gtaserver.2t.hk:47485","websocket_url":endpoint}});
+        for endpoint in ["https://gtaserver-cn.2t.hk/ws", "wss://user:secret@gtaserver-cn.2t.hk/ws",
+            "wss://gtaserver-cn.2t.hk/ws#fragment", "wss://gtaserver-cn.2t.hk:0/ws", "wss:gtaserver-cn.2t.hk",
+            "wss://gtaserver-cn.2t.hk\\private/ws", "wss://gtaserver-cn.2t.hk/ws?value=a b"] {
+            let value = serde_json::json!({"server":{"address":"gtaserver-cn.2t.hk:47485","websocket_url":endpoint}});
             assert!(parse_config(&serde_json::to_vec(&value).unwrap()).is_err(), "accepted: {endpoint}");
         }
-        for endpoint in ["http://gtaserver.2t.hk/health", "https://user:secret@gtaserver.2t.hk/health",
-            "https://gtaserver.2t.hk/health#fragment", "https://gtaserver.2t.hk:0/health",
-            "https://gtaserver.2t.hk\\private/health"] {
-            let value = serde_json::json!({"server":{"address":"gtaserver.2t.hk:47485","health_url":endpoint}});
+        for endpoint in ["http://gtaserver-cn.2t.hk/health", "https://user:secret@gtaserver-cn.2t.hk/health",
+            "https://gtaserver-cn.2t.hk/health#fragment", "https://gtaserver-cn.2t.hk:0/health",
+            "https://gtaserver-cn.2t.hk\\private/health"] {
+            let value = serde_json::json!({"server":{"address":"gtaserver-cn.2t.hk:47485","health_url":endpoint}});
             assert!(parse_config(&serde_json::to_vec(&value).unwrap()).is_err(), "accepted: {endpoint}");
         }
-        let aliases = br#"{"server":{"address":"gtaserver.2t.hk","websocket_url":"wss://gtaserver.2t.hk/ws","ws_url":"wss://gtaserver.2t.hk/other/ws"}}"#;
+        let aliases = br#"{"server":{"address":"gtaserver-cn.2t.hk","websocket_url":"wss://gtaserver-cn.2t.hk/ws","ws_url":"wss://gtaserver-cn.2t.hk/other/ws"}}"#;
         assert!(parse_config(aliases).is_err());
     }
 
@@ -656,15 +684,15 @@ mod tests {
         let live = parse_config(bytes).unwrap();
         assert_eq!(live.servers.len(), 2);
         let mut raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
-        raw["server"] = serde_json::json!({"address":"183.66.27.21:47485","name":"公共战局",
-            "status_url":"https://gtav.2t.hk","health_url":"https://gtaserver.2t.hk:47485/47485/health"});
+        raw["server"] = serde_json::json!({"address":"198.51.100.21:47485","name":"公共战局",
+            "status_url":"https://gtav.2t.hk","health_url":"https://gtaserver-cn.2t.hk:47485/47485/health"});
         let config = parse_config(&serde_json::to_vec(&raw).unwrap()).unwrap();
         let primary = config.server.as_ref().unwrap();
         assert_eq!(primary, &config.servers[0]);
         assert_eq!(primary.id.as_deref(), Some("main"));
         assert_eq!(primary.role.as_deref(), Some("主线路"));
         assert_eq!(primary.status_url.as_deref(), Some("https://gtav.2t.hk/"));
-        assert_eq!(primary.health_url.as_deref(), Some("https://gtaserver.2t.hk:47485/47485/health"));
+        assert_eq!(primary.health_url.as_deref(), Some("https://gtaserver-cn.2t.hk:47485/47485/health"));
         assert!(primary.websocket_url.is_none(), "different health and game hosts cannot imply the transport");
         assert_eq!(config.servers[1], live.servers[1]);
         assert_eq!(parse_config(&serde_json::to_vec(&config).unwrap()).unwrap(), config);
@@ -690,9 +718,9 @@ mod tests {
         assert!(parse_config(duplicate).is_err());
         for field in ["health_url", "websocket_url"] {
             let (first, second) = if field == "health_url" {
-                ("https://gtaserver.2t.hk/health", "https://other.example/health")
-            } else { ("wss://gtaserver.2t.hk/ws", "wss://other.example/ws") };
-            let mut first_line = serde_json::json!({"address":"gtaserver.2t.hk:47485"});
+                ("https://gtaserver-cn.2t.hk/health", "https://other.example/health")
+            } else { ("wss://gtaserver-cn.2t.hk/ws", "wss://other.example/ws") };
+            let mut first_line = serde_json::json!({"address":"gtaserver-cn.2t.hk:47485"});
             let mut second_line = first_line.clone();
             first_line[field] = serde_json::json!(first); second_line[field] = serde_json::json!(second);
             let document = serde_json::json!({"server":first_line,"servers":[second_line]});

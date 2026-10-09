@@ -57,7 +57,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             language: crate::language::shared(),
-            multiplayer_server: "183.66.27.21:47485".into(),
+            multiplayer_server: String::new(),
             instance_name: "玩家1".into(),
             log_file: std::env::temp_dir().join("gta5-launcher/browser-local.log"),
             online_ready: false,
@@ -868,6 +868,7 @@ mod tests {
         assert!(headers.to_lowercase().contains("location: /?online=1&name=test&server=example%3a1234"));
         let body = request(&server, "GET", "/api/local-config", "", b"").1;
         let config: Value = serde_json::from_slice(&body).unwrap(); assert_eq!(config["debug"], false); assert_eq!(config["map"], "gta5");
+        assert_eq!(config["multiplayer_server"], "", "No built-in public route when the remote catalog is unavailable");
         let body = request(&server, "GET", "/api/remote-config", "", b"").1;
         let remote: Value = serde_json::from_slice(&body).unwrap(); assert!(remote["config"]["oltitle"].is_null());
         assert_eq!(remote["source"], "unavailable");

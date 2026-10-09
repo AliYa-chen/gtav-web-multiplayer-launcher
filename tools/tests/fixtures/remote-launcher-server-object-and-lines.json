@@ -7,15 +7,15 @@
             "id": "main",
             "name": "公共战局",
             "role": "主线路",
-            "address": "183.66.27.21:47485",
-            "health_url": "https://gtaserver.2t.hk:47485/47485/health"
+            "address": "198.51.100.21:47485",
+            "health_url": "https://gtaserver-cn.2t.hk:47485/47485/health"
         },
         {
             "id": "experimental",
             "name": "实验战局",
             "role": "实验线路",
-            "address": "183.66.27.21:47486",
-            "health_url": "https://gtaserver.2t.hk:47486/47486/health"
+            "address": "198.51.100.21:47486",
+            "health_url": "https://gtaserver-cn.2t.hk:47486/47486/health"
         }
     ],
     "servers": [
@@ -23,15 +23,15 @@
             "id": "main",
             "name": "公共战局",
             "role": "主线路",
-            "address": "183.66.27.21:47485",
-            "health_url": "https://gtaserver.2t.hk:47485/47485/health"
+            "address": "198.51.100.21:47485",
+            "health_url": "https://gtaserver-cn.2t.hk:47485/47485/health"
         },
         {
             "id": "experimental",
             "name": "实验战局",
             "role": "实验线路",
-            "address": "183.66.27.21:47486",
-            "health_url": "https://gtaserver.2t.hk:47486/47486/health"
+            "address": "198.51.100.21:47486",
+            "health_url": "https://gtaserver-cn.2t.hk:47486/47486/health"
         }
     ],
     "announcements": [

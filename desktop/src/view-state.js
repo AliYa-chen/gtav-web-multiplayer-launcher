@@ -158,7 +158,6 @@ export function launchServer(value) {
   let url;
   try { url = new URL(explicit ? input : 'wss://' + input); } catch { throw new Error('服务器地址格式无效。'); }
   if (url.protocol !== 'wss:' || !url.hostname || url.username || url.password || url.hash) throw new Error('请输入不含用户名、密码或片段的 wss:// 地址。');
-  if (!explicit && !url.port) url.port = '47485';
   if (url.pathname === '/') url.pathname = '/ws';
   return url.href;
 }
