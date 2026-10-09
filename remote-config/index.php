@@ -125,8 +125,8 @@ function publishedDownloads(array $candidates): stdClass
 
 // ── 配置内容：维护者只需要修改这一段 ──
 $site = 'https://gtav.2t.hk';
-$latestVersion = '0.2.10';
-$releaseNotes = "修复 macOS CA 安装：BinGo Root CA 导入当前用户默认的“登录”钥匙串，使用用户信任设置，安装与检测使用同一钥匙串；朋友的 Mac 手动安装指引同步更新。本机客户端仅显示 HTTPS 服务地址和停止服务，移除复制邀请地址按钮；朋友客户端保留复制邀请与本机打开入口。修复卡片高度变化及重开本机客户端后的分页跳动。";
+$latestVersion = '0.2.11';
+$releaseNotes = "客户端 0.2.11 配套公共战局服务端 0.4.1：统一 NPC 行为、武器伤害与地图碰撞查询，支持投射物和爆炸；高频射击、攻击改为排队处理，减少重复拒绝提示。公共战局由服务器策略停用本地剧情，修复小地图底图空白。所有适配由启动器在独立缓存完成，原游戏资源保持只读。当前仍为实验版，macOS 包为开发签名、未公证。";
 $servers = [
     ['id' => 'main', 'name' => '公共战局', 'role' => '主线路', 'address' => 'gtaserver.2t.hk:47485',
         'health_url' => 'https://gtaserver.2t.hk:47485/47485/health'],
@@ -150,12 +150,12 @@ $announcements = [
 ];
 $downloadCandidates = [
     'macos_arm64' => [
-        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-macOS-arm64-v0.2.10.zip',
-        'sha256' => '358bcceb2c87c011a08dd9cb58981c3289c9e835d1187ffb75a0b58dec9d3d58',
+        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-macOS-arm64-v0.2.11-development.zip',
+        'sha256' => '404e589c028662dd044aad2acddc9c4f6220c5f69fcf4cb732bbb74a93929a20',
     ],
     'windows_x64' => [
-        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-Windows-x64-v0.2.10.exe',
-        'sha256' => '14ff39da576ce787c85e654e15a9cad84104f5a26486237b8e55dcdb1a4d2e9c',
+        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-Windows-x64-v0.2.11.exe',
+        'sha256' => 'd5f0d18c4b69c9c759a5aad75c0e332b4ab23aeb8d0aeba971ec28685850a957',
     ],
 ];
 // ── 配置内容结束 ──
