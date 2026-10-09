@@ -91,9 +91,14 @@ pub fn guide_url(base: &str, entry: &str) -> Result<String,String> {
 pub fn valid_online_query(query: &str) -> bool {
     let mut pairs=std::collections::HashMap::new();
     for (key,value) in url::form_urlencoded::parse(query.as_bytes()) {
-        if !matches!(key.as_ref(),"launcher"|"name"|"server"|"preset"|"seed") || pairs.insert(key.into_owned(),value.into_owned()).is_some() {return false;}
+        if !matches!(key.as_ref(),"launcher"|"mode"|"name"|"server"|"preset"|"seed") || pairs.insert(key.into_owned(),value.into_owned()).is_some() {return false;}
     }
-    if pairs.len()!=5 || pairs.get("launcher").map(String::as_str)!=Some("1") {return false;}
+    if pairs.get("launcher").map(String::as_str)!=Some("1")
+        || pairs.get("mode").is_some_and(|mode|mode!="online") {return false;}
+    // Entry identity is removed from the URL after saving the session. Keep
+    // only its display marker on refresh, without accepting partial identity.
+    if ["name","server","preset","seed"].iter().all(|key|!pairs.contains_key(*key)) {return true;}
+    if pairs.len()!=5+usize::from(pairs.contains_key("mode")) {return false;}
     let value=LaunchPreferences { name:pairs.get("name").cloned().unwrap_or_default(), server:pairs.get("server").cloned().unwrap_or_default(),preset:pairs.get("preset").cloned().unwrap_or_default(),..Default::default() };
     !value.server.is_empty() && value.validate().is_ok() && pairs.get("seed").and_then(|value|value.parse::<u32>().ok()).is_some()
 }
@@ -118,6 +123,9 @@ pub fn valid_online_query(query: &str) -> bool {
         assert!(valid_online_query(query));
         for extra in ["&debug=1","&name=duplicate","&mode=story","&seed=99"] {assert!(!valid_online_query(&format!("{query}{extra}")));}
         assert!(!valid_online_query("launcher=1&name=A&server=ws%3A%2F%2Fexample.com&seed=1&preset=npc_male"));
+        for normalized in ["launcher=1","launcher=1&mode=online"] {assert!(valid_online_query(normalized));}
+        for invalid in ["launcher=1&debug=1","launcher=1&launcher=1","launcher=1&mode=story",
+            "launcher=1&name=A","launcher=1&mode=online&seed=1"] {assert!(!valid_online_query(invalid),"{invalid}");}
         let invite=guide_url("http://192.168.1.2:8442/","/").unwrap();
         assert!(invite.ends_with("target=%2F"));assert!(!invite.contains("name")&&!invite.contains("seed")&&!invite.contains("server"));
     }

@@ -859,6 +859,10 @@ mod tests {
         assert!(headers.starts_with("HTTP/1.1 307")); assert!(headers.to_lowercase().contains("location: /play/"));
         let entry=crate::launch::LaunchPreferences {server:"wss://example.com:47485/47485/ws".into(),..Default::default()}.entry_path(1).unwrap();
         assert!(request(&server,"GET",&entry,"",b"").0.starts_with("HTTP/1.1 200"));
+        for normalized in ["/play/?launcher=1","/play/?launcher=1&mode=online"] {
+            assert!(request(&server,"GET",normalized,"",b"").0.starts_with("HTTP/1.1 200"));
+        }
+        assert!(request(&server,"GET","/play/?launcher=1&name=partial","",b"").0.starts_with("HTTP/1.1 307"));
         for extra in ["&debug=1","&name=duplicate","&mode=story"] { assert!(request(&server,"GET",&format!("{entry}{extra}"),"",b"").0.starts_with("HTTP/1.1 307")); }
         let (headers, _) = request(&server, "GET", "/multiplayer/?name=test&server=example%3A1234&debug=1", "", b"");
         assert!(headers.to_lowercase().contains("location: /?online=1&name=test&server=example%3a1234"));
