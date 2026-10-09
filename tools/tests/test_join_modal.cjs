@@ -8,8 +8,10 @@ const vm = require('node:vm');
 const { test } = require('node:test');
 
 const root = path.resolve(__dirname, '../..');
+const i18nUrl = 'data:text/javascript;base64,' + Buffer.from(fs.readFileSync(path.join(root, 'client/i18n.js'), 'utf8')).toString('base64');
+const i18nPromise = import(i18nUrl);
 const addressPromise = import('data:text/javascript;base64,' + Buffer.from(
-  fs.readFileSync(path.join(root, 'client/multiplayer/server-address.js'), 'utf8')).toString('base64'));
+  fs.readFileSync(path.join(root, 'client/multiplayer/server-address.js'), 'utf8').replace("'../i18n.js'", JSON.stringify(i18nUrl))).toString('base64'));
 const source = fs.readFileSync(path.join(root, 'client/multiplayer/join-modal.js'), 'utf8')
   .replace(/^import .*$/gm, '').replace(/^export /gm, '');
 const copy = (value) => JSON.parse(JSON.stringify(value));
@@ -28,7 +30,8 @@ function storage(initial = {}) {
 }
 
 async function harness(options = {}) {
-  const address = await addressPromise;
+  const [address, i18n] = await Promise.all([addressPromise, i18nPromise]);
+  i18n.setLanguage(options.language || 'zh-CN');
   const localStorage = options.localStorage || storage(), sessionStorage = options.sessionStorage || storage();
   const joined = [], timers = new Map();
   let timerId = 0;
@@ -37,7 +40,7 @@ async function harness(options = {}) {
     preventDefault() { this.defaultPrevented = true; }
   }
   class Element {
-    constructor() { this.listeners = new Map(); this.children = []; this.value = ''; this.textContent = ''; this.hidden = false; this.isConnected = true; }
+    constructor() { this.dataset = {}; this.attributes = {}; this.listeners = new Map(); this.children = []; this.value = ''; this.textContent = ''; this.hidden = false; this.isConnected = true; }
     addEventListener(type, callback) {
       if (!this.listeners.has(type)) this.listeners.set(type, []);
       this.listeners.get(type).push(callback);
@@ -47,6 +50,7 @@ async function harness(options = {}) {
       for (const callback of this.listeners.get(event.type) || []) callback(event);
       return !event.defaultPrevented;
     }
+    setAttribute(name, value) { this.attributes[name] = String(value); }
     focus() { document.activeElement = this; }
     select() { this.selected = true; }
     append(...children) { this.children.push(...children); }
@@ -60,11 +64,12 @@ async function harness(options = {}) {
   overlay.querySelector = (selector) => ({ form, '.online-join__message': message, '.online-join__close': close,
     '.online-join__submit': submit, '#online-join-server-options': serverList,
     '#online-join-server-hint': serverHint })[selector];
-  overlay.querySelectorAll = () => [close, fields.nickname, fields.server, fields.preset, submit];
+  const translatedElements = ['join.eyebrow', 'join.title', 'join.nickname', 'join.server', 'join.preset', 'join.npc_male', 'join.npc_female', 'join.freemode_male', 'join.freemode_female', 'join.hint'].map((key) => { const element = new Element(); element.dataset.i18n = key; return element; });
+  overlay.querySelectorAll = (selector) => selector === '[data-i18n]' ? translatedElements : [close, fields.nickname, fields.server, fields.preset, submit];
   const document = { activeElement: null, body: { append: (element) => assert.equal(element, overlay) },
     createElement: (tag) => tag === 'div' ? overlay : new Element(), exitPointerLock: () => {} };
   const href = options.href || 'http://localhost:8010/';
-  const context = vm.createContext({ ...address, document, Event, URL, URLSearchParams,
+  const context = vm.createContext({ ...address, ...i18n, document, Event, URL, URLSearchParams,
     location: { href, search: new URL(href).search }, localStorage, sessionStorage, AbortController,
     crypto: { getRandomValues: (array) => { array[0] = 123456; return array; } }, Uint32Array,
     setTimeout: (callback, delay) => { timers.set(++timerId, { callback, delay }); return timerId; },
@@ -81,7 +86,7 @@ async function harness(options = {}) {
   const modal = options.install === false ? null : api.installJoinModal({ onJoin: (value) => joined.push(copy(value)) });
   async function settle() { for (let index = 0; index < 8; index++) await Promise.resolve(); }
   await settle();
-  return { api, context, modal, overlay, fields, form, message, serverList, serverHint, submitButton: submit, localStorage, sessionStorage, joined, settle,
+  return { api, context, modal, overlay, fields, i18n, translatedElements, closeButton: close, form, message, serverList, serverHint, submitButton: submit, localStorage, sessionStorage, joined, settle,
     input: (name, value) => { fields[name].value = value; fields[name].dispatchEvent(new Event(name === 'preset' ? 'change' : 'input')); },
     blur: () => fields.server.dispatchEvent(new Event('blur')),
     submit: () => form.dispatchEvent(new Event('submit')) };
@@ -557,4 +562,34 @@ test('线路兼容对象和数组，拒绝缓存、无效地址和多余线路�
   assert.equal(realPage.serverList.children[0].textContent, '<img src=x onerror=alert(1)> · 主线路 · valid.example:49999');
   assert.equal(realPage.serverList.children[0].innerHTML, undefined, '远程内容没有作为 HTML 写入');
   assert.equal(clean(remoteSnapshot(Array.from({ length: 40 }, (_, index) => ({ address: `room${index}.example:49999` })))).length, 32);
+});
+
+
+test('语言切换即时更新表单、错误、线路与可访问名称，保留用户已编辑昵称', async () => {
+  const page = await harness({ remoteConfig: remoteSnapshot(remoteLines()) });
+  page.modal.open(); await page.settle();
+  page.input('nickname', 'Custom Player'); page.input('server', ''); page.submit();
+  assert.match(page.message.textContent, /请选择/);
+  page.i18n.setLanguage({ preference: 'en', resolved: 'en', revision: 2 });
+  assert.equal(page.fields.nickname.value, 'Custom Player');
+  assert.equal(page.fields.nickname.placeholder, 'Enter your nickname');
+  assert.equal(page.closeButton.attributes['aria-label'], 'Close session dialog');
+  assert.equal(page.submitButton.textContent, 'Join Session');
+  assert.equal(page.translatedElements.find(element => element.dataset.i18n === 'join.npc_female').textContent, 'Random female NPC');
+  assert.equal(page.message.textContent, 'Choose a server or enter its IP:port.');
+  assert.match(page.serverList.children[1].label, /Public Session · Main server/);
+  page.i18n.setLanguage('zh-CN');
+  assert.match(page.message.textContent, /请选择/);
+});
+
+
+test('远程线路显式语言配置热切换覆盖默认名字，昵称与连接端点保留', async () => {
+  const page = await harness({ remoteConfig: remoteSnapshot([{ id:'main', name:'自定义线路', role:'主线路', address:'wss://custom.example/public',
+    i18n:{ en:{ name:'Custom Session',role:'Primary' },'zh-CN':{ name:'共同城市', role:'公共线路' } } }]) });
+  page.modal.open(); await page.settle();
+  assert.match(page.serverList.children[0].label, /共同城市 · 公共线路/);
+  const address = page.fields.server.value; page.i18n.setLanguage('en');
+  assert.match(page.serverList.children[0].label, /Custom Session · Primary/);
+  assert.equal(page.fields.server.value, address);
+  page.i18n.setLanguage('zh-CN');
 });

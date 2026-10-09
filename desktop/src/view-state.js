@@ -1,6 +1,7 @@
+import { createTranslator, translateMessage } from './i18n.js';
 export const phases = Object.freeze({ checking: ['识别与校验', 20], engine: ['准备运行引擎', 55], fonts: ['准备游戏字体', 82], ready: ['准备完成', 100] });
 export function escapeHtml(value) { return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char])); }
-export function displayDirectory(value) { return value || '尚未选择游戏资源目录'; }
+export function displayDirectory(value, language = 'zh-CN') { return value || createTranslator(language)('resources.noDirectory'); }
 export function canLaunch({ selected, busy, desktop }) { return Boolean(selected && !busy && desktop); }
 export function progressValue(phase) { return phases[phase]?.[1] || 0; }
 
@@ -81,25 +82,30 @@ export function isNewerVersion(latest, current) {
   }
   return false;
 }
-export function remotePresentation(snapshot, version, platform = '') {
+export function remotePresentation(snapshot, version, platform = '', language = 'zh-CN') {
+  const t = createTranslator(language);
   const loaded = snapshot?.source === 'remote' && snapshot?.stale !== true;
   const config = loaded ? snapshot.config || {} : {};
+  const localized = config.i18n?.[language] || {};
+  const announcements = Array.isArray(localized.announcements) ? localized.announcements : config.announcements;
+  const title = typeof localized.oltitle === 'string' ? localized.oltitle : config.oltitle;
+  const releaseNotes = typeof localized.release_notes === 'string' ? localized.release_notes : config.release_notes;
   const latest = typeof config.latest_version === 'string' ? config.latest_version : '';
   const update = isNewerVersion(latest, version);
   const available = Boolean(platform && config.downloads?.[platform]?.url && config.downloads?.[platform]?.sha256);
   return {
     loaded,
-    title: typeof config.oltitle === 'string' && config.oltitle ? config.oltitle : '-',
+    title: typeof title === 'string' && title ? title : '-',
     websiteAvailable: Boolean(config.website || /^https:\/\//i.test(config.oltitle || '')),
-    announcements: Array.isArray(config.announcements) ? config.announcements.filter((item) => item && typeof item === 'object').map((item) => ({
-      title: String(item.title || '战局公告'), body: String(item.body || ''), date: String(item.date || ''),
+    announcements: Array.isArray(announcements) ? announcements.filter((item) => item && typeof item === 'object').map((item) => ({
+      title: String(item.i18n?.[language]?.title || item.title || t('remote.announcements')), body: String(item.i18n?.[language]?.body || item.body || ''), date: String(item.date || ''),
     })) : [],
     servers: (Array.isArray(config.servers) ? config.servers : Array.isArray(config.server) ? config.server : config.server ? [config.server] : [])
-      .filter((item) => item && typeof item.address === 'string').map((item) => ({ address: item.address, name: String(item.name || '公共战局'), role: String(item.role || '') })),
-    releaseNotes: typeof config.release_notes === 'string' ? config.release_notes : '',
+      .filter((item) => item && typeof item.address === 'string').map((item) => ({ address: item.address, name: translateMessage(item.i18n?.[language]?.name || item.name || t('remote.defaultServer'), language), role: translateMessage(item.i18n?.[language]?.role || item.role || '', language) })),
+    releaseNotes: typeof releaseNotes === 'string' ? releaseNotes : '',
     latest, update, downloadAvailable: update && available,
-    versionText: !latest ? '-' : update ? `新版本 ${latest}` : `已安装 ${version}`,
-    sourceText: loaded ? '已更新' : '-',
+    versionText: !latest ? '-' : update ? t('update.newVersion', { version: latest }) : t('update.installed', { version }),
+    sourceText: loaded ? t('remote.updated') : '-',
   };
 }
 export function launcherActions({ selected, busy, desktop, urls, lan, updateRequired = false }, remoteBusy = false) {
@@ -125,15 +131,16 @@ export function lanActions({ desktop, busy, updateRequired, lan, urls = [] }) {
     save: Boolean(desktop && !busy && !updateRequired && !urls.length && !lan?.running_url),
   };
 }
-export function lanRequest(settings) {
+export function lanRequest(settings, language = 'zh-CN') {
+  const t = createTranslator(language);
   const port = Number(settings.port), httpPort = Number(settings.httpPort);
   const address = String(settings.address || '').trim();
-  if (![port, httpPort].every((value) => Number.isInteger(value) && value >= 1 && value <= 65535)) throw new Error('游戏和引导页端口应为 1 至 65535 的整数。');
-  if (port === httpPort) throw new Error('游戏 HTTPS 端口和安装引导 HTTP 端口不能相同。');
+  if (![port, httpPort].every((value) => Number.isInteger(value) && value >= 1 && value <= 65535)) throw new Error(t('lan.invalidPorts'));
+  if (port === httpPort) throw new Error(t('lan.samePorts'));
   if (!address) return { port, httpPort, address: null };
   const parts = address.split('.');
-  if (parts.length !== 4 || !parts.every((part) => /^(?:0|[1-9]\d{0,2})$/.test(part) && Number(part) <= 255)) throw new Error('请选择本机局域网 IPv4 地址。');
+  if (parts.length !== 4 || !parts.every((part) => /^(?:0|[1-9]\d{0,2})$/.test(part) && Number(part) <= 255)) throw new Error(t('lan.invalidAddress'));
   const [a, b] = parts.map(Number);
-  if (!(a === 10 || a === 172 && b >= 16 && b <= 31 || a === 192 && b === 168 || a === 169 && b === 254 || a === 100 && b >= 64 && b <= 127)) throw new Error('请选择本机局域网 IPv4 地址。');
+  if (!(a === 10 || a === 172 && b >= 16 && b <= 31 || a === 192 && b === 168 || a === 169 && b === 254 || a === 100 && b >= 64 && b <= 127)) throw new Error(t('lan.invalidAddress'));
   return { port, httpPort, address };
 }

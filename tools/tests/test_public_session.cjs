@@ -8,10 +8,12 @@ const vm = require('node:vm');
 const { test } = require('node:test');
 
 const root = path.resolve(__dirname, '../..');
+const i18nUrl = 'data:text/javascript;base64,' + Buffer.from(fs.readFileSync(path.join(root, 'client/i18n.js'), 'utf8')).toString('base64');
 const appearanceUrl = 'data:text/javascript;base64,' + Buffer.from(fs.readFileSync(path.join(root, 'client/multiplayer/appearance.js'), 'utf8')).toString('base64');
 const loadModule = (relative) => import('data:text/javascript;base64,' + Buffer.from(
-  fs.readFileSync(path.join(root, relative), 'utf8')).toString('base64'));
+  fs.readFileSync(path.join(root, relative), 'utf8').replace("'../i18n.js'", JSON.stringify(i18nUrl))).toString('base64'));
 const dependencies = Promise.all([
+  import(i18nUrl),
   loadModule('client/multiplayer/server-address.js'),
   loadModule('client/multiplayer/appearance.js'),
   import('data:text/javascript;base64,' + Buffer.from(fs.readFileSync(path.join(root, 'client/multiplayer/world-state.js'), 'utf8')
@@ -30,7 +32,8 @@ const actionState = (changes = {}) => ({ aiming: false, reloading: false, jumpin
 const shotEvent = (weapon = playerState().weapon) => ({ origin: [711, -1088, 24], target: [720, -1088, 24], weapon });
 
 async function harness(options = {}) {
-  const [addressModule, appearanceModule, worldModule] = await dependencies;
+  const [i18nModule, addressModule, appearanceModule, worldModule] = await dependencies;
+  i18nModule.setLanguage(options.language || 'zh-CN');
   const storage = options.storage || new Map(), timers = new Map(), events = new Map(), sockets = [], statuses = [], logs = [];
   let now = 0, timerId = 0;
   const setTimeout = (callback, delay = 0) => { const id = ++timerId; timers.set(id, { callback, at: now + delay }); return id; };
@@ -59,7 +62,7 @@ async function harness(options = {}) {
     receive(value) { this.onmessage?.({ data: JSON.stringify(value) }); }
     messages(type) { return this.sent.filter((value) => value.type === type); }
   }
-  const context = vm.createContext({ ...addressModule, ...appearanceModule, ...worldModule, WebSocket: Socket,
+  const context = vm.createContext({ ...i18nModule, ...addressModule, ...appearanceModule, ...worldModule, WebSocket: Socket,
     BroadcastChannel: class { constructor() { throw new Error('公共连接禁止跨标签页广播'); } },
     location: { href: 'http://localhost:8010/play/' }, performance: { now: () => now }, document,
     navigator: options.navigator || {},
@@ -92,7 +95,7 @@ async function harness(options = {}) {
     socket.receive({ type: 'room_state', room: room(id) });
     return socket;
   }
-  return { api, context, enter, advance, sockets, statuses, storage, timers, logs, document, identityKey,
+  return { api, context, i18nModule, enter, advance, sockets, statuses, storage, timers, logs, document, identityKey,
     event: (type) => { for (const callback of [...listeners(type)]) callback(); },
     jump: (milliseconds) => { now += milliseconds; }, active: () => sockets.filter((socket) => socket.readyState !== 3) };
 }
@@ -112,7 +115,7 @@ test('远程连接由游戏页持有，首次接入就交付完整快照与独�
 });
 
 test('从远程线路取得的 WSS 代理路径在建连和自动重连时保持完整', async () => {
-  const [addresses] = await dependencies;
+  const [, addresses] = await dependencies;
   const server = addresses.normalizeRemoteServerAddress({ address: 'gtaserver.2t.hk:47485',
     health_url: 'https://gtaserver.2t.hk:47485/47485/health' });
   const page = await harness({ preferences: { ...preferences(), server } });
@@ -665,11 +668,11 @@ test('重复、非法和未协商的射击反馈被忽略，旧版普通武器�
 
 test('战斗反馈的原生通知明确说明武器不支持，命中限频，普通未命中不刷屏', () => {
   const source = fs.readFileSync(path.join(root, 'client/multiplayer/game-adapter.js'), 'utf8')
-    .replace('export function installGameAdapter', 'function installGameAdapter');
+    .replace(/^import .*$/gm, '').replace('export function installGameAdapter', 'function installGameAdapter');
   let now = 0, receiver = null;
   const hud = { textContent: '', style: {} }, memory = { buffer: new SharedArrayBuffer(8192) }, block = 256, capacity = 4096;
   const callbacks = new Map(); let nextTimer = 0;
-  const context = vm.createContext({ TextEncoder, Atomics, Int32Array, Uint8Array,
+  const context = vm.createContext({ getLanguage: () => 'zh-CN', onLanguageChange: () => () => {}, translateText: value => value, TextEncoder, Atomics, Int32Array, Uint8Array,
     BroadcastChannel: class { close() {} }, addEventListener() {}, document: { getElementById: () => hud },
     performance: { now: () => now }, fetch: () => Promise.resolve({ ok: true }),
     setTimeout: (callback) => { callbacks.set(++nextTimer, callback); return nextTimer; },
@@ -1391,4 +1394,20 @@ test('过期碰撞回复保持静默，异常碰撞仅提示一次且不注销�
   socket.receive({type:'error',code:'invalid_collision',message:'bad point'});
   assert.equal(page.statuses.length,before+1);assert.equal(socket.readyState,1);
   assert.equal(socket.messages('hello').length,1);assert.equal(page.sockets.length,1);page.api.close();
+});
+
+
+test('公共战局语言热切换只更新界面和本地桥数据，不重连、不更改线上协议', async () => {
+  const page = await harness(); const socket = page.enter(); await page.api.ready;
+  const packets = []; page.api.setReceiver(value => packets.push(copy(value)));
+  const before = socket.sent.length;
+  page.i18nModule.setLanguage({ preference: 'en', resolved: 'en', revision: 1 });
+  assert.equal(page.sockets.length, 1); assert.equal(socket.sent.length, before);
+  assert.equal(packets.findLast(value => value.type === 'session').language, 'en');
+  assert.equal(page.statuses.at(-1).text, 'Joined Public Session');
+  socket.close();
+  assert.equal(page.statuses.at(-1).text, 'The session connection was interrupted. Reconnecting…');
+  page.i18nModule.setLanguage('zh-CN');
+  assert.equal(page.statuses.at(-1).text, '战局连接已中断。 正在重新连接…');
+  page.api.close();
 });

@@ -15,10 +15,11 @@ function page(id) {
   const context = vm.createContext({ BroadcastChannel: class { close() {} },
     TextEncoder, TextDecoder, SharedArrayBuffer, Int32Array, Uint8Array, Atomics,
     performance: { now: () => 1000 }, document: { getElementById: () => hud }, addEventListener() {},
+    getLanguage: () => 'zh-CN', translateText: value => value, onLanguageChange: () => () => {},
     fetch: () => Promise.resolve({ ok: true }),
     setTimeout: (callback) => { const key = ++timerId; timers.set(key, callback); return key; },
     clearTimeout: (key) => timers.delete(key) });
-  vm.runInContext(source.replace('export function installGameAdapter', 'function installGameAdapter')
+  vm.runInContext(source.replace(/^import .* from '\.\.\/i18n\.js';\n/m, '').replace('export function installGameAdapter', 'function installGameAdapter')
     + '\nglobalThis.install = installGameAdapter;', context);
   const api = context.install({}, { setReceiver: (callback) => { receive = callback; }, onWorkerMessage() {} });
   api.onWorkerMessage({ multiplayer: { type: 'memory', memory, block, capacity } });

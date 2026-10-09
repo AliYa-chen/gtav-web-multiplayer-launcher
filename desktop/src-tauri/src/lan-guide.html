@@ -1,30 +1,28 @@
 <!doctype html>
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GTA5DATA · 局域网证书安装</title>
+<title data-lan-i18n="guide.title">GTA5DATA · 局域网证书安装</title>
 <style>
 :root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#e2e8f0;background:#0f172a;color-scheme:dark}*{box-sizing:border-box}body{margin:0;padding:clamp(18px,5vw,64px);background:radial-gradient(ellipse at top,#243a53,#0f172a 70%);min-height:100vh}main{max-width:900px;margin:auto}h1{font-size:clamp(25px,4vw,40px);margin:14px 0}h2{font-size:19px}p,li{line-height:1.7;color:#cbd5e1}.brand{letter-spacing:.12em;color:#7dd3fc;font-size:13px}section{border:1px solid #ffffff20;border-radius:18px;background:#1e293bcc;padding:24px;margin:20px 0}code{overflow-wrap:anywhere;color:#bae6fd;font-size:13px}.actions{display:flex;flex-wrap:wrap;gap:12px;margin:20px 0}.button,button{display:inline-flex;text-decoration:none;align-items:center;justify-content:center;border:1px solid #ffffff35;border-radius:10px;padding:13px 18px;font:inherit;background:#334155;color:white;cursor:pointer}.primary{background:#0284c7;border-color:#38bdf8}#status{border-left:3px solid #38bdf8;padding-left:14px}.instructions{display:grid;grid-template-columns:1fr 1fr;gap:16px}.instructions section{margin:0}ol{padding-left:22px}a{color:#7dd3fc}.small{font-size:13px}@media(max-width:660px){.instructions{grid-template-columns:1fr}section{padding:18px}}
 </style></head>
 <body><main>
-<div class="brand">GTA5DATA · 局域网共享</div>
-<h1>信任资源主机，即可进入游戏</h1>
-<p>你正在通过 HTTP 打开安装引导。游戏需要可信 HTTPS，首次使用局域网共享时，请下载启动器提供的 CA 公共证书，并在系统中安装和信任。下载不会自动安装证书。</p>
+<div class="brand" data-lan-i18n="guide.brand">GTA5DATA · 局域网共享</div>
+<h1 data-lan-i18n="guide.headline">信任资源主机，即可进入游戏</h1>
+<p data-lan-i18n="guide.intro">你正在通过 HTTP 打开安装引导。游戏需要可信 HTTPS，首次使用局域网共享时，请下载启动器提供的 CA 公共证书，并在系统中安装和信任。下载不会自动安装证书。</p>
 <section>
-<h2>确认资源主机</h2>
-<p>向开启共享的朋友核对以下 SHA-256 指纹，确认一致后再信任。HTTP 页面本身不能证明主机身份。</p>
+<h2 data-lan-i18n="guide.confirm">确认资源主机</h2>
+<p data-lan-i18n="guide.fingerprint">向开启共享的朋友核对以下 SHA-256 指纹，确认一致后再信任。HTTP 页面本身不能证明主机身份。</p>
 <code id="fingerprint"></code>
-<p class="small">启动器使用同一张固定 CA，为资源主机当前 IP 签发 HTTPS 证书。浏览器仅下载 CA 公共证书；HTTP 页面不会提供私钥。信任这张 CA 后，可访问使用同一 CA 的资源主机和不同游戏端口，无需重复安装。</p>
-<div class="actions"><a class="button primary" href="/ca.cer" download="GTA5DATA-LAN-CA.cer">下载启动器 CA 证书</a><button id="retry" type="button">重新检测</button><a class="button" id="enter">手动进入 HTTPS 游戏</a></div>
+<p class="small" data-lan-i18n="guide.certificate">启动器使用同一张固定 CA，为资源主机当前 IP 签发 HTTPS 证书。浏览器仅下载 CA 公共证书；HTTP 页面不会提供私钥。信任这张 CA 后，可访问使用同一 CA 的资源主机和不同游戏端口，无需重复安装。</p>
+<div class="actions"><a class="button primary" href="/ca.cer" download="GTA5DATA-LAN-CA.cer" data-lan-i18n="guide.download">下载启动器 CA 证书</a><button id="retry" type="button" data-lan-i18n="guide.retry">重新检测</button><a class="button" id="enter" data-lan-i18n="guide.enter">手动进入 HTTPS 游戏</a></div>
 <p id="status" role="status" aria-live="polite">正在检测 HTTPS 证书信任…</p>
-<p class="small">安装并信任后，本页会自动检测并进入游戏；刷新也会检测。如果浏览器仍不接受证书，请完全退出并重新打开浏览器。请保留 CA 身份，不要仅点击忽略网站证书错误。</p>
+<p class="small" data-lan-i18n="guide.afterTrust">安装并信任后，本页会自动检测并进入游戏；刷新也会检测。如果浏览器仍不接受证书，请完全退出并重新打开浏览器。请保留 CA 身份，不要仅点击忽略网站证书错误。</p>
 </section>
 <div class="instructions">
-<section><h2>Windows</h2><ol><li>打开下载的 <b>GTA5DATA-LAN-CA.cer</b>，点击“安装证书”。</li><li>选择“当前用户”。选择“将所有的证书都放入下列存储”，浏览并选择 <b>受信任的根证书颁发机构</b>。</li><li>完成安装，核对指纹并确认安全提示；返回本页，点击“重新检测”或刷新。</li></ol><p class="small">Edge、Chrome 通常使用系统信任。Firefox 若未采用系统根证书，可在设置 → 隐私与安全 → 证书 → 查看证书 → 证书颁发机构中导入，并允许标识网站。</p></section>
-<section><h2>macOS</h2><ol><li>打开下载的 CA 证书，导入“钥匙串访问”中的 <b>登录</b> 钥匙串。</li><li>找到 <b>BinGo Root CA</b>，双击 → 展开“信任”，将“使用此证书时”设为 <b>始终信任</b>。</li><li>关闭证书详情，按系统提示确认；返回本页重新检测，必要时退出并重新打开浏览器。</li></ol><p class="small">结束使用后，可在“登录”钥匙串中删除不再需要的 CA。</p></section>
+<section><h2>Windows</h2><ol><li data-lan-i18n="windows.open">打开下载的 <b>GTA5DATA-LAN-CA.cer</b>，点击“安装证书”。</li><li data-lan-i18n="windows.store">选择“当前用户”。选择“将所有的证书都放入下列存储”，浏览并选择 <b>受信任的根证书颁发机构</b>。</li><li data-lan-i18n="windows.finish">完成安装，核对指纹并确认安全提示；返回本页，点击“重新检测”或刷新。</li></ol><p class="small" data-lan-i18n="windows.firefox">Edge、Chrome 通常使用系统信任。Firefox 若未采用系统根证书，可在设置 → 隐私与安全 → 证书 → 查看证书 → 证书颁发机构中导入，并允许标识网站。</p></section>
+<section><h2>macOS</h2><ol><li data-lan-i18n="mac.open">打开下载的 CA 证书，导入“钥匙串访问”中的 <b>登录</b> 钥匙串。</li><li data-lan-i18n="mac.trust">找到 <b>BinGo Root CA</b>，双击 → 展开“信任”，将“使用此证书时”设为 <b>始终信任</b>。</li><li data-lan-i18n="mac.finish">关闭证书详情，按系统提示确认；返回本页重新检测，必要时退出并重新打开浏览器。</li></ol><p class="small" data-lan-i18n="mac.remove">结束使用后，可在“登录”钥匙串中删除不再需要的 CA。</p></section>
 </div>
-<p class="small">进入游戏后，各设备使用自己的 GPU 运行游戏，并按需从资源主机读取资源。请使用支持本项目 WebGPU 的桌面浏览器。</p>
+<p class="small" data-lan-i18n="guide.gpu">进入游戏后，各设备使用自己的 GPU 运行游戏，并按需从资源主机读取资源。请使用支持本项目 WebGPU 的桌面浏览器。</p>
 </main>
 <script>/*__LAN_SETTINGS__*/</script><script src="/lan-probe.js"></script>
-<script>
-(function(){'use strict';const settings=window.LAN_SETTINGS;document.getElementById('fingerprint').textContent=settings.fingerprint;document.getElementById('enter').href=settings.httpsUrl;const probe=window.GTA5LanProbe.createProbe({...settings,redirect:url=>window.location.replace(url),status:text=>{document.getElementById('status').textContent=text}});document.getElementById('retry').addEventListener('click',()=>probe.check());async function check(){if(!await probe.check())window.setTimeout(check,4000)}check()})();
-</script></body></html>
+<script type="module" src="/lan-guide-i18n.js"></script></body></html>

@@ -349,6 +349,7 @@ function engine(options = {}) {
 function adapter(network = null, options = {}) {
   const channels = [], timers = new Map(), requests = [];
   const hud = { textContent: '', style: {} };
+  let language = options.language || 'zh-CN', languageListener = null;
   let nextTimer = 1;
   class Channel {
     constructor(name) { this.name = name; this.posts = []; channels.push(this); }
@@ -357,10 +358,12 @@ function adapter(network = null, options = {}) {
   }
   const context = vm.createContext({ BroadcastChannel: Channel, TextEncoder, TextDecoder, Atomics, Int32Array,
     Uint8Array, DataView, SharedArrayBuffer, performance: { now: () => 100 }, document: { getElementById: () => hud }, addEventListener() {},
+    getLanguage: () => language, translateText: value => value,
+    onLanguageChange: callback => { languageListener = callback; return () => { languageListener = null; }; },
     fetch(url, options) { requests.push({ url, ...options }); return Promise.resolve({ ok: true }); },
     setTimeout(callback) { const id = nextTimer++; timers.set(id, callback); return id; },
     clearTimeout(id) { timers.delete(id); } });
-  vm.runInContext(adapterSource.replace('export function installGameAdapter', 'function installGameAdapter') +
+  vm.runInContext(adapterSource.replace(/^import .* from '\.\.\/i18n\.js';\n/m, '').replace('export function installGameAdapter', 'function installGameAdapter') +
     '\nglobalThis.installAdapter = installGameAdapter;', context, { filename: 'game-adapter.js' });
   const api = context.installAdapter({}, network, options);
   const memory = { buffer: new SharedArrayBuffer(8192) }, block = 256, capacity = 4096;
@@ -372,7 +375,8 @@ function adapter(network = null, options = {}) {
     assert.equal(Atomics.load(header, 0) & 1, 0, '快照发布后序号必须为偶数');
     return JSON.parse(new TextDecoder().decode(new Uint8Array(memory.buffer, block + 16, Atomics.load(header, 1))));
   };
-  return { api, receive, flush, read, channels, requests, hud };
+  return { api, receive, flush, read, channels, requests, hud,
+    setLanguage: value => { language = value; languageListener?.({ language: value }); } };
 }
 
 function directNetwork() {
@@ -419,6 +423,31 @@ test('角色画面更新不能盖掉真实断线提示，网络恢复后显示�
   page.receive({ type: 'network_status', connected: true, members: 2 });
   assert.ok(page.hud.textContent.includes('服务器在线 · 2 位玩家'));
   assert.ok(!page.hud.textContent.includes('自动重连'));
+});
+
+test('页面语言即时传入共享快照并翻译现有HUD与未确认通知，不重建会话', () => {
+  const network = directNetwork(), page = adapter(network);
+  page.receive({ type: 'session', connected: true, client_id: 'A', members: [{ id: 'A' }], peers: [] });
+  page.receive({ type: 'network_status', connected: true, members: 2 });
+  page.api.onWorkerMessage({ multiplayer: { type: 'game_status', peer_count: 1, health: 150, alive: true, kills: 2, deaths: 1 } });
+  page.flush();
+  const initial = page.read(), noticeIds = initial.notices.map(notice => notice.id), sent = network.messages.length;
+  assert.equal(initial.language, 'zh-CN');
+  assert.match(page.hud.textContent, /生命值 150/);
+  page.setLanguage('en'); page.flush();
+  const english = page.read();
+  assert.equal(english.language, 'en');
+  assert.equal(english.client_id, 'A');
+  assert.equal(network.messages.length, sent, '切换语言不会发起重连或动作');
+  assert.deepEqual(english.notices.map(notice => notice.id), noticeIds);
+  assert.match(english.notices[0].text, /Connected to public session/);
+  assert.match(page.hud.textContent, /Server online · 2 players/);
+  assert.match(page.hud.textContent, /Health 150 · Kills 2 \/ Deaths 1/);
+  page.receive({ type: 'combat_feedback', accepted: true, hit: true, victim_id: 'B', revision: 4, damage: 25, health: 50 });
+  page.flush(); assert.match(page.read().notices.at(-1).text, /Player hit · Damage 25/);
+  page.setLanguage('zh-CN'); page.flush();
+  assert.match(page.hud.textContent, /命中玩家 · 伤害 25/);
+  assert.match(page.read().notices.at(-1).text, /命中玩家 · 傷害 25/);
 });
 
 test('原生子弹脉冲在重帧之间锁存，弹夹减少可补漏单发，附带同武器状态', () => {
@@ -1622,6 +1651,9 @@ test('暂停无脚本owner回调时由独立前端尾部刷新公共战局菜单
   assert.equal(bridge.calls.slice(start).some(c => /^mp(?:GetPlayerPed|SetCoords|CreatePed|SetHealth|GetActiveThread|GetCurrentHandler)/.test(c.name)), false);
   bridge.publish(packet({ connected: false, members: [] })); bridge.frontendTick(bridge.now() + 300);
   assert.ok(bridge.uiCalls.at(-1).parameters.includes('正在重新連線'));
+  bridge.publish(packet({ connected: false, members: [], language: 'en' })); bridge.frontendTick(bridge.now() + 16);
+  assert.equal(bridge.uiCalls.at(-2).parameters[0], 'GTA V · Public Online Session');
+  assert.ok(bridge.uiCalls.at(-1).parameters.includes('Reconnecting'));
 });
 
 test('服务器挂接待本机车辆就绪并实际入座后才解除冻结，不用过期坐标拉动乘客', () => {

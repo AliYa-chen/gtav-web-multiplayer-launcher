@@ -6,6 +6,14 @@ self.onmessage = (ev) => {
 	if (started) return;
 	started = true;
 	const m = ev.data;
+	const selectedLanguage = typeof m.language === 'object' ? m.language?.resolved : m.language;
+	const language = selectedLanguage === 'en' || selectedLanguage === 'zh-CN' ? selectedLanguage
+		: /^zh(?:[-_]|$)/i.test(navigator.language || '') ? 'zh-CN' : 'en';
+	// The main engine worker blocks once running. Progress carries both translations
+	// so the page can switch immediately without asking this worker to restart.
+	const progress = (channel, values, zh, en, error = false) => channel.postMessage({ ...values,
+		[error ? 'error' : 'label']: language === 'en' ? en : zh,
+		[error ? 'errorTranslations' : 'labelTranslations']: { 'zh-CN': zh, en } });
 	if (m.multiplayer) importScripts('/multiplayer/world-environment.js', '/multiplayer/native-session-ui.js', '/multiplayer/world-collision.js', '/multiplayer/world-engine-bridge.js', '/multiplayer/engine-bridge.js');
 	// ?cores=N (debug): pretend to be a machine with N logical cores; the engine sizes its worker pools from it
 	if (m.cores) Object.defineProperty(navigator, 'hardwareConcurrency', { value: m.cores });
@@ -36,21 +44,29 @@ self.onmessage = (ev) => {
 			try { res = await fetch(engineUrl); } catch (e) { err = e; }
 			if (res && res.ok) return res;
 			if (attempt >= 7) { if (res) throw new Error('HTTP ' + res.status + ' for game.wasm'); throw err; }
-			bc0.postMessage({ label: 'The server is busy, retrying (' + (attempt + 1) + ')' });
+			progress(bc0, {}, '服务器繁忙，正在重试（' + (attempt + 1) + '）', 'The server is busy, retrying (' + (attempt + 1) + ')');
 			await new Promise((r) => setTimeout(r, Math.min(5000, 300 * 2 ** attempt) * (0.5 + Math.random())));
 		}
 	};
 	const bc0 = new BroadcastChannel('game-progress');
 	const start = () => {
 		const bc = new BroadcastChannel('game-progress');
-		const engineArgs = [...m.args];
-		// This content set has Traditional Chinese (chinese), but no Simplified
-		// Chinese text archive or font library (chinesesimp). zh-CN would otherwise
-		// select a nonexistent pack and leave menu labels and glyphs missing.
-		if (/^zh(?:[-_]|$)/i.test(navigator.language || '') && !engineArgs.some((arg) => /^-uilanguage(?:=|$)/i.test(arg))) {
-			engineArgs.push('-uilanguage=chinese');
-			console.log('loader: using the available Chinese language pack (chinese)');
+		const engineArgs = [];
+		const sourceArgs = Array.isArray(m.args) ? m.args : [];
+		for (let index = 0; index < sourceArgs.length; index++) {
+			const argument = sourceArgs[index];
+			// Launcher language owns this option; preserve every unrelated raw argument.
+			if (/^-uilanguage(?:=|$)/i.test(argument)) {
+				if (/^-uilanguage$/i.test(argument) && sourceArgs[index + 1] && !String(sourceArgs[index + 1]).startsWith('-')) index++;
+				continue;
+			}
+			engineArgs.push(argument);
 		}
+		// The original resources contain american and Traditional Chinese (chinese)
+		// archives, but no chinesesimp archive. Select only verified bundled packs.
+		engineArgs.push('-uilanguage=' + (language === 'en' ? 'american' : 'chinese'));
+		console.log('loader: using language pack ' + (language === 'en' ? 'american' : 'chinese'));
+
 		self.Module = {
 			// Download game.wasm ourselves to report progress (0-20 %); emscripten hands the compiled module on to the pthread workers.
 			instantiateWasm: (imports, done) => {
@@ -67,12 +83,12 @@ self.onmessage = (ev) => {
 						if (end) break;
 						chunks.push(value);
 						got += value.length;
-						bc.postMessage({ pct: total ? 20 * got / total : 0, label: 'Downloading the engine (' + (got / 1048576 | 0) + ' MB)' });
+						progress(bc, { pct: total ? 20 * got / total : 0 }, '正在下载引擎（' + (got / 1048576 | 0) + ' MB）', 'Downloading the engine (' + (got / 1048576 | 0) + ' MB)');
 					}
 					const bytes = new Uint8Array(got);
 					let o = 0;
 					for (const c of chunks) { bytes.set(c, o); o += c.length; }
-					bc.postMessage({ pct: 20, label: 'Compiling the engine' });
+					progress(bc, { pct: 20 }, '正在编译引擎', 'Compiling the engine');
 					return WebAssembly.instantiate(bytes, imports);
 				};
 				const streaming = async () => {
@@ -85,9 +101,9 @@ self.onmessage = (ev) => {
 							const { done: end, value } = await counter.read();
 							if (end) break;
 							got += value.length;
-							bc.postMessage({ pct: total ? 20 * got / total : 0, label: 'Downloading and compiling the engine (' + (got / 1048576 | 0) + ' MB)' });
+							progress(bc, { pct: total ? 20 * got / total : 0 }, '正在下载并编译引擎（' + (got / 1048576 | 0) + ' MB）', 'Downloading and compiling the engine (' + (got / 1048576 | 0) + ' MB)');
 						}
-						bc.postMessage({ pct: 20, label: 'Compiling the engine' });
+						progress(bc, { pct: 20 }, '正在编译引擎', 'Compiling the engine');
 					})().catch(() => {});
 					return WebAssembly.instantiateStreaming(res, imports);
 				};
@@ -95,10 +111,10 @@ self.onmessage = (ev) => {
 					let r;
 					try { r = await streaming(); }
 					catch (e) { console.warn('streaming instantiation failed (' + e + '): downloading first'); r = await buffered(); }
-					bc.postMessage({ pct: 22, label: 'Starting the engine' });
+					progress(bc, { pct: 22 }, '正在启动引擎', 'Starting the engine');
 					if (bindMultiplayer) bindMultiplayer(r.instance);
 					done(r.instance, r.module);
-				})().catch((e) => { bc.postMessage({ error: 'engine download failed: ' + e }); });
+				})().catch((e) => { progress(bc, {}, '引擎下载失败：' + e, 'Engine download failed: ' + e, true); });
 				return {};
 			},
 			canvas: m.canvas,
@@ -138,7 +154,7 @@ self.onmessage = (ev) => {
 					self.__log('[loader] Scaleform imports: ' + names.length + ' font libraries in MEMFS, ' + bytes + ' bytes (cwd ' + FS.cwd() + ')');
 					removeRunDependency('scaleform-imports');
 				})().catch((e) => {
-					bc.postMessage({ error: 'Scaleform font preload failed: ' + e });
+					progress(bc, {}, '游戏界面字体预加载失败：' + e, 'Scaleform font preload failed: ' + e, true);
 					abort('Scaleform font preload failed: ' + e);
 				});
 			}, () => {

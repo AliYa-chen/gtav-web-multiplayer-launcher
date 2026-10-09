@@ -1,4 +1,6 @@
 // 游戏页直接持有公共战局连接；引擎线程通过共享内存读取最新快照，避免阻塞帧循环。
+import { getLanguage, onLanguageChange, translateText } from '../i18n.js';
+
 export function installGameAdapter(worker, network = null, { watchOnlineConfiguration } = {}) {
   // 正常在线游戏直接连接本页网络会话，避免同一端口多个标签页串用身份和外观。
   // 广播频道仅保留给独立探针或旧测试入口。
@@ -30,6 +32,12 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
   let lastCombatNotice = '', lastCombatNoticeAt = -Infinity;
   let remoteConfig = { oltitle: '-', source: 'unavailable', stale: true };
   const stopRemoteConfiguration = watchOnlineConfiguration?.((value) => { remoteConfig = value; schedule(); });
+  const text = (zh, en, nativeZh = zh) => ({ zh, en, nativeZh });
+  function localize(value, native = false) {
+    if (value && typeof value === 'object') return getLanguage() === 'en' ? value.en : native ? value.nativeZh : value.zh;
+    return translateText(value || '');
+  }
+  const stopLanguage = onLanguageChange(() => { renderHud(); schedule(); });
   function mergeCombat(value) {
     if (!value || typeof value.id !== 'string') return;
     const revision = Number.isSafeInteger(value.revision) ? value.revision : 0;
@@ -65,25 +73,26 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
       while (confirmedHits.size > 256) confirmedHits.delete(confirmedHits.values().next().value);
     }
     const rejected = {
-      unsupported_weapon: ['当前武器暂不支持多人伤害同步，请使用普通枪械。', '目前武器暫不支援多人傷害同步，請使用一般槍械。'],
-      weapon_mismatch: ['武器切换尚未同步，请稍后重新射击。', '武器切換尚未同步，請稍後重新射擊。'],
-      player_dead: ['已阵亡，等待服务器重生。', '已陣亡，等待伺服器重生。'],
-      not_ready: ['角色状态尚未同步，请稍后重新射击。', '角色狀態尚未同步，請稍後重新射擊。'],
-      stale_seq: ['本次射击已过期，请重新射击。', '這次射擊已過期，請重新射擊。'],
-      invalid_shot: ['服务器未接受这次射击，请重新瞄准。', '伺服器未接受這次射擊，請重新瞄準。'],
-      rate_limited: ['射击过快，请稍后重试。', '射擊過快，請稍後重試。'],
+      unsupported_weapon: text('当前武器暂不支持多人伤害同步，请使用普通枪械。', 'This weapon does not support multiplayer damage yet. Use a regular firearm.', '目前武器暫不支援多人傷害同步，請使用一般槍械。'),
+      weapon_mismatch: text('武器切换尚未同步，请稍后重新射击。', 'Weapon switch is still synchronizing. Try firing again shortly.', '武器切換尚未同步，請稍後重新射擊。'),
+      player_dead: text('已阵亡，等待服务器重生。', 'You died. Waiting for server respawn.', '已陣亡，等待伺服器重生。'),
+      not_ready: text('角色状态尚未同步，请稍后重新射击。', 'Your character is still synchronizing. Try firing again shortly.', '角色狀態尚未同步，請稍後重新射擊。'),
+      stale_seq: text('本次射击已过期，请重新射击。', 'This shot expired. Fire again.', '這次射擊已過期，請重新射擊。'),
+      invalid_shot: text('服务器未接受这次射击，请重新瞄准。', 'The server could not accept this shot. Aim again.', '伺服器未接受這次射擊，請重新瞄準。'),
+      rate_limited: text('射击过快，请稍后重试。', 'Firing too quickly. Try again shortly.', '射擊過快，請稍後重試。'),
     };
-    const lines = data.accepted === false ? (rejected[data.reason] || ['服务器未接受这次射击。', '伺服器未接受這次射擊。'])
-      : data.hit ? (data.health === 0 ? ['击杀已由服务器确认。', '擊殺已由伺服器確認。']
-        : [(data.action === 'melee' ? '拳击命中' : '命中玩家') + (Number.isInteger(data.damage) ? ' · 伤害 ' + data.damage : ''),
-          (data.action === 'melee' ? '拳擊命中' : '命中玩家') + (Number.isInteger(data.damage) ? ' · 傷害 ' + data.damage : '')]) : null;
+    const lines = data.accepted === false ? (rejected[data.reason] || text('服务器未接受这次射击。', 'The server could not accept this shot.', '伺服器未接受這次射擊。'))
+      : data.hit ? (data.health === 0 ? text('击杀已由服务器确认。', 'Kill confirmed by the server.', '擊殺已由伺服器確認。')
+        : text((data.action === 'melee' ? '拳击命中' : '命中玩家') + (Number.isInteger(data.damage) ? ' · 伤害 ' + data.damage : ''),
+          (data.action === 'melee' ? 'Melee hit' : 'Player hit') + (Number.isInteger(data.damage) ? ' · Damage ' + data.damage : ''),
+          (data.action === 'melee' ? '拳擊命中' : '命中玩家') + (Number.isInteger(data.damage) ? ' · 傷害 ' + data.damage : ''))) : null;
     // 未命中仍由连接模块记录判定，但不让原生通知盖满整个战局。
     if (!lines) return;
-    gameMessage = lines[0]; renderHud();
+    gameMessage = lines; renderHud();
     const key = data.accepted === false ? 'reject:' + (data.reason || '') : data.health === 0 ? 'kill' : (data.action || 'shot') + ':hit';
     const now = performance.now();
     if (key !== lastCombatNotice || now - lastCombatNoticeAt >= 1500) {
-      lastCombatNotice = key; lastCombatNoticeAt = now; notify(lines[1]);
+      lastCombatNotice = key; lastCombatNoticeAt = now; notify(lines);
     }
   }
   function meleeFeedback(data) {
@@ -94,20 +103,22 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
       combatFeedback({ ...data, action: 'melee' });
     } else if (world.entities.some((entity) => entity.entity_id === data.target_entity_id
       && entity.player_id === session.client_id && entity.generation === data.target_generation)) {
-      gameMessage = '受到拳击 · 生命 ' + data.health + '/200'; renderHud();
+      gameMessage = text('受到拳击 · 生命 ' + data.health + '/200', 'Melee damage received · Health ' + data.health + '/200'); renderHud();
       // 生命值以每次命中的服务器结果显示，避免挥拳动作存在而扣血结果不可见。
-      notify(data.health === 0 ? '拳擊致死，等待伺服器重生' : '受到拳擊 · 傷害 ' + data.damage + ' · 生命 ' + data.health + '/200');
+      notify(data.health === 0 ? text('拳击致死，等待服务器重生', 'Killed by melee. Waiting for server respawn.', '拳擊致死，等待伺服器重生')
+        : text('受到拳击 · 伤害 ' + data.damage + ' · 生命 ' + data.health + '/200', 'Melee damage received · Damage ' + data.damage + ' · Health ' + data.health + '/200',
+          '受到拳擊 · 傷害 ' + data.damage + ' · 生命 ' + data.health + '/200'));
     }
   }
   function renderHud() {
     const hud = document.getElementById('hud');
     if (hud) {
       hud.style.display = nativeHud ? 'none' : '';
-      hud.textContent = nativeHud ? '' : [networkMessage, gameMessage].filter(Boolean).join(' · ');
+      hud.textContent = nativeHud ? '' : [networkMessage, gameMessage].filter(Boolean).map(value => localize(value)).join(' · ');
     }
   }
-  function notify(text) {
-    notices.push({ id: ++nextNoticeId, text });
+  function notify(value) {
+    notices.push({ id: ++nextNoticeId, value });
     if (notices.length > 16) notices.shift();
     schedule();
   }
@@ -129,7 +140,9 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
   function publish() {
     timer = 0;
     if (!shared || closed) return;
-    const packet = { ...session, peers: [...peers.values()], shots, combat, controls, notices, world, world_events: worldEvents,
+    const packet = { ...session, peers: [...peers.values()], shots, combat, controls,
+      notices: notices.map(({ id, value }) => ({ id, text: localize(value, true) })),
+      language: getLanguage(), world, world_events: worldEvents,
       remote_config: remoteConfig, world_shots: worldShots, world_projectiles: [...projectiles.values()],
       world_areas: [...areaEffects.values()], world_effects: effectEvents, collision_queries: [...collisionQueries.values()] };
     const bytes = new TextEncoder().encode(JSON.stringify(packet));
@@ -150,12 +163,14 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
   const receive = (data) => {
     if (!data || typeof data !== 'object') return;
     if (data.type === 'network_status') {
-      networkMessage = data.connected ? '服务器在线 · ' + (data.members || 1) + ' 位玩家'
-        : (data.text || '服务器连接中断，正在自动重连…');
+      networkMessage = data.connected ? text('服务器在线 · ' + (data.members || 1) + ' 位玩家', 'Server online · ' + (data.members || 1) + ' players')
+        : (data.text || text('服务器连接中断，正在自动重连…', 'Connection lost. Reconnecting automatically…'));
       const key = data.connected ? 'online:' + (data.members || 1) : 'offline';
       if (key !== lastNetworkNotice) {
         lastNetworkNotice = key;
-        notify(data.connected ? '公共戰局已連線 · ' + (data.members || 1) + ' 位玩家' : '連線中斷，正在自動重新連線…');
+        notify(data.connected ? text('公共战局已连接 · ' + (data.members || 1) + ' 位玩家', 'Connected to public session · ' + (data.members || 1) + ' players',
+          '公共戰局已連線 · ' + (data.members || 1) + ' 位玩家')
+          : text('连接中断，正在自动重新连接…', 'Connection lost. Reconnecting automatically…', '連線中斷，正在自動重新連線…'));
       } else if (data.phase === 'notice' && data.text && !/武器/.test(data.text)) notify(String(data.text).slice(0, 200));
       renderHud();
       return;
@@ -214,7 +229,9 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
     } else if (data.type === 'interaction_result') {
       if (data.accepted === false && !['rate_limited', 'cooldown', 'stale_seq', 'stale_input', 'stale_generation',
         'stale_revision', 'stale_owner', 'invalid_revision', 'seat_unavailable', 'too_far', 'not_facing', 'player_dead', 'not_ready'].includes(data.reason)) {
-        notify('互動未完成：' + (data.reason || '伺服器未接受此操作'));
+        const reason = data.reason || '';
+        notify(text('互动未完成：' + (reason || '服务器未接受此操作'), 'Interaction could not be completed' + (reason ? ': ' + reason : '. The server could not accept this action.'),
+          '互動未完成：' + (reason || '伺服器未接受此操作')));
       }
       return;
     } else if (data.type === 'session') {
@@ -237,7 +254,7 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
       if (session.client_id && previousId && session.client_id !== previousId) { peers.clear(); combatById.clear(); }
       if (session.connected && (data.world_v2 === false || data.melee_events === false) && !oldServerNotice) {
         oldServerNotice = true;
-        notify('伺服器不支援近戰，請更新服務端或重新連線');
+        notify(text('服务器不支持近战，请更新服务端或重新连接', 'This server does not support melee. Update the server or reconnect.', '伺服器不支援近戰，請更新服務端或重新連線'));
       }
       const members = new Set(session.members.map((member) => member.id));
       for (const id of peers.keys()) if (!members.has(id)) peers.delete(id);
@@ -257,9 +274,9 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
       }
       controls.push({ id: ++nextControlId, event: data });
       if (controls.length > 32) controls.shift();
-      if (data.type === 'respawn' && data.player_id === session.client_id) notify('已重生，正在恢復角色');
+      if (data.type === 'respawn' && data.player_id === session.client_id) notify(text('已重生，正在恢复角色', 'Respawned. Restoring character.', '已重生，正在恢復角色'));
       if (data.type === 'death' && data.player_id === session.client_id) {
-        lastGamePhase = 'dead'; notify('已陣亡，等待伺服器重生');
+        lastGamePhase = 'dead'; notify(text('已阵亡，等待服务器重生', 'You died. Waiting for server respawn.', '已陣亡，等待伺服器重生'));
       }
     } else if (data.type === 'player_state' && data.player_id !== session.client_id && data.state) {
       mergePeer({ player_id: data.player_id, state: data.state });
@@ -308,23 +325,26 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
     } else if (['local_state', 'local_shot', 'entity_ready', 'entity_input', 'interaction_request', 'simulation_result'].includes(message.type)) {
       sendLocal(message);
     } else if (message.type === 'game_status') {
-      gameMessage = message.role_recovering ? '正在自动恢复在线角色…'
-        : message.role_loading ? '正在加载在线角色…'
-        : message.alive === false ? '已阵亡 · 等待服务器重生'
-        : '已显示 ' + message.peer_count + ' 位其他玩家' + (Number.isInteger(message.health)
-          ? ' · 生命值 ' + message.health + ' · 击杀 ' + (message.kills || 0) + ' / 阵亡 ' + (message.deaths || 0) : '');
+      gameMessage = message.role_recovering ? text('正在自动恢复在线角色…', 'Restoring online character automatically…')
+        : message.role_loading ? text('正在加载在线角色…', 'Loading online character…')
+        : message.alive === false ? text('已阵亡 · 等待服务器重生', 'You died · Waiting for server respawn')
+        : text('已显示 ' + message.peer_count + ' 位其他玩家' + (Number.isInteger(message.health)
+          ? ' · 生命值 ' + message.health + ' · 击杀 ' + (message.kills || 0) + ' / 阵亡 ' + (message.deaths || 0) : ''),
+          message.peer_count + ' other players visible' + (Number.isInteger(message.health)
+            ? ' · Health ' + message.health + ' · Kills ' + (message.kills || 0) + ' / Deaths ' + (message.deaths || 0) : ''));
       renderHud();
       const phase = message.role_recovering ? 'recovering_avatar' : message.role_loading ? 'loading_avatar'
         : message.alive === false ? 'dead' : 'synchronizing';
       if (phase !== lastGamePhase) {
         const previous = lastGamePhase; lastGamePhase = phase;
-        notify(phase === 'recovering_avatar' ? '正在自動恢復線上角色…'
-          : phase === 'loading_avatar' ? '正在載入線上角色…'
-          : phase === 'dead' ? '已陣亡，等待伺服器重生'
-          : previous === 'recovering_avatar' ? '角色已恢復，同步繼續' : '公共戰局已就緒');
+        notify(phase === 'recovering_avatar' ? text('正在自动恢复在线角色…', 'Restoring online character automatically…', '正在自動恢復線上角色…')
+          : phase === 'loading_avatar' ? text('正在加载在线角色…', 'Loading online character…', '正在載入線上角色…')
+          : phase === 'dead' ? text('已阵亡，等待服务器重生', 'You died. Waiting for server respawn.', '已陣亡，等待伺服器重生')
+          : previous === 'recovering_avatar' ? text('角色已恢复，同步继续', 'Character restored. Synchronization resumed.', '角色已恢復，同步繼續')
+            : text('公共战局已就绪', 'Public session ready.', '公共戰局已就緒'));
       }
       if (Number.isInteger(message.kills)) {
-        if (lastKills !== null && message.kills > lastKills) notify('擊殺成功 · 總擊殺 ' + message.kills);
+        if (lastKills !== null && message.kills > lastKills) notify(text('击杀成功 · 总击杀 ' + message.kills, 'Kill confirmed · Total kills ' + message.kills, '擊殺成功 · 總擊殺 ' + message.kills));
         lastKills = message.kills;
       }
       reportStatus({ phase, peers: message.peer_count,
@@ -355,8 +375,11 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
         actor_entity_id: message.actor_entity_id, source: message.source });
     } else if (message.type === 'bridge_error') {
       nativeHud = false;
+      gameMessage = text('角色同步已暂停：' + message.message, 'Character synchronization paused: '
+        + String(message.message).replace('同步缓冲区分配失败', 'Could not allocate synchronization buffers'));
+      renderHud();
       const hud = document.getElementById('hud');
-      if (hud) { hud.style.display = ''; hud.textContent = '角色同步已暂停：' + message.message; hud.style.color = '#f96'; }
+      if (hud) hud.style.color = '#f96';
       reportStatus({ phase: 'error', message: message.message });
     }
   }
@@ -365,6 +388,7 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
   addEventListener('pagehide', () => {
     closed = true;
     stopRemoteConfiguration?.();
+    stopLanguage?.();
     clearTimeout(timer);
     sendLocal({ type: 'game_closed' });
     channel?.close();

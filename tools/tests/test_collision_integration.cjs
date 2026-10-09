@@ -28,10 +28,12 @@ test('real latest JAR accepts negotiated native collision result through both cl
     let output = ''; server.stdout.on('data', bytes => { output += bytes; }); server.stderr.on('data', bytes => { output += bytes; });
     const port = await until(() => /http:\/\/127\.0\.0\.1:(\d+)/.exec(output)?.[1], 'Java server failed to start: ' + output);
     const address = `http://127.0.0.1:${port}`;
+    const i18nSource = read('client/i18n.js'), i18nUrl = 'data:text/javascript;base64,' + Buffer.from(i18nSource).toString('base64');
+    const i18nModule = await importText(i18nSource);
     const appearanceSource = read('client/multiplayer/appearance.js');
     const appearanceUrl = 'data:text/javascript;base64,' + Buffer.from(appearanceSource).toString('base64');
     const [addressModule, appearanceModule, worldModule] = await Promise.all([
-      importText(read('client/multiplayer/server-address.js')),
+      importText(read('client/multiplayer/server-address.js').replace("'../i18n.js'", JSON.stringify(i18nUrl))),
       importText(appearanceSource),
       importText(read('client/multiplayer/world-state.js').replace("'./appearance.js'", JSON.stringify(appearanceUrl))),
     ]);
@@ -42,7 +44,7 @@ test('real latest JAR accepts negotiated native collision result through both cl
     class CapturedSocket extends WebSocket {
       send(value) { wireSent.push(JSON.parse(value)); return super.send(value); }
     }
-    const context = vm.createContext({ ...addressModule, ...appearanceModule, ...worldModule,
+    const context = vm.createContext({ ...i18nModule, ...addressModule, ...appearanceModule, ...worldModule,
       WebSocket: CapturedSocket, location: { href: address + '/play/' }, performance,
       navigator: {}, document: { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} },
       sessionStorage: { getItem: () => null, setItem() {}, removeItem() {} },
@@ -65,10 +67,10 @@ test('real latest JAR accepts negotiated native collision result through both cl
       health:200,weapon:0x1b06d571,shooting:false}});
     const memory = { buffer: new SharedArrayBuffer(1024 * 1024) }, block = 256, capacity = 512 * 1024;
     const hud = { style: {}, textContent: '' }, adapterEvents = [];
-    const adapterContext = vm.createContext({ Atomics, Int32Array, Uint8Array, DataView, TextEncoder, TextDecoder,
+    const adapterContext = vm.createContext({ ...i18nModule, Atomics, Int32Array, Uint8Array, DataView, TextEncoder, TextDecoder,
       performance, BroadcastChannel: class { close() {} }, document: { getElementById: () => hud },
       addEventListener() {}, setTimeout: realSetTimeout, clearTimeout, fetch: () => Promise.resolve({ ok: true }) });
-    vm.runInContext(read('client/multiplayer/game-adapter.js').replace('export function installGameAdapter', 'function installGameAdapter')
+    vm.runInContext(read('client/multiplayer/game-adapter.js').replace(/^import .*$/gm, '').replace('export function installGameAdapter', 'function installGameAdapter')
       + '\nglobalThis.install = installGameAdapter;', adapterContext);
     const network = { setReceiver(receiver) { api.setReceiver(message => { messages.push(message); receiver(message); }); },
       onWorkerMessage(message) { adapterEvents.push(message); api.onWorkerMessage(message); } };
@@ -119,7 +121,7 @@ test('real latest JAR accepts negotiated native collision result through both cl
       const value = await (await fetch(address + '/health')).json();
       return value.collision.completed_queries > 0 ? value : false;
     }, 'Server rejected collision result: ' + JSON.stringify(wireSent.filter(message => message.type === 'collision_result')));
-    assert.match(health.server_version, /^0\.4\.1/);
+    assert.match(health.server_version, /^0\.4\.2/);
     assert.equal(health.collision.rejected_queries, 0);
     assert.ok(shapeCalls >= 2);assert.ok(wireSent.filter(message => message.type === 'collision_result' && message.complete).length >= 2);
     await delay(100);

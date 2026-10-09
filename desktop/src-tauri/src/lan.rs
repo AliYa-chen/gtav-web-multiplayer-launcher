@@ -252,7 +252,7 @@ mod tests {
         let lan = prepared(crate::client_settings(&inner, additional).unwrap(), "192.168.1.20", cert, key);
         let root = lan.ca_certificate.clone();
         let fingerprint = lan.fingerprint.clone();
-        let client = crate::start_client_with_identity(game, lan, identity, log_dir, state.remote.clone(), "server.test:47485".into()).unwrap();
+        let client = crate::start_client_with_identity(game, lan, identity, log_dir, state.remote.clone(), "server.test:47485".into(),state.language.clone()).unwrap();
         let ports = [client.server.port(), url::Url::parse(&client.guide.url()).unwrap().port().unwrap()];
         inner.last_client_id = id;
         inner.clients.push(client);

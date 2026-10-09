@@ -68,6 +68,10 @@ fn respond(request: Request, code: u16, body: Vec<u8>, content_type: &str, certi
 pub fn start(address: Ipv4Addr, port: u16, https_port: u16, ca_certificate: Vec<u8>, fingerprint: String)
     -> Result<BootstrapHandle, String>
 {
+    start_with_language(address,port,https_port,ca_certificate,fingerprint,crate::language::shared())
+}
+pub fn start_with_language(address: Ipv4Addr, port: u16, https_port: u16, ca_certificate: Vec<u8>, fingerprint: String,
+    language:crate::language::SharedLanguage) -> Result<BootstrapHandle, String> {
     if !private_lan_address(address) || port == 0 || https_port == 0 || port == https_port
         || ca_certificate.is_empty() || fingerprint.is_empty() {
         return Err("证书安装引导的局域网 IP、端口或公共证书无效。".into());
@@ -98,6 +102,9 @@ pub fn start(address: Ipv4Addr, port: u16, https_port: u16, ca_certificate: Vec<
             }
             let path = request.url().split('?').next().unwrap_or("/").to_owned();
             match path.as_str() {
+                "/api/language" => respond(request,200,serde_json::to_vec(&crate::language::snapshot(&language)).unwrap(),"application/json; charset=utf-8",false),
+                "/i18n.js" => respond(request,200,crate::CLIENT.get_file("i18n.js").map(|file|file.contents().to_vec()).unwrap_or_default(),"text/javascript; charset=utf-8",false),
+                "/lan-guide-i18n.js" => respond(request,200,include_bytes!("lan-guide-i18n.js").to_vec(),"text/javascript; charset=utf-8",false),
                 "/ca.cer" => respond(request, 200, ca_certificate.clone(), "application/pkix-cert", true),
                 "/lan-probe.js" => respond(request, 200, PROBE.to_vec(), "text/javascript; charset=utf-8", false),
                 _ => respond(request, 200, page.as_bytes().to_vec(), "text/html; charset=utf-8", false),
@@ -122,6 +129,20 @@ mod tests {
         let mut output = vec![]; stream.read_to_end(&mut output).unwrap();
         let split = output.windows(4).position(|chunk| chunk == b"\r\n\r\n").unwrap();
         (String::from_utf8(output[..split].to_vec()).unwrap(), output[split + 4..].to_vec())
+    }
+    #[test]
+    fn certificate_guide_uses_the_same_live_read_only_language_as_game_pages() {
+        let address=Ipv4Addr::new(192,168,1,20);let port=unused_port();let https=unused_port();let language=crate::language::shared();
+        let server=start_with_language(address,port,https,b"public".to_vec(),"AA".into(),language.clone()).unwrap();
+        let host=format!("{address}:{port}");
+        *language.write().unwrap()=crate::language::LanguageConfig::with_preference("en",4).unwrap();
+        let (headers,body)=request(port,"GET","/api/language",&host,"");
+        assert!(headers.starts_with("HTTP/1.1 200"));
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&body).unwrap()["resolved"],"en");
+        let (_,script)=request(port,"GET","/i18n.js",&host,"");assert!(String::from_utf8(script).unwrap().contains("initLanguage"));
+        let (_,guide)=request(port,"GET","/lan-guide-i18n.js",&host,"");assert!(String::from_utf8(guide).unwrap().contains("LAN Certificate Setup"));
+        assert!(request(port,"POST","/api/language",&host,"").0.starts_with("HTTP/1.1 405"));
+        assert_eq!(crate::language::snapshot(&language).revision,4);drop(server);
     }
     #[test]
     fn http_guide_only_shares_public_ca_and_shutdown_releases_port() {

@@ -99,6 +99,20 @@ test('菜单打开立即更新，状态变化限频，原菜单重建后低频�
   assert.equal(h.calls.filter(call => call[0] === 'alloc').length, 1);
 });
 
+test('语言切换立即更新自有原生页与header，不重开菜单或重新分配内存', () => {
+  const h = harness(); h.setPanel('MENU_UNIQUE_ID_MISSION_CREATOR');
+  h.ui.tick(0, summary());
+  const changed = h.ui.tick(16, summary({ language: 'en', name: '', connected: false, phase: 'reconnecting' }));
+  assert.equal(changed.applied, true);
+  assert.equal(h.methods[3].parameters[0], 'GTA V · Public Online Session');
+  assert.deepEqual(h.methods[4].parameters, ['Player', 'Online players: 2', 'Reconnecting', false, 'Public session · GTA V Free Mode']);
+  assert.deepEqual(h.displayedContent(), { title: 'GTA Online',
+    body: 'Online server status: -\nReconnecting · Online players: 2\nPublic session · GTA V Free Mode' });
+  assert.equal(h.ui.tick(32, summary({ language: { resolved: 'zh-CN' } })).applied, true);
+  assert.equal(h.methods[6].parameters[0], 'GTA V · 公共在線戰局');
+  assert.equal(h.calls.filter(call => call[0] === 'alloc').length, 1);
+});
+
 test('昵称过滤游戏格式、HTML及控制符，UTF8独立槽不会越界或截断多字节字符', () => {
   const h = harness(); new Uint8Array(h.memory.buffer).fill(0xa5);
   h.ui.tick(0, summary({ name: '~r~<b>甲&乙</b>\u0000\u001b\u202e' + '😀'.repeat(1000), player_count: -3 }));

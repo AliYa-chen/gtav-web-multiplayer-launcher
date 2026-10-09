@@ -41,6 +41,7 @@
 	#fill { height: 100%; width: 0; background: #7cc576; }
 	#hud { position: fixed; left: 8px; bottom: 8px; max-width: 60vw; white-space: pre-wrap; opacity: .8; pointer-events: none; }
 	#fps { position: fixed; left: 8px; top: 6px; display: none; color: #0f0; font: bold 18px/1.2 Consolas, "Microsoft YaHei", "PingFang SC", monospace; font-variant-numeric: tabular-nums; text-shadow: 1px 1px 2px #000, 0 0 3px #000; pointer-events: none; z-index: 10; }
+	#language-notice { position: fixed; right: 16px; top: 16px; max-width: min(380px, calc(100vw - 32px)); padding: 10px 14px; background: #000c; color: #fff; font: 13px/1.5 "Microsoft YaHei", "PingFang SC", sans-serif; pointer-events: none; z-index: 10; }
 </style>
 </head>
 <body>
@@ -48,7 +49,9 @@
 <div id="hud"></div>
 <div id="loading"><div id="ls-stage"><div id="ls-screens"></div><img id="ls-logo" src="/b/8b0b5899ed/title/logo.png" alt=""><div id="ls-bars"><div id="modes" class="ls-bar"><button data-act="back"></button><button data-act="map5"></button><button data-act="map6"></button><button data-act="sandbox"></button><button data-act="story"></button><button data-act="online"></button></div><div class="ls-bar"><span id="label">正在启动…</span><span id="pct">0%</span><i class="ls-spin"></i></div></div></div><div id="ls-log"><div id="data"></div><div id="console"></div></div><div id="bar"><div id="fill"></div></div></div>
 <div id="fps"></div>
+<div id="language-notice" role="status" aria-live="polite" hidden></div>
 <script type="module">
+import { t, getLanguage, initLanguage, onLanguageChange, translateText } from '/i18n.js';
 import { installGameAdapter } from '/multiplayer/game-adapter.js';
 import { watchOnlineConfiguration } from '/multiplayer/remote-config.js';
 import { installJoinModal, readPublicPreferences, consumePublicEntryIntent } from '/multiplayer/join-modal.js';
@@ -57,6 +60,14 @@ import { startPublicSession } from '/multiplayer/public-session.js';
 // main() 在此执行，可能阻塞该线程）。页面仅持有 canvas，并将其交给该线程，再转交 GPU 工作线程。
 // 查询参数：?args=-flag1,-flag2=value 将参数追加到引擎命令行；?shot=N 将每第 N 次画面呈现的截图发送到开发服务器。
 // 多人游戏入口只运行 GTA V 沙盒，忽略地址栏中的模式和诊断参数。
+await initLanguage();
+const localizedElements = new Map();
+function setUiText(element, source) {
+	if (!element) return;
+	localizedElements.set(element, source);
+	element.textContent = typeof source === 'function' ? source() : translateText(source);
+}
+setUiText(document.getElementById('label'), () => t('page.starting'));
 const ROOM_GAME = location.pathname === '/play/';
 const q = new URLSearchParams(ROOM_GAME ? 'mode=sandbox' : location.search);
 const onlinePreferences = ROOM_GAME ? readPublicPreferences() : null;
@@ -78,39 +89,8 @@ for (const type of ['keydown', 'keyup']) addEventListener(type, stopOnlineDebugK
 // 页面所加载内容（加载器、工作线程、引擎、着色器、标题素材）的 URL 前缀：开发服务器上为空；PHP 主机（phase3/host/index.php）会将页面中的
 // `/b/8b0b5899ed` 通过 str_replace 替换为 `/b/<build id>`，从而长期缓存这些文件，并在构建变化时更换 URL。
 const BASE = '/b/8b0b5899ed'.charAt(0) === '_' ? '' : '/b/8b0b5899ed';
-// 仅翻译页面显示的内容；工作线程消息和上传日志仍保持原始格式，便于排查问题。
-const PROGRESS_TEXT = Object.freeze({
-	'Compiling the engine': '正在编译游戏引擎',
-	'Starting the engine': '正在启动游戏引擎',
-	'Mounting archives': '正在挂载资源包',
-	'Reading settings': '正在读取设置',
-	'Starting graphics': '正在初始化图形',
-	'Loading shaders': '正在加载着色器',
-	'Loading text': '正在加载文字资源',
-	'Starting audio': '正在启动音频',
-	'Loading audio metadata': '正在加载音频信息',
-	'Starting scripts': '正在启动游戏脚本',
-	'Loading the world': '正在加载游戏世界',
-	'First frame': '正在生成第一帧',
-	'Preparing shaders': '正在准备着色器',
-	'Ready': '加载完成',
-	'Press Ok to abort the program.  It is not safe to continue.': '请点击“确定”终止程序，当前无法安全继续运行。',
-});
-function translateUiText(value) {
-	const text = String(value ?? '');
-	if (PROGRESS_TEXT[text]) return PROGRESS_TEXT[text];
-	return text
-		.replace(/^Downloading and compiling the engine \((.*)\)$/, '正在下载并编译游戏引擎（$1）')
-		.replace(/^Downloading the engine \((.*)\)$/, '正在下载游戏引擎（$1）')
-		.replace(/^The server is busy, retrying \((\d+)\)$/, '服务器繁忙，正在重试（第 $1 次）')
-		.replace(/^engine download failed: /, '游戏引擎下载失败：')
-		.replace(/^Scaleform font preload failed: /, 'Scaleform 字体预加载失败：')
-		.replace(/^worker error: /, '工作线程出错：')
-		.replace(/THREAD REJECTION \(([^)]+)\): /, '线程异常（$1）：')
-		.replace(/RuntimeError: memory access out of bounds/g, '运行时错误：内存访问越界')
-		.replace(/RuntimeError: unreachable/g, '运行时错误：执行到不可达指令')
-		.replace(/^\[wasm\] hang report (\d+): no engine log line for (\d+) s; blocked threads:/, '[wasm] 卡顿报告 $1：引擎已 $2 秒未输出日志；阻塞线程：');
-}
+// Keep original diagnostic payloads in logs; localize their visible presentation.
+const translateUiText = translateText;
 // ?log=1：页面、引擎线程及工作线程将日志发送到开发服务器（browser.log、browser_<ip>.log）；默认关闭，以节省玩家的上传
 // 带宽和本线程的处理时间。加载画面上的日志和浏览器控制台不受此选项影响。
 const remoteLog = q.get('log') === '1';
@@ -125,7 +105,7 @@ const postLog = (text) => { if (remoteLog) fetch('/log', { method: 'POST', body:
 		const dev = ' deviceMemory ' + (navigator.deviceMemory || '?') + ' GB, cores ' + navigator.hardwareConcurrency;
 		if (remoteLog && posted++ < 3) fetch('/log', { method: 'POST', body: '[page] CRASH (' + m.kind + ', ' + m.thread + ' thread, wasm heap ' + m.heap + ' MB,' + dev + ', ' + location.search + '): ' + m.text + '\n' + m.tail.join('\n') + '\n' }).catch(() => {});
 		const el = document.getElementById('hud');
-		if (el) { el.textContent = '游戏已停止（' + ({ error: '错误', rejection: '未处理的异常', abort: '中止', exit: '退出' }[m.kind] || m.kind) + '）：' + translateUiText(m.text.split('\n')[0].slice(0, 200)) + (memory ? '。可能与内存不足有关，请关闭其他标签页后刷新。' : '。请刷新页面。'); el.style.color = '#f96'; }
+		if (el) { setUiText(el, () => t('page.crash', { kind: translateText(({ error: '错误', rejection: '未处理的异常', abort: '中止', exit: '退出' }[m.kind] || m.kind)), reason: translateUiText(m.text.split('\n')[0].slice(0, 200)), advice: t(memory ? 'page.crashMemory' : 'page.crashRefresh') })); el.style.color = '#f96'; }
 	};
 }
 // ---- 标题画面：使用 HTML 重现游戏自身的 LOADINGSCREEN_STARTUP 加载画面（scaleform_frontend.rpf） ----------------------------------------
@@ -263,11 +243,11 @@ const showModes = () => {
 	for (const b of modeButtons) {
 		const act = b.dataset.act, loading = !pickingMap && (ROOM_GAME ? act === 'online' : (act === 'story' ? startMode === 1 : act === 'sandbox' && startMode >= 2));
 		const text = document.createElement('span');
-		text.textContent = loading ? (ROOM_GAME ? ONLINE_LOADING : LOADING[startMode]) : ACTS[act][0];
+		text.textContent = translateText(loading ? (ROOM_GAME ? ONLINE_LOADING : LOADING[startMode]) : ACTS[act][0]);
 		if (loading) b.replaceChildren(text);
 		else {
 			const icon = document.createElement('span');
-			icon.className = 'ls-key'; icon.textContent = ACTS[act][1];
+			icon.className = 'ls-key'; icon.textContent = translateText(ACTS[act][1]);
 			b.replaceChildren(text, icon);
 		}
 		b.style.order = loading ? 1 : 0;
@@ -276,7 +256,7 @@ const showModes = () => {
 		b.classList.toggle('chosen', loading);
 	}
 	if (startMode) modesEl.classList.remove('ask');
-	if (waitingChoice && !startMode) document.getElementById('label').textContent = pickingMap ? '请选择地图以继续' : '请选择故事模式、沙盒模式或在线战局以继续';
+	if (waitingChoice && !startMode) setUiText(document.getElementById('label'), pickingMap ? '请选择地图以继续' : '请选择故事模式、沙盒模式或在线战局以继续');
 };
 const choose = (m) => {
 	pickingMap = false;
@@ -304,6 +284,13 @@ addEventListener('keydown', (e) => {
 	e.preventDefault(); e.stopImmediatePropagation();
 }, { capture: true });
 showModes();
+onLanguageChange(() => {
+	for (const [element, source] of localizedElements) {
+		if (!element.isConnected) { localizedElements.delete(element); continue; }
+		element.textContent = typeof source === 'function' ? source() : translateText(source);
+	}
+	showModes();
+});
 // ---- 加载进度：引擎（prejs.js、loader.js）和 GPU 工作线程通过 BroadcastChannel 发布 {pct, label} ------------------
 {
 	const loading = document.getElementById('loading'), fill = document.getElementById('fill'), label = document.getElementById('label'), pct = document.getElementById('pct');
@@ -313,7 +300,8 @@ showModes();
 	let lastLine = '';
 	const consoleEl = document.getElementById('console');
 	const bc = new BroadcastChannel('game-progress');
-	let lastActivity = performance.now(), stallLogged = 0, lastLabel = '';
+	let lastActivity = performance.now(), stallLogged = 0, lastLabel = '', lastTranslations = null;
+	const progressText = () => lastTranslations?.[getLanguage()] || translateUiText(lastLabel);
 	bc.onmessage = (ev) => {
 		const m = ev.data;
 		lastActivity = performance.now();
@@ -328,13 +316,13 @@ showModes();
 			dirty = true;
 			return;
 		}
-		if (m.gpuLost) { hud.textContent = '显卡连接已中断（' + m.gpuLost + '），画面无法继续显示。请刷新页面。'; hud.style.color = '#f66'; return; }
-		if (m.error) { label.textContent = '加载失败：' + translateUiText(m.error); label.style.color = '#e66'; return; }
-		if (m.pct > target) { target = m.pct; if (m.label) { lastLabel = m.label; if (!waitingChoice) label.textContent = translateUiText(m.label); } if (m.pct >= 72 && worldBase < 0) worldBase = dataBytes; }
+		if (m.gpuLost) { setUiText(hud, () => t('page.gpuLost', { reason: m.gpuLost })); hud.style.color = '#f66'; return; }
+		if (m.error) { setUiText(label, () => t('page.loadFailed', { reason: m.errorTranslations?.[getLanguage()] || translateUiText(m.error) })); label.style.color = '#e66'; return; }
+		if (m.pct > target) { target = m.pct; if (m.label) { lastLabel = m.label; lastTranslations = m.labelTranslations || null; if (!waitingChoice) setUiText(label, progressText); } if (m.pct >= 72 && worldBase < 0) worldBase = dataBytes; }
 		if (m.choice && !startMode) { waitingChoice = true; modesEl.classList.add('ask'); showModes(); }		// 引擎正在等待选择，showModes 在状态文字中显示选择提示。
 		if (m.commit) { startCommitted = true; pickingMap = false; if (m.mode) startMode = m.mode; showModes(); }		// 引擎已接收选择结果。
-		if (m.compiling !== undefined && !waitingChoice) { lastLabel = 'Preparing shaders'; label.textContent = translateUiText(lastLabel); target = Math.max(target, 99); }		// 游戏世界已就绪；GPU 工作线程等待渲染管线编译完毕后再显示画面。
-		if (m.world) { ready = true; hud.textContent = ROOM_GAME ? '点击游戏画面以锁定鼠标（Esc 释放鼠标）' : '点击游戏画面以锁定鼠标（Esc 释放鼠标，Shift+P 切换键盘模式，= 显示帧率）'; setTimeout(() => { hud.textContent = ''; }, 15000); }
+		if (m.compiling !== undefined && !waitingChoice) { lastLabel = 'Preparing shaders'; lastTranslations = null; setUiText(label, progressText); target = Math.max(target, 99); }		// 游戏世界已就绪；GPU 工作线程等待渲染管线编译完毕后再显示画面。
+		if (m.world) { ready = true; setUiText(hud, ROOM_GAME ? '点击游戏画面以锁定鼠标（Esc 释放鼠标）' : '点击游戏画面以锁定鼠标（Esc 释放鼠标，Shift+P 切换键盘模式，= 显示帧率）'); setTimeout(() => { setUiText(hud, ''); }, 15000); }
 	};
 	// 两次报告之间，进度条缓慢前移，最多超过上次报告 6 个百分点，避免长时间加载阶段看起来像卡住。
 	const dataEl = document.getElementById('data');
@@ -344,10 +332,10 @@ showModes();
 	setInterval(() => {
 		if (ready) return;
 		if (ROOM_GAME && !onlineConnectionReady) { lastActivity = performance.now(); return; }
-		if (waitingChoice) { if (!startMode) { lastActivity = performance.now(); return; } waitingChoice = false; label.textContent = translateUiText(lastLabel); }
+		if (waitingChoice) { if (!startMode) { lastActivity = performance.now(); return; } waitingChoice = false; setUiText(label, progressText); }
 		const quiet = (performance.now() - lastActivity) / 1000;
 		if (quiet > 30) {
-			label.textContent = '已 ' + (quiet | 0) + ' 秒没有加载进展' + (lastLabel ? '（上一步：' + translateUiText(lastLabel) + '）' : '') + '。设备可能内存不足，请关闭其他标签页或刷新。';
+			setUiText(label, () => t('page.stall', { seconds: quiet | 0, step: lastLabel ? t('page.lastStep', { step: progressText() }) : '' }));
 			label.style.color = '#e96';
 			if (quiet - stallLogged > 30) { stallLogged = quiet; postLog('[page] STALL: no progress for ' + (quiet | 0) + ' s, last step "' + lastLabel + '", shown ' + shown.toFixed(0) + '%'); }
 		} else if (stallLogged) { stallLogged = 0; label.style.color = ''; }
@@ -356,7 +344,7 @@ showModes();
 		const now = performance.now();
 		while (samples.length && now - samples[0][0] > 3000) samples.shift();
 		const speed = samples.reduce((a, x) => a + x[1], 0) / 3;
-		if (dataBytes) dataEl.textContent = '游戏数据：' + (dataBytes / 1048576 | 0) + ' MB' + (speed > 1e4 ? ' (' + (speed / 1048576).toFixed(1) + ' MB/s)' : '');
+		if (dataBytes) setUiText(dataEl, () => t('page.data', { mb: dataBytes / 1048576 | 0, speed: speed > 1e4 ? ' (' + (speed / 1048576).toFixed(1) + ' MB/s)' : '' }));
 		// 从脚本阶段开始，进度也随收到的数据量变化（72 -> 98%）。
 		if (worldBase >= 0 && !ready) target = Math.max(target, 72 + 26 * Math.min(1, (dataBytes - worldBase) / WORLD_BYTES));
 		const cap = ready ? 100 : Math.min(99, target + 6);
@@ -364,7 +352,7 @@ showModes();
 		shown += (goal - shown) * (goal === target || ready ? 0.12 : 0.004);
 		if (dirty) {		// 只显示最新一行日志。
 			dirty = false;
-			consoleEl.textContent = translateUiText(lastLine);
+			setUiText(consoleEl, () => translateUiText(lastLine));
 		}
 		fill.style.width = shown.toFixed(1) + '%';
 		pct.textContent = Math.round(shown) + '%';
@@ -377,7 +365,7 @@ const hud = document.getElementById('hud');
 if (!ROOM_GAME) {
 	const el = document.getElementById('fps');
 	let on = false;
-	new BroadcastChannel('game-fps').onmessage = (ev) => { if (on) el.textContent = Math.round(ev.data.fps) + ' 帧/秒'; };
+	new BroadcastChannel('game-fps').onmessage = (ev) => { if (on) setUiText(el, () => t('page.fps', { fps: Math.round(ev.data.fps) })); };
 	const isToggle = (e) => !editingInput(e) && e.code === 'Equal' && !e.ctrlKey && !e.altKey && !e.metaKey;
 	addEventListener('keydown', (e) => {
 		if (!isToggle(e)) return;
@@ -385,7 +373,7 @@ if (!ROOM_GAME) {
 		if (e.repeat) return;
 		on = !on;
 		el.style.display = on ? 'block' : 'none';
-		if (on) el.textContent = '-- 帧/秒';
+		if (on) setUiText(el, () => t('page.fps', { fps: '--' }));
 	}, { capture: true });
 	addEventListener('keyup', (e) => { if (isToggle(e)) { e.stopImmediatePropagation(); e.preventDefault(); } }, { capture: true });
 }
@@ -421,7 +409,7 @@ if (ROOM_GAME && onlinePreferences) {
 	try {
 		publicSession = await startPublicSession(onlinePreferences, ({ phase, text }) => {
 			const label = document.getElementById('label');
-			if (label && !onlineConnectionReady) label.textContent = phase === 'joined' ? ONLINE_LOADING : text;
+			if (label && !onlineConnectionReady) setUiText(label, phase === 'joined' ? ONLINE_LOADING : text);
 			// 游戏开始后的连接提示由适配器交给原生通知，入口只负责加载前提示。
 		}, { reconnect: ONLINE_RECONNECT });
 		await publicSession.ready;
@@ -430,13 +418,13 @@ if (ROOM_GAME && onlinePreferences) {
 		publicSession?.close();
 		joinModal.setMessage(error.message);
 		joinModal.open();
-		document.getElementById('label').textContent = '连接未完成，请确认战局服务器地址';
+		setUiText(document.getElementById('label'), '连接未完成，请确认战局服务器地址');
 	}
 } else if (ROOM_GAME) {
-	document.getElementById('label').textContent = '请输入昵称与服务器地址以加入战局';
+	setUiText(document.getElementById('label'), '请输入昵称与服务器地址以加入战局');
 	joinModal.open();
 }
-if (!crossOriginIsolated) { document.getElementById('label').textContent = '页面未启用跨域隔离：请通过 HTTPS 或 localhost 打开，并确认服务器发送了 COOP/COEP 响应头。'; document.getElementById('label').style.color = '#e66'; }
+if (!crossOriginIsolated) { setUiText(document.getElementById('label'), '页面未启用跨域隔离：请通过 HTTPS 或 localhost 打开，并确认服务器发送了 COOP/COEP 响应头。'); document.getElementById('label').style.color = '#e66'; }
 else if (onlineConnectionReady) {
 	const offscreen = canvas.transferControlToOffscreen();
 	await dropOldCache();
@@ -451,7 +439,7 @@ else if (onlineConnectionReady) {
 	const LOW_ARGS = ['-textureQuality=0', '-pedVariety=0', '-vehicleVariety=0', '-shadowQuality=' + (q.get('shadows') === '1' ? 0 : -1), '-reflectionQuality=0', '-particleQuality=0',
 		'-grassQuality=0', '-cityDensity=0', '-lodScale=0', '-pedLodBias=0', '-vehicleLodBias=0'];
 	const cores = +(q.get('cores') || 0) || (lowMemory ? 2 : navigator.hardwareConcurrency);
-	if (lowMemory) hud.textContent = '已启用低内存模式（浏览器报告 ' + (navigator.deviceMemory || '?') + ' GB）：请关闭其他标签页。若出现“Aw, Snap!”（崩溃提示）或 SIGILL，表示内存不足。';
+	if (lowMemory) setUiText(hud, () => t('page.lowMemory', { gb: navigator.deviceMemory || '?' }));
 postLog('[page env] ' + JSON.stringify({ deviceMemory: navigator.deviceMemory, cores: navigator.hardwareConcurrency, usingCores: cores, low: lowMemory, isolated: crossOriginIsolated, ua: navigator.userAgent.slice(0, 120), screen: screen.width + 'x' + screen.height + '@' + devicePixelRatio }));
 // 后备缓冲区按浏览器窗口的设备像素（原生分辨率）设置，并随窗口大小实时变化（详见 installInput）。?scale=0.75 按 75% 分辨率渲染以提高速度；?fixed=1 保持
 // 启动时的大小，不随窗口变化；?res=1920x1080 强制指定大小。宽高使用偶数，最大 3840x2160（低内存配置为 2560x1440，因为屏幕大小的渲染目标占据大部分 GPU 内存）。
@@ -477,16 +465,29 @@ const ENGINE_ARGS = ['-fastscriptcore'];
 // 等待还会为每帧增加 15 毫秒。下方使用空回调；游玩时该线程不会在此执行其他工作。
 setInterval(() => {}, 1);
 const worker = new Worker(BASE + '/loader.js');
+	let engineLanguage = getLanguage();
+	let languageNoticeTimer = 0;
+	const stopWorkerLanguage = onLanguageChange(() => {
+		if (engineLanguage === getLanguage()) return;
+		engineLanguage = getLanguage();
+		worker.postMessage({ type: 'language', language: getLanguage() });
+		const notice = document.getElementById('language-notice');
+		setUiText(notice, () => t('language.reload')); notice.hidden = false;
+		clearTimeout(languageNoticeTimer);
+		languageNoticeTimer = setTimeout(() => { notice.hidden = true; }, 8000);
+	});
+	addEventListener('pagehide', stopWorkerLanguage, { once: true });
 	const multiplayerAdapter = ROOM_GAME ? installGameAdapter(worker, publicSession, { watchOnlineConfiguration }) : null;
 	worker.onmessage = (ev) => {
 		multiplayerAdapter?.onWorkerMessage(ev.data);
-		if (ev.data.hud) hud.textContent = translateUiText(ev.data.hud);
+		if (ev.data.hud) setUiText(hud, () => translateUiText(ev.data.hud));
 		if (ev.data.input) installInput(ev.data.input.memory, ev.data.input.block);
 		if (ev.data.audio) { audioPending = ev.data.audio; tryStartAudio(); }
 	};
-	worker.onerror = (e) => { hud.textContent = '游戏工作线程出错：' + translateUiText(e.message); };
+	worker.onerror = (e) => { setUiText(hud, () => t('page.workerError', { reason: translateUiText(e.message) })); };
 	worker.postMessage({
 		multiplayer: ROOM_GAME,
+		language: getLanguage(),
 		canvas: offscreen,
 		base: BASE,
 		args: ['-rootdir=/game/', ...(q.get('nogpu') ? [] : ['-wgpu']), '-nodisplaycalibration', '-noSocialClub', '-pc:nosocialclub', ...(q.get('newgame') === '1' ? ['-noautoload'] : []), '-nonetwork', '-output', '-width=' + startSize[0], '-height=' + startSize[1], '-forceResolution', ...LOG_ARGS, ...ENGINE_ARGS, '-frameLimit=' + (q.get('fps') === '30' ? 2 : q.get('fps') === '0' ? 0 : 1),		// 游戏自身的帧率限制器：VSync 2（默认值）= 30 帧/秒，1 = 60 帧/秒；?fps=0 不限制帧率（用于诊断）。故事模式继续最新存档（沙盒模式跳过自动读取）；?newgame=1（-noautoload）改为从序章开始。
@@ -571,7 +572,7 @@ function installDebugPanel(memory, block) {
 	document.body.appendChild(panel);
 	let last = '', total = 0;
 	new BroadcastChannel('game-debug').onmessage = (ev) => { last = ev.data.last; total = ev.data.total; render(); };
-	const render = () => { const n = Atomics.load(dbg, 0); panel.textContent = '绘制调试  上限：' + (n < 0 ? '关闭（全部）' : n) + ' / ' + total + ' 次绘制/帧   [F1 -1  F2 +1  F3 -25  F4 +25  F5 全部  F6 记录日志]\n最后执行的绘制：' + (last || '-'); };
+	const render = () => { const n = Atomics.load(dbg, 0); setUiText(panel, () => getLanguage() === 'en' ? 'Draw debug  Limit: ' + (n < 0 ? 'Off (all)' : n) + ' / ' + total + ' draws/frame   [F1 -1  F2 +1  F3 -25  F4 +25  F5 All  F6 Log]\nLast draw: ' + (last || '-') : '绘制调试  上限：' + (n < 0 ? '关闭（全部）' : n) + ' / ' + total + ' 次绘制/帧   [F1 -1  F2 +1  F3 -25  F4 +25  F5 全部  F6 记录日志]\n最后执行的绘制：' + (last || '-')); };
 	addEventListener('keydown', (e) => {
 		const step = { F1: -1, F2: 1, F3: -25, F4: 25 }[e.code];
 		if (step !== undefined) {

@@ -1,3 +1,4 @@
+import { t, getLanguage, translateText, onLanguageChange } from '../i18n.js';
 import { normalizeServerAddress, displayServerAddress, normalizeRemoteServerAddress } from './server-address.js';
 
 export const SESSION_KEY = 'gta5.public.session';
@@ -24,11 +25,24 @@ export function cleanJoinServerOptions(snapshot, pageUrl = globalThis.location?.
       if (seen.has(display)) continue;
       seen.add(display);
       const id = text(value.id, 80), name = text(value.name, 80), role = text(value.role, 40);
-      result.push({ id, name, role, address, display,
+      const i18n = {};
+      for (const language of ['zh-CN', 'en']) {
+        const translated = value.i18n?.[language];
+        if (translated && typeof translated === 'object') {
+          const localName = text(translated.name, 80), localRole = text(translated.role, 40);
+          if (localName || localRole) i18n[language] = { name: localName, role: localRole };
+        }
+      }
+      result.push({ id, name, role, address, display, ...(Object.keys(i18n).length ? { i18n } : {}),
         label: [name, role, display].filter(Boolean).join(' · ') });
     } catch { /* 无效线路不影响其他线路，也不限制手动输入。 */ }
   }
   return result;
+}
+
+function serverOptionLabel(item) {
+  const localized = item.i18n?.[getLanguage()];
+  return [localized?.name || translateText(item.name), localized?.role || translateText(item.role), item.display].filter(Boolean).join(' · ');
 }
 
 export function readPublicPreferences(storage, pageUrl = globalThis.location?.href) {
@@ -87,18 +101,21 @@ export function installJoinModal({ onJoin } = {}) {
   overlay.className = 'online-join';
   overlay.hidden = true;
   overlay.innerHTML = `<section class="online-join__panel" role="dialog" aria-modal="true" aria-labelledby="online-join-title" aria-describedby="online-join-hint">
-    <div class="online-join__header"><div><p class="online-join__eyebrow">GTA V · 公共战局</p><h1 id="online-join-title">加入在线战局</h1></div><button class="online-join__close" type="button" aria-label="关闭加入战局">×</button></div>
+    <div class="online-join__header"><div><p class="online-join__eyebrow" data-i18n="join.eyebrow">${t('join.eyebrow')}</p><h1 id="online-join-title" data-i18n="join.title">${t('join.title')}</h1></div><button class="online-join__close" type="button" aria-label="${t('join.close')}">×</button></div>
     <form>
-      <label>您的昵称<input name="nickname" autocomplete="nickname" maxlength="48" placeholder="输入昵称" required></label>
-      <label>服务器 IP:端口<input name="server" type="text" list="online-join-server-options" autocomplete="off" spellcheck="false" placeholder="选择线路或输入 IP:端口" aria-describedby="online-join-server-hint" required><datalist id="online-join-server-options"></datalist><span class="online-join__hint" id="online-join-server-hint">-</span></label>
-      <label>角色预设<select name="preset"><option value="npc_male">随机男性 NPC</option><option value="npc_female">随机女性 NPC</option><option value="freemode_male">男性自由模式角色</option><option value="freemode_female">女性自由模式角色</option></select></label>
-      <p class="online-join__hint" id="online-join-hint">角色会生成随机服饰与适用妆容。选择同一条线路的玩家进入同一个 GTA V 公共战局。</p>
+      <label><span data-i18n="join.nickname">${t('join.nickname')}</span><input name="nickname" autocomplete="nickname" maxlength="48" placeholder="${t('join.nicknamePlaceholder')}" required></label>
+      <label><span data-i18n="join.server">${t('join.server')}</span><input name="server" type="text" list="online-join-server-options" autocomplete="off" spellcheck="false" placeholder="${t('join.serverPlaceholder')}" aria-describedby="online-join-server-hint" required><datalist id="online-join-server-options"></datalist><span class="online-join__hint" id="online-join-server-hint">-</span></label>
+      <label><span data-i18n="join.preset">${t('join.preset')}</span><select name="preset"><option value="npc_male" data-i18n="join.npc_male">${t('join.npc_male')}</option><option value="npc_female" data-i18n="join.npc_female">${t('join.npc_female')}</option><option value="freemode_male" data-i18n="join.freemode_male">${t('join.freemode_male')}</option><option value="freemode_female" data-i18n="join.freemode_female">${t('join.freemode_female')}</option></select></label>
+      <p class="online-join__hint" id="online-join-hint" data-i18n="join.hint">${t('join.hint')}</p>
       <p class="online-join__message" role="status" aria-live="polite"></p>
-      <button class="online-join__submit" type="submit">加入战局</button>
+      <button class="online-join__submit" type="submit">${t('join.submit')}</button>
     </form>
   </section>`;
   document.body.append(overlay);
   const form = overlay.querySelector('form');
+  // Browser-native validation messages follow browser settings rather than the
+  // launcher. Use the translated validation below for both required fields.
+  form.noValidate = true;
   const nickname = form.elements.namedItem('nickname');
   const server = form.elements.namedItem('server');
   const preset = form.elements.namedItem('preset');
@@ -113,7 +130,7 @@ export function installJoinModal({ onJoin } = {}) {
   const panel = readPanelPreferences();
   let savedName = '';
   try { savedName = localStorage.getItem('gta5.multiplayer.nickname') || ''; } catch { /* 存储被禁用时仍可加入。 */ }
-  nickname.value = query.get('name') || panel?.name || stored?.name || savedName || '玩家';
+  nickname.value = query.get('name') || panel?.name || stored?.name || savedName || t('join.defaultName');
   // 加入面板的默认线路只来自本次远程请求，不恢复旧 IP 或本机启动配置。
   let connectionAddress = null;
   server.value = '';
@@ -143,11 +160,29 @@ export function installJoinModal({ onJoin } = {}) {
   });
   preset.addEventListener('change', persistPanel);
 
-  const setMessage = (text) => { message.textContent = String(text || ''); };
+  let messageSource = '';
+  const setMessage = (text) => { messageSource = String(text || ''); message.textContent = translateText(messageSource); };
+  let serverHintSource = '-';
+  const setServerHint = (text) => { serverHintSource = text; serverHint.textContent = translateText(text); };
+  const renderLanguage = () => {
+    for (const element of overlay.querySelectorAll('[data-i18n]')) element.textContent = t(element.dataset.i18n);
+    overlay.querySelector('.online-join__close').setAttribute('aria-label', t('join.close'));
+    nickname.placeholder = t('join.nicknamePlaceholder'); server.placeholder = t('join.serverPlaceholder');
+    submitButton.textContent = t('join.submit');
+    message.textContent = translateText(messageSource); serverHint.textContent = translateText(serverHintSource);
+    if (!editedName && !query.has('name') && !panel && !stored && !savedName && ['玩家', 'Player'].includes(nickname.value)) nickname.value = t('join.defaultName');
+    for (let index = 0; index < serverList.children.length; index++) {
+      const item = serverOptions[index], option = serverList.children[index];
+      if (item) option.label = option.textContent = serverOptionLabel(item);
+    }
+  };
+  const stopLanguage = onLanguageChange(renderLanguage);
+  globalThis.addEventListener?.('pagehide', stopLanguage, { once: true });
+  renderLanguage();
   function clearServerOptions() {
     serverOptions = [];
     serverList.replaceChildren();
-    serverHint.textContent = '-';
+    setServerHint('-');
   }
   async function refreshServerOptions() {
     const request = ++remoteRequest;
@@ -156,7 +191,7 @@ export function installJoinModal({ onJoin } = {}) {
     if (!editedServer) { connectionAddress = null; server.value = ''; }
     const initialInput = server.value;
     clearServerOptions();
-    serverHint.textContent = '正在读取服务器线路…';
+    setServerHint('正在读取服务器线路…');
     const timeout = setTimeout(() => controller.abort(), 9000);
     try {
       const response = await fetch('/api/remote-config?refresh=1', { cache: 'no-store', signal: controller.signal });
@@ -167,11 +202,10 @@ export function installJoinModal({ onJoin } = {}) {
       for (const item of serverOptions) {
         const option = document.createElement('option');
         option.value = item.display;
-        option.label = item.label;
-        option.textContent = item.label;
+        option.label = option.textContent = serverOptionLabel(item);
         serverList.append(option);
       }
-      serverHint.textContent = serverOptions.length ? '可选择线路，也可手动输入 IP:端口。' : '-';
+      setServerHint(serverOptions.length ? '可选择线路，也可手动输入 IP:端口。' : '-');
       if (!editedServer && server.value === initialInput && serverOptions.length) {
         const preferred = serverOptions.find((item) => item.id === 'main') || serverOptions[0];
         connectionAddress = preferred.address;
@@ -251,7 +285,7 @@ export function installJoinModal({ onJoin } = {}) {
       if (resourceCheck === 'pending') resourceCheck = 'ready';
       submitButton.disabled = resourceCheck === 'missing';
       if (resourceCheck === 'missing') setMessage(RESOURCE_CHECK_MISSING);
-      else if (message.textContent === RESOURCE_CHECK_PENDING) setMessage('');
+      else if (messageSource === RESOURCE_CHECK_PENDING) setMessage('');
     });
   return { open, close, setMessage, get isOpen() { return !overlay.hidden; } };
 }

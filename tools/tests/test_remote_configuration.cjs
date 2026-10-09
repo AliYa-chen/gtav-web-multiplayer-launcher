@@ -1,6 +1,8 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
-const source=fs.readFileSync(path.resolve(__dirname,'../../client/multiplayer/remote-config.js'),'utf8');
+const i18nUrl='data:text/javascript;base64,'+Buffer.from(fs.readFileSync(path.resolve(__dirname,'../../client/i18n.js'),'utf8')).toString('base64');
+const i18nPromise=import(i18nUrl);
+const source=fs.readFileSync(path.resolve(__dirname,'../../client/multiplayer/remote-config.js'),'utf8').replace("'../i18n.js'",JSON.stringify(i18nUrl));
 const modulePromise=import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 test('游戏配置只采用受限HTTPS地址，忽略远程脚本和恶意协议',async()=>{
  const {cleanOnlineConfiguration}=await modulePromise;
@@ -57,4 +59,31 @@ test('定时请求失败立即清除上次文案，恢复联网后重新读取',
  }finally{
   stop?.();Object.assign(global,originals);
  }
+});
+
+
+test('远程在线标题按当前语言选择受限本地化配置，不采纳不安全翻译地址',async()=>{
+ const {cleanOnlineConfiguration}=await modulePromise;
+ const snapshot={source:'remote',stale:false,config:{oltitle:'https://base.example',i18n:{en:{oltitle:'Online Session'},'zh-CN':{oltitle:'公共战局'}}}};
+ assert.equal(cleanOnlineConfiguration(snapshot,'en').oltitle,'Online Session');
+ assert.equal(cleanOnlineConfiguration(snapshot,'zh-CN').oltitle,'公共战局');
+ snapshot.config.i18n.en.oltitle='javascript:alert(1)';
+ assert.equal(cleanOnlineConfiguration(snapshot,'en').oltitle,'-');
+});
+
+test('已打开的远程标题切换语言复用有效快照，不额外请求远程接口',async()=>{
+ const [{watchOnlineConfiguration},i18n]=await Promise.all([modulePromise,i18nPromise]);
+ const originals={fetch:global.fetch,setTimeout:global.setTimeout,clearTimeout:global.clearTimeout};
+ const changes=[],timers=new Map();let timerId=0,requests=0,stop;
+ try{
+  i18n.setLanguage('zh-CN');
+  global.setTimeout=(callback,delay)=>{timers.set(++timerId,{callback,delay});return timerId;};
+  global.clearTimeout=id=>timers.delete(id);
+  global.fetch=async()=>{requests++;return {ok:true,json:async()=>({source:'remote',stale:false,config:{oltitle:'Default',i18n:{'zh-CN':{oltitle:'公共战局'},en:{oltitle:'Online Session'}}}})};};
+  stop=watchOnlineConfiguration(value=>changes.push(value.oltitle));
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(changes.at(-1),'公共战局');i18n.setLanguage('en');
+  assert.equal(changes.at(-1),'Online Session');assert.equal(requests,1);
+  stop();const count=changes.length;i18n.setLanguage('zh-CN');assert.equal(changes.length,count);
+ }finally{stop?.();Object.assign(global,originals);}
 });

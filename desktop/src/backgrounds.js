@@ -12,16 +12,16 @@ import oceanview from './assets/backgrounds/oceanview.webp';
 import lounge from './assets/backgrounds/lounge.webp';
 
 export const backgrounds = Object.freeze([
-  { id: 'sunglasses', label: '海风与阳光', image: sunglasses },
-  { id: 'beach', label: '日落海滩', image: beach },
-  { id: 'lounge', label: '霓虹之夜', image: lounge },
-  { id: 'oceanview', label: '海景大道', image: oceanview },
-  { id: 'waterfront', label: '水岸时光', image: waterfront },
-  { id: 'boathouse', label: '码头船屋', image: boathouse },
-  { id: 'offroad', label: '荒野越野', image: offroad },
-  { id: 'wetlands', label: '湿地探险', image: wetlands },
-  { id: 'motel', label: '公路旅馆', image: motel },
-  { id: 'skatepark', label: '街头色彩', image: skatepark },
-  { id: 'forest', label: '山林午后', image: forest },
-  { id: 'neon', label: '夜色街角', image: neon },
+  { id: 'sunglasses', labelKey: 'background.sunglasses', image: sunglasses },
+  { id: 'beach', labelKey: 'background.beach', image: beach },
+  { id: 'lounge', labelKey: 'background.lounge', image: lounge },
+  { id: 'oceanview', labelKey: 'background.oceanview', image: oceanview },
+  { id: 'waterfront', labelKey: 'background.waterfront', image: waterfront },
+  { id: 'boathouse', labelKey: 'background.boathouse', image: boathouse },
+  { id: 'offroad', labelKey: 'background.offroad', image: offroad },
+  { id: 'wetlands', labelKey: 'background.wetlands', image: wetlands },
+  { id: 'motel', labelKey: 'background.motel', image: motel },
+  { id: 'skatepark', labelKey: 'background.skatepark', image: skatepark },
+  { id: 'forest', labelKey: 'background.forest', image: forest },
+  { id: 'neon', labelKey: 'background.neon', image: neon },
 ]);

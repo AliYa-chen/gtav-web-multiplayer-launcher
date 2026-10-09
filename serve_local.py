@@ -38,6 +38,14 @@ def _remote_url(value, schemes, limit=2048):
     return value
 
 
+def _remote_title(value):
+    """Same display-only title rule as the launcher: text or safe HTTPS."""
+    value = _remote_text(value, 160, optional=True)
+    if re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*:', value):
+        return _remote_url(value, ('https',), 160)
+    return value
+
+
 def _remote_host(host):
     try:
         ipaddress.ip_address(host)
@@ -72,6 +80,14 @@ def _remote_server(value):
     for key in ('health_url', 'status_url', 'websocket_url', 'ws_url'):
         if key in value:
             result[key] = _remote_url(value[key], ('https',) if key in ('health_url', 'status_url') else ('ws', 'wss'))
+    if 'i18n' in value:
+        translations = value['i18n']
+        if not isinstance(translations, dict) or len(translations) > 2 or any(key not in ('zh-CN', 'en') for key in translations):
+            raise ValueError('Invalid server translations')
+        result['i18n'] = {}
+        for locale, entry in translations.items():
+            if not isinstance(entry, dict): raise ValueError('Invalid server translation')
+            result['i18n'][locale] = {key: _remote_text(entry.get(key, ''), 80, optional=True) for key in ('name', 'role')}
     return result
 
 
@@ -86,7 +102,7 @@ def online_remote_configuration():
             raw = json.loads(payload)
         if not isinstance(raw, dict):
             raise ValueError('远程配置格式无效')
-        config = {'oltitle': _remote_url(raw.get('oltitle'), ('https',), 160)}
+        config = {'oltitle': _remote_title(raw.get('oltitle', ''))}
         for key in ('server', 'servers'):
             if key not in raw:
                 continue
@@ -99,6 +115,14 @@ def online_remote_configuration():
         config['servers'] = config.get('servers', config.get('server', []))
         if 'website' in raw:
             config['website'] = _remote_url(raw['website'], ('https',))
+        if 'i18n' in raw:
+            translations = raw['i18n']
+            if not isinstance(translations, dict) or len(translations) > 2 or any(key not in ('zh-CN', 'en') for key in translations):
+                raise ValueError('Invalid configuration translations')
+            config['i18n'] = {}
+            for locale, entry in translations.items():
+                if not isinstance(entry, dict): raise ValueError('Invalid translation')
+                config['i18n'][locale] = {'oltitle': _remote_title(entry.get('oltitle', ''))}
         return {'config': config, 'source': 'remote', 'stale': False}
     except (OSError, ValueError):
         return {'config': {'oltitle': ''}, 'source': 'unavailable', 'stale': True,
@@ -219,6 +243,8 @@ def resource_path(url_path, game_root=None, runtime_root=None):
         return CLIENT / 'index.html'
     if path == 'b/8b0b5899ed/loader.js':
         return CLIENT / 'loader.js'
+    if path == 'i18n.js':
+        return CLIENT / 'i18n.js'
     if path in ('engine/offline/game.wasm', 'engine/online/game.wasm'):
         selected = runtime / path.removeprefix('engine/')
         if not selected.resolve().is_relative_to(runtime.resolve()) or selected.resolve().is_relative_to(root.resolve()):
@@ -245,7 +271,10 @@ class LocalServer(ThreadingHTTPServer):
 
     def __init__(self, address, *, multiplayer_server=DEFAULT_ROOM_SERVER,
                  instance_name='玩家1', log_file=LOG_FILE, game_root=ROOT, runtime_root=RUNTIME_ROOT,
-                 resource_status=None):
+                 resource_status=None, language='system'):
+        if language not in ('system', 'zh-CN', 'en'):
+            raise ValueError('Unsupported language preference')
+        self.language = language
         self.multiplayer_server = multiplayer_server
         self.instance_name = instance_name
         self.log_file = Path(log_file)
@@ -297,6 +326,16 @@ class Handler(SimpleHTTPRequestHandler):
     def send_head(self):
         self.byte_range = None
         route = urlsplit(self.path)
+        if route.path == '/api/language':
+            body = json.dumps({'preference': self.server.language,
+                               'resolved': None if self.server.language == 'system' else self.server.language,
+                               'revision': 1}).encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            return io.BytesIO(body)
         try:
             resource_path(self.path, self.server.game_root, self.server.runtime_root)
         except RetiredEnginePath as error:
@@ -396,6 +435,16 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         url = urlsplit(self.path)
+        if url.path == '/api/language':
+            body = b'Language configuration is read-only.'
+            self.send_response(405)
+            self.send_header('Allow', 'GET, HEAD')
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if url.path not in ('/data/batch', '/log'):
             self.send_error(404)
             return
@@ -470,7 +519,7 @@ class Handler(SimpleHTTPRequestHandler):
 
 def create_local_servers(port=8000, instances=1, multiplayer_server=DEFAULT_ROOM_SERVER,
                          log_file=LOG_FILE, host='127.0.0.1', game_root=ROOT, runtime_root=RUNTIME_ROOT,
-                         resource_status=None):
+                         resource_status=None, language='system'):
     """创建若干独立本地实例；端口占用时寻找下一个可用端口。"""
     if not 0 <= port <= 65535 or not 1 <= instances <= 8:
         raise ValueError('端口须在 0～65535 之间，实例数量须在 1～8 之间')
@@ -485,7 +534,7 @@ def create_local_servers(port=8000, instances=1, multiplayer_server=DEFAULT_ROOM
                     server = LocalServer((host, candidate),
                                          multiplayer_server=multiplayer_server,
                                          instance_name='玩家%d' % (i + 1), log_file=log_file,
-                                         game_root=game_root, runtime_root=runtime_root, resource_status=resource_status)
+                                         game_root=game_root, runtime_root=runtime_root, resource_status=resource_status, language=language)
                     break
                 except OSError as exc:
                     if exc.errno != errno.EADDRINUSE or candidate == 0 or attempt == 99:
@@ -592,6 +641,7 @@ def main(argv=None):
     args.add_argument('--start-room-server', action='store_true', help='一并启动本机 Java 大厅，方便多用户测试；需要 Java 17+')
     args.add_argument('--java', default='java', help='Java 可执行文件路径，用于 --start-room-server')
     args.add_argument('--open', action='store_true', help='服务器就绪后打开默认浏览器')
+    args.add_argument('--language', choices=['system', 'zh-CN', 'en'], default='system', help='网页与游戏语言：跟随浏览器系统／中文／英文')
     args.add_argument('--log-file', type=Path, default=LOG_FILE,
                       help='保存 ?log=1 页面提交的本地诊断日志')
     options = args.parse_args(argv)
@@ -604,7 +654,7 @@ def main(argv=None):
                                              options.java, '127.0.0.1' if options.host == '127.0.0.1' else '0.0.0.0')
         servers = create_local_servers(options.port, options.instances, options.room_server,
                                        options.log_file.expanduser().resolve(), options.host,
-                                       resources['root'], resources['runtime_root'], resources)
+                                       resources['root'], resources['runtime_root'], resources,options.language)
     except (OSError, ValueError) as exc:
         stop_room_server(room_process)
         args.error('无法启动本地实例：%s' % exc)

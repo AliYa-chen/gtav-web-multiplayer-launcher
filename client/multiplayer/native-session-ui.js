@@ -17,27 +17,29 @@ self.createNativeSessionUI = function ({ ex, memory }) {
   const panelSupported = ['mpGetPausePanel', 'mpPausePanelName', 'mpBeginPauseContent', 'mpScaleformInt']
     .every((name) => typeof ex?.[name] === 'function');
   let buffer = 0, disposed = false, wasOpen = false;
-  let lastAttempt = -Infinity, lastSuccess = -Infinity, lastSignature = '', lastPanel = '';
+  let lastAttempt = -Infinity, lastSuccess = -Infinity, lastSignature = '', lastPanel = '', lastLanguage = '';
   let preparedSignature = '', preparedMemory = null;
 
   function reset() {
-    wasOpen = false; lastAttempt = -Infinity; lastSuccess = -Infinity; lastSignature = ''; lastPanel = '';
+    wasOpen = false; lastAttempt = -Infinity; lastSuccess = -Infinity; lastSignature = ''; lastPanel = ''; lastLanguage = '';
     preparedSignature = '';
   }
-  function cleanName(value) {
+  function cleanName(value, english) {
     // Scaleform 可解释 ~ 格式标签及 HTML；昵称只作为受限纯文字，不允许其改动布局。
     const text = typeof value === 'string' ? value : '';
     return Array.from(text.replace(/~[^~]*~/g, '').replace(/[~<>&"'\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, ''))
-      .slice(0, 32).join('').trim() || '玩家';
+      .slice(0, 32).join('').trim() || (english ? 'Player' : '玩家');
   }
-  function statusText(summary) {
-    if (summary.phase === 'leaving') return '正在離開戰局';
-    if (summary.phase === 'reconnecting' || (!summary.connected && summary.phase !== 'connecting')) return '正在重新連線';
-    if (summary.phase === 'connecting') return '正在連接戰局';
-    if (summary.phase === 'loading') return '正在同步世界';
-    return summary.connected ? '已連接公共戰局' : '正在連接戰局';
+  function statusText(summary, english) {
+    if (summary.phase === 'leaving') return english ? 'Leaving session' : '正在離開戰局';
+    if (summary.phase === 'reconnecting' || (!summary.connected && summary.phase !== 'connecting')) return english ? 'Reconnecting' : '正在重新連線';
+    if (summary.phase === 'connecting') return english ? 'Connecting to session' : '正在連接戰局';
+    if (summary.phase === 'loading') return english ? 'Synchronizing world' : '正在同步世界';
+    return summary.connected ? (english ? 'Connected to public session' : '已連接公共戰局')
+      : (english ? 'Connecting to session' : '正在連接戰局');
   }
   function texts(summary) {
+    const english = summary.language === 'en' || summary.language?.resolved === 'en';
     const count = Number.isSafeInteger(summary.player_count) ? Math.max(0, Math.min(1024, summary.player_count)) : 0;
     // 配置经过页面与启动器校验；这里再次拒绝格式指令、HTML和不安全协议。
     const candidate = summary.remote_config?.oltitle;
@@ -48,12 +50,13 @@ self.createNativeSessionUI = function ({ ex, memory }) {
       ? candidate : '-';
     return {
       titleMethod: 'SET_HEADER_TITLE', detailsMethod: 'SET_HEADING_DETAILS',
-      title: 'GTA V · 公共在線戰局', name: cleanName(summary.name),
-      count: '在線玩家：' + count, status: statusText(summary),
-      mode: '公共戰局 · GTA V 自由模式',
-      panelMethod: 'SHOW_WARNING_MESSAGE', panelTitle: 'GTA 線上模式',
-      panelBody: '線上模式伺服器狀態：' + address + '\n'
-        + statusText(summary) + ' · 在線玩家：' + count + '\n公共戰局 · GTA V 自由模式', empty: '',
+      title: english ? 'GTA V · Public Online Session' : 'GTA V · 公共在線戰局', name: cleanName(summary.name, english),
+      count: (english ? 'Online players: ' : '在線玩家：') + count, status: statusText(summary, english),
+      mode: english ? 'Public session · GTA V Free Mode' : '公共戰局 · GTA V 自由模式',
+      panelMethod: 'SHOW_WARNING_MESSAGE', panelTitle: english ? 'GTA Online' : 'GTA 線上模式',
+      panelBody: (english ? 'Online server status: ' : '線上模式伺服器狀態：') + address + '\n'
+        + statusText(summary, english) + (english ? ' · Online players: ' : ' · 在線玩家：') + count
+        + (english ? '\nPublic session · GTA V Free Mode' : '\n公共戰局 · GTA V 自由模式'), empty: '',
     };
   }
   function prepare(value) {
@@ -126,13 +129,15 @@ self.createNativeSessionUI = function ({ ex, memory }) {
         preparedSignature = signature;
       }
       const panel = currentPanel(), panelChanged = panel !== lastPanel;
+      const language = summary.language === 'en' || summary.language?.resolved === 'en' ? 'en' : 'zh-CN';
+      const languageChanged = language !== lastLanguage;
       // Header 保持原有限刷新频率；线上正文必须在每次前端尾部恢复，
       // 否则原单机脚本在两次刷新之间写回 Social Club 登录内容，造成交替闪烁。
-      const headerDue = justOpened || panelChanged || (now - lastAttempt >= 250
+      const headerDue = justOpened || panelChanged || languageChanged || (now - lastAttempt >= 250
         && (signature !== lastSignature || now - lastSuccess >= 750));
       let title = false, details = false, content = false, nativeFailure = false;
       if (headerDue) {
-        lastAttempt = now;
+        lastAttempt = now; lastLanguage = language;
         try {
           // 原 CPauseMenu::Update 的常规标题分支只有一个字符串。
           title = invoke('titleMethod', ['title']);

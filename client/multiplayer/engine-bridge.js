@@ -143,6 +143,7 @@ self.prepareMultiplayerBridge = function (imports) {
           phase: !packet?.connected ? 'reconnecting' : initialPlacement && packet?.world?.ready ? 'active' : 'loading',
           game_mode: 'public_freeroam',
           remote_config: packet?.remote_config,
+          language: packet?.language,
         });
       } catch { /* 前端回调失败不能抛回 WASM，也不能从这里改动实体或脚本上下文。 */ }
     };

@@ -7,6 +7,7 @@ mod lan;
 mod lan_ca_embedded;
 mod lan_bootstrap;
 mod ca_trust;
+mod language;
 
 use include_dir::{include_dir, Dir};
 use serde::{Deserialize, Serialize};
@@ -16,7 +17,7 @@ use tauri::{Emitter, Manager, State};
 static CLIENT: Dir<'_> = include_dir!("$OUT_DIR/embedded-client");
 
 #[derive(Default, Deserialize, Serialize)]
-struct Preferences { selected_directory: Option<String>, #[serde(default)] lan_settings: Option<lan::Settings> }
+struct Preferences { selected_directory: Option<String>, #[serde(default)] lan_settings: Option<lan::Settings>, #[serde(default)] language: Option<String> }
 struct Prepared { resources: resources::ResourceInfo, runtime: PathBuf, fonts: HashMap<String, PathBuf> }
 struct GameClient { id: u64, number: u64, primary: bool, guide: lan_bootstrap::BootstrapHandle, server: http_server::ServerHandle }
 struct ClientIdentity { id: u64, primary: bool }
@@ -25,10 +26,10 @@ struct Inner { selected: Option<String>, prepared: Option<Prepared>, clients: Ve
     lan_settings: lan::Settings, last_client_id: u64,
     lan_address: Option<String>, lan_fingerprint: Option<String> }
 struct LauncherState { inner: Mutex<Inner>, busy: Arc<AtomicBool>, remote_busy: Arc<AtomicBool>,
-    update_required: Arc<AtomicBool>, shutting_down: AtomicBool, remote: Arc<RwLock<serde_json::Value>> }
+    update_required: Arc<AtomicBool>, shutting_down: AtomicBool, remote: Arc<RwLock<serde_json::Value>>, language: language::SharedLanguage }
 impl Default for LauncherState {
     fn default() -> Self {
-        Self { inner: Mutex::new(Inner::default()), busy: Arc::new(AtomicBool::new(false)),
+        Self { inner: Mutex::new(Inner::default()), busy: Arc::new(AtomicBool::new(false)), language: language::shared(),
             remote_busy: Arc::new(AtomicBool::new(false)), update_required: Arc::new(AtomicBool::new(false)), shutting_down: AtomicBool::new(false), remote: Arc::new(RwLock::new(
                 serde_json::to_value(remote_config::ConfigSnapshot::default()).unwrap_or_default())) }
     }
@@ -43,7 +44,7 @@ fn acquire(state: &LauncherState) -> Result<BusyGuard, String> {
 
 #[derive(Serialize)]
 struct LauncherStatus { selected_directory: Option<String>, resources: Option<resources::ResourceInfo>, clients: Vec<ClientStatus>, running_urls: Vec<String>, invitation_urls: Vec<String>,
-    version: &'static str, platform: &'static str, update_required: bool, remote_configuration: serde_json::Value, lan: LanStatus }
+    version: &'static str, platform: &'static str, update_required: bool, remote_configuration: serde_json::Value, lan: LanStatus, language: language::LanguageConfig }
 #[derive(Serialize)]
 struct ClientStatus { id: u64, number: u64, primary: bool, running_url: String, invitation_url: String }
 #[derive(Serialize)]
@@ -100,7 +101,7 @@ fn snapshot(inner: &Inner, state: &LauncherState) -> LauncherStatus {
             running_url: client.server.url(), invitation_url: client.guide.url() }).collect(),
         running_urls: inner.clients.iter().map(|client| client.server.url()).collect(),
         invitation_urls: inner.clients.iter().map(|client| client.guide.url()).collect(), version: env!("CARGO_PKG_VERSION"), platform: platform_key(),
-        update_required, remote_configuration, lan: LanStatus { settings: inner.lan_settings.clone(), addresses: lan::addresses(),
+        update_required, remote_configuration, language: language::snapshot(&state.language), lan: LanStatus { settings: inner.lan_settings.clone(), addresses: lan::addresses(),
             running_url: primary_client(inner).map(|client| client.server.url()), guide_url: primary_client(inner).map(|client| client.guide.url()),
             host_address: inner.lan_address.clone(), ca_fingerprint: inner.lan_fingerprint.clone().or_else(|| ca_trust::fingerprint().ok()) } }
 }
@@ -108,11 +109,23 @@ fn preferences_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     app.path().app_config_dir().map(|p| p.join("launcher.json")).map_err(|e| e.to_string())
 }
 fn save_preferences(app: &tauri::AppHandle, inner: &Inner) -> Result<(), String> {
+    let preference=app.try_state::<LauncherState>().map(|state| language::snapshot(&state.language).preference);
+    save_preferences_with_language(app, inner, preference)
+}
+fn save_preferences_with_language(app: &tauri::AppHandle, inner: &Inner, preference: Option<String>) -> Result<(), String> {
     let path = preferences_path(app)?;
-    fs::create_dir_all(path.parent().ok_or("启动器设置目录无效")?).map_err(|e| e.to_string())?;
-    let bytes = serde_json::to_vec_pretty(&Preferences { selected_directory: inner.selected.clone(),
-        lan_settings: Some(inner.lan_settings.clone()) }).map_err(|e| e.to_string())?;
-    fs::write(&path, bytes).map_err(|e| format!("无法保存启动器设置：{e}"))
+    write_preferences(&path,&Preferences { selected_directory: inner.selected.clone(),
+        lan_settings: Some(inner.lan_settings.clone()), language: preference })
+}
+fn write_preferences(path: &Path, preferences: &Preferences) -> Result<(), String> {
+    use std::io::Write;
+    let parent=path.parent().ok_or("启动器设置目录无效")?;
+    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let bytes=serde_json::to_vec_pretty(preferences).map_err(|e|e.to_string())?;
+    let mut pending=tempfile::NamedTempFile::new_in(parent).map_err(|e|format!("无法保存启动器设置：{e}"))?;
+    pending.write_all(&bytes).and_then(|_|pending.as_file().sync_all()).map_err(|e|format!("无法保存启动器设置：{e}"))?;
+    pending.persist(path).map_err(|e|format!("无法保存启动器设置：{e}"))?;
+    Ok(())
 }
 fn embedded_client() -> HashMap<String, &'static [u8]> {
     fn visit(directory: &'static Dir<'static>, files: &mut HashMap<String, &'static [u8]>) {
@@ -131,10 +144,22 @@ fn launcher_status(state: State<'_, LauncherState>) -> Result<LauncherStatus, St
     let inner = state.inner.lock().map_err(|e| e.to_string())?;
     Ok(snapshot(&inner, &state))
 }
+#[tauri::command]
+fn set_language(app: tauri::AppHandle,state: State<'_,LauncherState>,language: String)->Result<LauncherStatus,String>{
+    let inner=state.inner.lock().map_err(|e|e.to_string())?;
+    let previous=language::snapshot(&state.language);
+    let next=language::LanguageConfig::with_preference(&language,previous.revision.checked_add(1).ok_or("Language revision exhausted.")?)?;
+    // Keep the live setting unchanged until persistence succeeds, including for polling Web clients.
+    save_preferences_with_language(&app,&inner,Some(next.preference.clone()))?;
+    *state.language.write().map_err(|e|e.to_string())?=next.clone();
+    let _=app.emit("language-change",next);
+    update_native_language(&app,&state);
+    Ok(snapshot(&inner,&state))
+}
 
 #[tauri::command]
-async fn choose_game_directory() -> Result<Option<String>, String> {
-    Ok(rfd::AsyncFileDialog::new().set_title("选择游戏资源目录（或包含 mirror 的外层目录）")
+async fn choose_game_directory(state: State<'_,LauncherState>) -> Result<Option<String>, String> {
+    Ok(rfd::AsyncFileDialog::new().set_title(language::snapshot(&state.language).text("选择游戏资源目录（或包含 mirror 的外层目录）","Select your game resources folder (or its outer mirror folder)"))
         .pick_folder().await.map(|file| file.path().to_string_lossy().into_owned()))
 }
 
@@ -174,20 +199,21 @@ async fn prepare_game(app: tauri::AppHandle, state: State<'_, LauncherState>, se
 #[cfg(test)]
 fn start_client(prepared: &Prepared, lan: lan::PreparedLan, index: usize, log_dir: &Path,
     remote: Arc<RwLock<serde_json::Value>>, multiplayer_server: String) -> Result<GameClient, String> {
-    start_client_with_identity(prepared, lan, ClientIdentity { id: index as u64, primary: index == 1 }, log_dir, remote, multiplayer_server)
+    start_client_with_identity(prepared, lan, ClientIdentity { id: index as u64, primary: index == 1 }, log_dir, remote, multiplayer_server, language::shared())
 }
 
 fn start_client_with_identity(prepared: &Prepared, lan: lan::PreparedLan, identity: ClientIdentity,
-    log_dir: &Path, remote: Arc<RwLock<serde_json::Value>>, multiplayer_server: String) -> Result<GameClient, String> {
+    log_dir: &Path, remote: Arc<RwLock<serde_json::Value>>, multiplayer_server: String, language: language::SharedLanguage) -> Result<GameClient, String> {
     let ip = lan.config.address;
     let server = http_server::start(prepared.resources.clone(), prepared.runtime.clone(), embedded_client(), http_server::ServerConfig {
         online_ready: true, instance_name: format!("玩家{}", identity.id),
         log_file: log_dir.join(format!("browser-{}.log", identity.id)), preferred_port: Some(lan.settings.port),
         font_overrides: prepared.fonts.clone(), remote_configuration: remote, multiplayer_server,
+        language: language.clone(),
         lan: Some(lan.config), ..Default::default()
     })?;
     // 引导端口不可用时回滚 HTTPS，只有两者都成功才发布客户端。
-    let guide = lan_bootstrap::start(ip, lan.settings.http_port, server.port(), lan.ca_certificate, lan.fingerprint)?;
+    let guide = lan_bootstrap::start_with_language(ip, lan.settings.http_port, server.port(), lan.ca_certificate, lan.fingerprint,language)?;
     Ok(GameClient { id: identity.id, number: identity.id, primary: identity.primary, guide, server })
 }
 
@@ -230,7 +256,7 @@ async fn start_game(app: tauri::AppHandle, state: State<'_, LauncherState>, addi
         .unwrap_or_else(|| "183.66.27.21:47485".to_string());
     let id = identity.id;
     let client = start_client_with_identity(prepared, lan, identity, &app.path().app_log_dir().map_err(|e| e.to_string())?,
-        state.remote.clone(), multiplayer_server)?;
+        state.remote.clone(), multiplayer_server,state.language.clone())?;
     inner.last_client_id = id;
     inner.clients.push(client);
     inner.lan_address = Some(address);
@@ -344,8 +370,9 @@ async fn install_lan_ca(app: tauri::AppHandle, state: State<'_, LauncherState>) 
 async fn save_lan_ca_certificate(state: State<'_, LauncherState>) -> Result<Option<String>, String> {
     ensure_current_launcher(&state)?;
     let _guard = acquire(&state)?;
-    let Some(file) = rfd::AsyncFileDialog::new().set_title("保存局域网 CA 公共证书")
-        .set_file_name("GTA5DATA-LAN-CA.cer").add_filter("CA 公共证书", &["cer", "crt"])
+    let locale=language::snapshot(&state.language);
+    let Some(file) = rfd::AsyncFileDialog::new().set_title(locale.text("保存局域网 CA 公共证书","Save the LAN CA public certificate"))
+        .set_file_name("GTA5DATA-LAN-CA.cer").add_filter(locale.text("CA 公共证书","CA public certificate"), &["cer", "crt"])
         .save_file().await else { return Ok(None); };
     ensure_current_launcher(&state)?;
     let path = file.path().to_owned();
@@ -423,41 +450,57 @@ fn open_game_resource_page() -> Result<(), String> {
         .map_err(|_| "无法打开游戏资源页面，请检查默认浏览器设置。".to_string())
 }
 
+fn update_native_language(app: &tauri::AppHandle,state: &LauncherState) {
+    let locale=language::snapshot(&state.language);
+    if let Some(window)=app.get_webview_window("main") {
+        let _=window.set_title(locale.text("GTA V 公共战局 · 启动器","GTA V Public Session · Launcher"));
+    }
+    let _=apply_native_menu(app,state);
+}
+fn apply_native_menu(app: &tauri::AppHandle,state: &LauncherState)->Result<(),tauri::Error>{
+            // 默认 macOS 菜单仍提供全屏和最大化；固定窗口只保留必要系统操作。
+    #[cfg(target_os = "macos")]
+    {
+                use tauri::menu::{Menu, Submenu, PredefinedMenuItem};
+                let locale=language::snapshot(&state.language);
+                let application = Submenu::with_items(app, "GTA5Data", true, &[
+                    &PredefinedMenuItem::hide(app, Some(locale.text("隐藏启动器","Hide Launcher")))?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::quit(app, Some(locale.text("退出启动器","Quit Launcher")))?,
+                ])?;
+                let edit = Submenu::with_items(app, locale.text("编辑","Edit"), true, &[
+                    &PredefinedMenuItem::undo(app, Some(locale.text("撤销","Undo")))?,
+                    &PredefinedMenuItem::redo(app, Some(locale.text("重做","Redo")))?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::cut(app, Some(locale.text("剪切","Cut")))?,
+                    &PredefinedMenuItem::copy(app, Some(locale.text("复制","Copy")))?,
+                    &PredefinedMenuItem::paste(app, Some(locale.text("粘贴","Paste")))?,
+                    &PredefinedMenuItem::select_all(app, Some(locale.text("全选","Select All")))?,
+                ])?;
+                let window = Submenu::with_items(app, locale.text("窗口","Window"), true, &[
+                    &PredefinedMenuItem::minimize(app, Some(locale.text("最小化","Minimize")))?,
+                    &PredefinedMenuItem::close_window(app, Some(locale.text("关闭","Close")))?,
+                ])?;
+                app.set_menu(Menu::with_items(app, &[&application, &edit, &window])?)?;
+            }
+    #[cfg(not(target_os = "macos"))]
+    let _=(app,state);
+    Ok(())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(LauncherState::default())
         .setup(|app| {
-            // 默认 macOS 菜单仍提供全屏和最大化；固定窗口只保留必要系统操作。
-            #[cfg(target_os = "macos")]
-            {
-                use tauri::menu::{Menu, Submenu, PredefinedMenuItem};
-                let application = Submenu::with_items(app, "GTA5Data", true, &[
-                    &PredefinedMenuItem::hide(app, Some("隐藏启动器"))?,
-                    &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::quit(app, Some("退出启动器"))?,
-                ])?;
-                let edit = Submenu::with_items(app, "编辑", true, &[
-                    &PredefinedMenuItem::undo(app, Some("撤销"))?,
-                    &PredefinedMenuItem::redo(app, Some("重做"))?,
-                    &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::cut(app, Some("剪切"))?,
-                    &PredefinedMenuItem::copy(app, Some("复制"))?,
-                    &PredefinedMenuItem::paste(app, Some("粘贴"))?,
-                    &PredefinedMenuItem::select_all(app, Some("全选"))?,
-                ])?;
-                let window = Submenu::with_items(app, "窗口", true, &[
-                    &PredefinedMenuItem::minimize(app, Some("最小化"))?,
-                    &PredefinedMenuItem::close_window(app, Some("关闭"))?,
-                ])?;
-                app.set_menu(Menu::with_items(app, &[&application, &edit, &window])?)?;
-            }
             let settings = preferences_path(app.handle()).ok().and_then(|path| fs::read(path).ok())
                 .and_then(|bytes| serde_json::from_slice::<Preferences>(&bytes).ok()).unwrap_or_default();
             let state = app.state::<LauncherState>();
             let mut inner = state.inner.lock().unwrap();
             inner.selected = settings.selected_directory;
             inner.lan_settings = settings.lan_settings.unwrap_or_default();
+            *state.language.write().unwrap()=language::LanguageConfig::with_preference(settings.language.as_deref().unwrap_or("system"),1).unwrap_or_default();
             drop(inner);
+            update_native_language(app.handle(),&state);
             let remote = state.remote.clone(); let busy = state.remote_busy.clone();
             let update_required = state.update_required.clone();
             let handle = app.handle().clone();
@@ -480,7 +523,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![launcher_status, choose_game_directory, prepare_game, start_game, stop_game, stop_game_client, open_game,
             remote_configuration, open_update_download, open_project_website, open_game_resource_page,
-            save_lan_settings, check_lan_ca_status, install_lan_ca, save_lan_ca_certificate])
+            save_lan_settings, check_lan_ca_status, install_lan_ca, save_lan_ca_certificate, set_language])
         .build(tauri::generate_context!()).expect("启动桌面界面失败")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
@@ -531,6 +574,32 @@ pub fn verify_resources(selected: &Path, cache: &Path) -> Result<serde_json::Val
 #[cfg(test)]
 mod update_gate_tests {
     use super::*;
+
+    #[test]
+    fn older_preferences_keep_the_selected_resources_and_default_to_system_language() {
+        let old: Preferences=serde_json::from_str(r#"{"selected_directory":"/games/player-data"}"#).unwrap();
+        assert_eq!(old.selected_directory.as_deref(),Some("/games/player-data"));
+        assert!(old.language.is_none());
+        let saved=Preferences { language:Some("en".into()),..old };
+        let reloaded:Preferences=serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap();
+        assert_eq!(reloaded.language.as_deref(),Some("en"));
+    }
+
+    #[test]
+    fn preferences_replace_atomically_without_rewriting_linked_files() {
+        let temp=tempfile::tempdir().unwrap();
+        let path=temp.path().join("launcher.json");
+        fs::write(&path,b"previous preferences").unwrap();
+        let linked=temp.path().join("player-original");
+        fs::hard_link(&path,&linked).unwrap();
+        write_preferences(&path,&Preferences { language:Some("en".into()),..Default::default() }).unwrap();
+        assert_eq!(fs::read(&linked).unwrap(),b"previous preferences");
+        let saved:Preferences=serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.language.as_deref(),Some("en"));
+        let blocked=temp.path().join("directory");fs::create_dir(&blocked).unwrap();
+        assert!(write_preferences(&blocked,&saved).is_err());
+        assert_eq!(fs::read(&path).unwrap(),serde_json::to_vec_pretty(&saved).unwrap());
+    }
 
     fn fresh_release(version: &str) -> remote_config::ConfigSnapshot {
         remote_config::ConfigSnapshot {

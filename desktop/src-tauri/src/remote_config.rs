@@ -31,6 +31,8 @@ pub struct DownloadInfo {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerInfo {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub i18n: BTreeMap<String, ServerTranslation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     pub address: String,
@@ -47,9 +49,22 @@ pub struct ServerInfo {
     #[serde(default, alias = "ws_url", skip_serializing_if = "Option::is_none")]
     pub websocket_url: Option<String>,
 }
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServerTranslation {
+    #[serde(default)] pub name: String,
+    #[serde(default)] pub role: String,
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConfigTranslation {
+    #[serde(default)] pub oltitle: String,
+    #[serde(default)] pub release_notes: String,
+    #[serde(default)] pub announcements: Vec<Announcement>,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoteConfig {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub i18n: BTreeMap<String, ConfigTranslation>,
     pub oltitle: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub website: Option<String>,
@@ -70,7 +85,7 @@ pub struct RemoteConfig {
 
 impl Default for RemoteConfig {
     fn default() -> Self {
-        Self { oltitle: String::new(), website: None,
+        Self { i18n: BTreeMap::new(), oltitle: String::new(), website: None,
             server: None, servers: Vec::new(), announcements: Vec::new(), latest_version: None,
             downloads: BTreeMap::new(), release_notes: String::new() }
     }
@@ -117,6 +132,7 @@ enum RawServer {
 
 #[derive(Default, Deserialize)]
 struct RawConfig {
+    #[serde(default)] i18n: BTreeMap<String, ConfigTranslation>,
     #[serde(default)]
     oltitle: Option<String>,
     #[serde(default)]
@@ -197,6 +213,12 @@ fn clean_title(value: &str) -> Result<String, String> {
 }
 
 fn clean_server(mut server: ServerInfo) -> Result<ServerInfo, String> {
+    if server.i18n.len()>2 { return Err("Too many server translations.".into()); }
+    for (locale, value) in &mut server.i18n {
+        if !matches!(locale.as_str(),"zh-CN"|"en") { return Err("Unsupported translation language.".into()); }
+        value.name=text(&value.name,80,"server.i18n.name")?;
+        value.role=text(&value.role,80,"server.i18n.role")?;
+    }
     server.id = server.id.as_deref().map(|value| -> Result<String, String> {
         let value = text(value, 64, "server.id")?;
         if value.is_empty() || !value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
@@ -352,7 +374,23 @@ fn clean_config(raw: RawConfig) -> Result<RemoteConfig, String> {
         announcement.url = announcement.url.as_deref().map(https_url).transpose()?;
     }
     let notes = if raw.release_notes.is_empty() { update.release_notes } else { raw.release_notes };
+    let mut translations=raw.i18n;
+    if translations.len()>2 { return Err("Too many configuration translations.".into()); }
+    for (locale,translation) in &mut translations {
+        if !matches!(locale.as_str(),"zh-CN"|"en") { return Err("Unsupported translation language.".into()); }
+        translation.oltitle=clean_title(&translation.oltitle)?;
+        translation.release_notes=text(&translation.release_notes,8192,"i18n.release_notes")?;
+        if translation.announcements.len()>24 { return Err("Too many translated announcements.".into()); }
+        for announcement in &mut translation.announcements {
+            announcement.title=text(&announcement.title,120,"i18n.announcement.title")?;
+            if announcement.title.is_empty() { return Err("Translated announcement title is empty.".into()); }
+            announcement.body=text(&announcement.body,4096,"i18n.announcement.body")?;
+            announcement.date=announcement.date.as_deref().map(|value|text(value,40,"i18n.announcement.date")).transpose()?;
+            announcement.url=announcement.url.as_deref().map(https_url).transpose()?;
+        }
+    }
     Ok(RemoteConfig {
+        i18n: translations,
         oltitle: raw.oltitle.as_deref().map(clean_title).transpose()?.unwrap_or_default(),
         website: raw.website.as_deref().map(https_url).transpose()?,
         server, servers, announcements, latest_version, downloads,
@@ -442,6 +480,18 @@ pub fn verify_download(bytes: &[u8], expected_sha256: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn translated_display_metadata_roundtrips_but_cannot_replace_endpoints() {
+        let raw=serde_json::json!({"oltitle":"https://gtav.2t.hk","server":{"address":"example.com:8787",
+            "i18n":{"en":{"name":"Public Session","role":"Main"}}},"i18n":{"en":{"release_notes":"Language support",
+            "announcements":[{"title":"Welcome","body":"Shared world"}]}}});
+        let config=super::parse_config(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        assert_eq!(config.i18n["en"].release_notes,"Language support");
+        assert_eq!(config.server.as_ref().unwrap().i18n["en"].name,"Public Session");
+        assert_eq!(super::parse_config(&serde_json::to_vec(&config).unwrap()).unwrap(),config);
+        let unsafe_data=serde_json::json!({"i18n":{"en":{"announcements":[{"title":"Bad","url":"file:///etc/passwd"}]}}});
+        assert!(super::parse_config(&serde_json::to_vec(&unsafe_data).unwrap()).is_err());
+    }
     use super::*;
 
     #[test]

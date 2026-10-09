@@ -1,3 +1,4 @@
+import { getLanguage, translateText, onLanguageChange } from '../i18n.js';
 import { normalizeServerAddress } from './server-address.js';
 import { modelForPreset, normalizeAppearance, randomAppearance } from './appearance.js';
 import { createWorldState, cleanWorldTransform, cleanSessionPolicy } from './world-state.js';
@@ -173,12 +174,12 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   let pendingShot = null, latestLocalState = null;
   let lastSentState = null, lastCombatResultSequence = -1;
   let lastStateSentAt = -Infinity, lastShotSentAt = -Infinity;
-  let lastStatus = '';
+  let lastStatus = '', latestStatusSource = null;
   let readyResolve, readyReject, initialDone = false;
   const ready = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
   // 首次连接失败由入口页处理；后续断线保持游戏运行并自动重连。
   const firstTimer = setTimeout(() => {
-    if (!initialDone) { initialDone = true; readyReject(new Error('连接超时，请检查服务器地址及端口后重试。')); }
+    if (!initialDone) { initialDone = true; readyReject(new Error(translateText('连接超时，请检查服务器地址及端口后重试。'))); }
   }, 12000);
   function releaseIdentityLock() {
     lockGeneration++;
@@ -222,7 +223,8 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     }
   }
   function status(phase, text) {
-    const value = { phase, text, server: address, client_id: clientId,
+    latestStatusSource = { phase, text };
+    const value = { phase, text: translateText(text), server: address, client_id: clientId,
       connected: Boolean(room && profiled), members: room?.members.length || 0,
       peers: [...peers.keys()].filter((id) => id !== clientId).length };
     const encoded = JSON.stringify(value);
@@ -239,7 +241,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     const ownState = connected && resumed ? peers.get(clientId)?.state : null;
     const cleanResumeState = ownState ? cleanPlayerState(ownState) : null;
     const resumeState = cleanResumeState ? { seq: ownState.seq, ...cleanResumeState } : null;
-    emit({ type: 'session', connected, client_id: connected ? clientId : null,
+    emit({ type: 'session', language: getLanguage(), connected, client_id: connected ? clientId : null,
       members: connected ? room.members.map(({ id, name, connected }) => ({ id, name, connected: connected !== false })) : [],
       peers: connected ? [...peers.values()] : [],
       combat: connected ? [...combat.values()] : [],
@@ -255,6 +257,11 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
       avatar: preferences.preset.endsWith('_female') ? 'female' : 'male', preset: preferences.preset, seed: preferences.seed,
       model: modelForPreset(preferences), appearance_spec: randomAppearance(preferences) });
   }
+  const stopLanguage = onLanguageChange(() => {
+    if (stopped) return;
+    postSession();
+    if (latestStatusSource) status(latestStatusSource.phase, latestStatusSource.text);
+  });
   function postWorld() {
     if (supportsWorldV2) emit({ type: 'world_state_v2', ...world.state() });
   }
@@ -1011,14 +1018,14 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   }
   function close() {
     if (stopped) return;
-    stopped = true; clearTimeout(firstTimer); clearTimeout(reconnectTimer);
+    stopped = true; stopLanguage(); clearTimeout(firstTimer); clearTimeout(reconnectTimer);
     disconnect('', false);
     removeEventListener('pagehide', close);
     removeEventListener('online', checkConnection);
     document.removeEventListener('visibilitychange', onVisibilityChange);
     releaseIdentityLock();
     receiver = null; pendingControls.length = 0; pendingWorldEvents.clear();
-    if (!initialDone) { initialDone = true; readyReject(new Error('已取消连接。')); }
+    if (!initialDone) { initialDone = true; readyReject(new Error(translateText('已取消连接。'))); }
   }
   addEventListener('pagehide', close, { once: true });
   addEventListener('online', checkConnection);

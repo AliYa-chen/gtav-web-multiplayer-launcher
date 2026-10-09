@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import * as presentation from '../src/view-state.js';
+import * as internationalization from '../src/i18n.js';
 
 const source = (await readFile(new URL('../src/main.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '');
 const tick = () => new Promise((resolve) => setImmediate(resolve));
@@ -16,10 +17,11 @@ async function launcher(desktop = true, options = {}) {
   let layout = { detailsHeight: 170, addressTop: 24, cardHeight: 60, rowGap: 7, ...options.layout };
   let lan = { settings: { port: 8443, http_port: 8442 }, addresses: ['192.168.31.225'], running_url: null, guide_url: null, host_address: null, ca_fingerprint: null, ...options.lan };
   let caSystemStatus = options.caSystemStatus || { installed: false, trusted: false, fingerprint: null, message: '' };
+  let language = options.language || { preference: 'system', resolved: 'zh-CN', revision: 0 };
   let remoteFailure = false;
   let resources = options.resources === undefined ? { manifest_file_count: 5814 } : options.resources;
   let remote = { config: { oltitle: 'https://gtav.2t.hk', latest_version: '0.2.5', downloads: { windows_x64: { url: 'https://oss.2t.hk/launcher.exe', sha256: 'a'.repeat(64) } }, announcements: [{ title: '<img>', body: '<script>unsafe</script>' }] }, source: 'remote' };
-  const status = () => ({ selected_directory: options.selected === undefined ? '/游戏资源' : options.selected, resources, clients,
+  const status = () => ({ language, selected_directory: options.selected === undefined ? '/游戏资源' : options.selected, resources, clients,
     running_urls: clients.map((client) => client.running_url), invitation_urls: clients.map((client) => client.invitation_url), lan, version: '0.2.5', platform: 'windows_x64', remote_configuration: remote });
   let renderCount = 0, rendered = '';
   const app = { get innerHTML() { return rendered; }, set innerHTML(value) { rendered = value; renderCount++; }, addEventListener(name, callback) { events.set(`app:${name}`, callback); } };
@@ -52,13 +54,14 @@ async function launcher(desktop = true, options = {}) {
     return id ? updateButtons().find((node) => node.id === id) || null : null;
   }, addEventListener(name, callback) { events.set(`document:${name}`, callback); } };
   const context = vm.createContext({
-    ...presentation, html: presentation.escapeHtml, metadata: { version: '0.2.5' }, backgrounds: [{ id: 'sunglasses', label: '海风', image: '/sunglasses.webp' }, { id: 'beach', label: '海滩', image: '/beach.webp' }],
+    ...presentation, ...internationalization, html: presentation.escapeHtml, metadata: { version: '0.2.5' }, backgrounds: [{ id: 'sunglasses', labelKey: 'background.sunglasses', image: '/sunglasses.webp' }, { id: 'beach', labelKey: 'background.beach', image: '/beach.webp' }],
     document, localStorage: { getItem: (key) => values.get(key), setItem: (key, value) => values.set(key, value) }, isTauri: () => desktop,
-    navigator: options.clipboard === false ? {} : { clipboard: { writeText: async (text) => { copied.push(text); } } },
+    navigator: { language: options.browserLanguage || 'zh-CN', languages: [options.browserLanguage || 'zh-CN'], ...(options.clipboard === false ? {} : { clipboard: { writeText: async (text) => { copied.push(text); } } }) },
     listen: async (name, callback) => { events.set(`tauri:${name}`, callback); return () => {}; }, invoke: async (command, args) => {
       calls.push({ command, args });
-      if (failures.has(command)) throw new Error(`${command} failed`);
+      if (failures.has(command)) throw options.commandErrors?.[command] || new Error(`${command} failed`);
       if (held.has(command)) return await held.get(command).promise;
+      if (command === 'set_language') { language = { preference: args.language, resolved: args.language === 'system' ? options.browserLanguage || 'zh-CN' : args.language, revision: language.revision + 1 }; events.get('tauri:language-change')?.({ payload: language }); }
       if (command === 'install_lan_ca') return 'BinGo Root CA 已安装并信任，请重启浏览器后访问 HTTPS 游戏。';
       if (command === 'check_lan_ca_status') return caSystemStatus;
       if (command === 'save_lan_ca_certificate') return options.caSaveResult === undefined ? '/证书/BinGo Root CA.crt' : options.caSaveResult;
@@ -108,6 +111,7 @@ async function launcher(desktop = true, options = {}) {
     setRemote(value) { remote = value; remoteFailure = false; }, failRemote() { remoteFailure = true; },
     failCommand(command, failed = true) { failed ? failures.add(command) : failures.delete(command); },
     hold(command) { let resolve; const promise = new Promise((accept) => { resolve = accept; }); held.set(command, { promise }); return (value = status()) => { held.delete(command); resolve(value); }; },
+    async changeLanguage(value) { await events.get('app:change')({ target: { id: 'launcher-language', value } }); flushFrames(); },
     input(field, value) { events.get('app:input')({ target: { dataset: { lanField: field }, value } }); },
     async click(id, dataset = {}) { const button = { id, dataset, disabled: false }; await events.get('app:click')({ target: { closest: () => button } }); flushFrames(); } };
 }
@@ -397,8 +401,8 @@ test('背景设置保留所有可选场景，关闭按钮与背景遮罩均可�
   const before = ui.calls.length;
   await ui.click('settings-toggle');
   assert.deepEqual([...ui.app.innerHTML.matchAll(/data-background="([^"]+)"/g)].map((match) => match[1]), ['sunglasses', 'beach']);
-  assert.match(ui.app.innerHTML, /aria-label="选择背景：海风"/);
-  assert.match(ui.app.innerHTML, /aria-label="选择背景：海滩"/);
+  assert.match(ui.app.innerHTML, /aria-label="选择背景：海风与阳光"/);
+  assert.match(ui.app.innerHTML, /aria-label="选择背景：日落海滩"/);
   await ui.click('picker-close');
   assert.doesNotMatch(ui.app.innerHTML, /id="background-picker"/);
   await ui.click('settings-toggle');
@@ -776,4 +780,112 @@ test('安装后等待旧查询完成再重新检查，系统已信任不保留�
   finish({ installed: false, trusted: false }); await installing;
   assert.equal(ui.calls.filter(call => call.command === 'check_lan_ca_status').length, queries + 1);
   assert.doesNotMatch(ui.app.innerHTML, /ca-trust-actions|id="ca-install"|id="ca-save"|install_lan_ca failed|自动安装未完成/);
+});
+
+test('启动器以持久语言为准，系统为英文仍能恢复中文；英文配置覆盖浏览器语言', async () => {
+  const chinese = await launcher(true, { browserLanguage: 'en-US', language: { preference: 'zh-CN', resolved: 'zh-CN', revision: 3 } });
+  assert.equal(chinese.document.documentElement.lang, 'zh-CN');
+  assert.match(chinese.app.innerHTML, /选择游戏资源/);
+  const english = await launcher(true, { browserLanguage: 'zh-CN', language: { preference: 'en', resolved: 'en', revision: 2 }, selected: '', resources: null });
+  assert.equal(english.document.documentElement.lang, 'en');
+  assert.equal(english.document.title, 'GTA V Public Sessions · Launcher');
+  assert.match(english.app.innerHTML, /Select game resources|No game resources folder selected/);
+  assert.match(english.app.innerHTML, /Install and trust CA|Download CA certificate/);
+  assert.doesNotMatch(english.app.innerHTML, /选择游戏资源|尚未选择游戏资源目录|启动游戏/);
+});
+
+test('语言下拉立即翻译已启动客户端、完成消息、ARIA与共享设置，并交由后端持久化', async () => {
+  const ui = await launcher(); await ui.click('launch'); await ui.click('additional');
+  await ui.click('settings-toggle'); await ui.changeLanguage('en');
+  assert.deepEqual(ui.calls.filter((call) => call.command === 'set_language').map((call) => JSON.stringify(call.args)), ['{"language":"en"}']);
+  assert.match(ui.app.innerHTML, /value="en" selected/);
+  assert.match(ui.app.innerHTML, /2 clients running|Client 1 · Local|Client 2 · Friend/);
+  assert.match(ui.app.innerHTML, /aria-label="Stop the game and sharing service for client 2"/);
+  assert.match(ui.app.innerHTML, /Friend client ready\. Copy its invitation/);
+  assert.match(ui.app.innerHTML, /Choose background: Ocean breeze/);
+  await ui.click('picker-close'); await ui.click('lan-setup');
+  assert.match(ui.app.innerHTML, /LAN sharing settings|Setup guide HTTP port|Game HTTPS port/);
+  assert.match(ui.app.innerHTML, /Stop the game before changing the IP or ports/);
+  await ui.click('lan-close'); await ui.click('settings-toggle'); await ui.changeLanguage('zh-CN');
+  assert.match(ui.app.innerHTML, /2 个客户端已启动|客户端 1 · 本机|朋友客户端已准备就绪/);
+  assert.equal(ui.document.documentElement.lang, 'zh-CN');
+});
+
+test('后端语言事件刷新公告与错误详情，旧操作状态不能回退新的语言', async () => {
+  const ui = await launcher(true, { resources: null });
+  const oldStatus = ui.status();
+  const finish = ui.hold('prepare_game'), preparing = ui.click('verify'); await tick();
+  ui.events.get('tauri:language-change')({ payload: { preference: 'en', resolved: 'en', revision: 5 } });
+  ui.events.get('tauri:launcher-progress')({ payload: { phase: 'engine', text: '准备启动器的离线与在线运行引擎…' } });
+  assert.match(ui.app.innerHTML, /Preparing the launcher’s offline and online runtime engines/);
+  finish(oldStatus); await preparing;
+  assert.equal(ui.document.documentElement.lang, 'en');
+  assert.match(ui.app.innerHTML, /Resources and runtime engine are ready/);
+  ui.failCommand('start_game'); await ui.click('launch'); await ui.click('', { read: 'error' });
+  assert.match(ui.app.innerHTML, /Launcher details|start_game failed|Page 1 \/ 1/);
+  ui.events.get('tauri:language-change')({ payload: { preference: 'zh-CN', resolved: 'zh-CN', revision: 6 } });
+  assert.match(ui.app.innerHTML, /启动信息|第 1 \/ 1 页/);
+});
+
+test('语言保存失败恢复原设置且未知值不调用后端，网页预览只更新本页', async () => {
+  const ui = await launcher(); await ui.click('settings-toggle');
+  const before = ui.calls.length; await ui.changeLanguage('de'); assert.equal(ui.calls.length, before);
+  ui.failCommand('set_language'); await ui.changeLanguage('en');
+  assert.equal(ui.document.documentElement.lang, 'zh-CN');
+  assert.match(ui.app.innerHTML, /无法保存语言设置，请重试/);
+  assert.match(ui.app.innerHTML, /value="system" selected/);
+  const preview = await launcher(false, { browserLanguage: 'en-US' });
+  assert.equal(preview.document.documentElement.lang, 'en');
+  await preview.click('settings-toggle'); await preview.changeLanguage('zh-CN');
+  assert.equal(preview.document.documentElement.lang, 'zh-CN');
+  assert.deepEqual(preview.calls, []);
+});
+
+test('真实CA错误与系统状态、已打开CA详情在中英间热切，诊断与保存路径保持原样', async () => {
+  const error = '无法请求钥匙串授权，请下载 CA 后手动安装并信任。系统错误：cancelled <err>';
+  const ui = await launcher(true, { commandErrors: { install_lan_ca: error } });
+  ui.failCommand('install_lan_ca'); await ui.click('ca-install'); await ui.click('', { read: 'error' });
+  ui.events.get('tauri:language-change')({ payload: { preference: 'en', resolved: 'en', revision: 8 } });
+  assert.match(ui.app.innerHTML, /Unable to request keychain authorization/);
+  assert.match(ui.app.innerHTML, /System error: cancelled &lt;err&gt;/);
+  assert.match(ui.app.innerHTML, /Automatic installation is incomplete|Launcher details/);
+  ui.events.get('tauri:language-change')({ payload: { preference: 'zh-CN', resolved: 'zh-CN', revision: 9 } });
+  assert.match(ui.app.innerHTML, /无法请求钥匙串授权/);
+  await ui.click('reader-close'); await ui.click('ca-save');
+  ui.events.get('tauri:language-change')({ payload: { preference: 'en', resolved: 'en', revision: 10 } });
+  assert.match(ui.app.innerHTML, /CA certificate saved: \/证书\/BinGo Root CA.crt/);
+  ui.setCaSystemStatus({ installed: true, trusted: false, message: 'BinGo Root CA 已安装，但尚未通过系统 SSL 信任验证：certificate denied' });
+  await ui.runTimer(4000);
+  assert.match(ui.app.innerHTML, /Installed but not trusted|has not passed system SSL trust verification: certificate denied/);
+});
+
+test('双语公告和版本详情已打开时随语言事件重译正文而不会丢失分页内容', async () => {
+  const ui = await launcher();
+  publish(ui, { source: 'remote', config: { latest_version: '0.2.5', announcements: [{ title: '中文公告', body: '中文正文' }], release_notes: '中文说明',
+    i18n: { en: { announcements: [{ title: 'English announcement', body: 'English body' }], release_notes: 'English release notes' } } } });
+  await ui.click('', { read: 'announcement' });
+  ui.events.get('tauri:language-change')({ payload: { preference: 'en', resolved: 'en', revision: 3 } });
+  assert.match(ui.app.innerHTML, /id="reader-title">English announcement/);
+  assert.match(ui.app.innerHTML, /class="reader-text">English body/);
+  await ui.click('reader-close'); await ui.click('', { read: 'release' });
+  assert.match(ui.app.innerHTML, /class="reader-text">English release notes/);
+  ui.events.get('tauri:language-change')({ payload: { preference: 'zh-CN', resolved: 'zh-CN', revision: 4 } });
+  assert.match(ui.app.innerHTML, /id="reader-title">版本说明/);
+  assert.match(ui.app.innerHTML, /class="reader-text">中文说明/);
+});
+
+test('语言保存期间的旧同revision状态不撤销即时选择，提交事件确认后采用新revision', async () => {
+  const ui = await launcher(true, { resources: null }); await ui.click('settings-toggle');
+  const original = ui.status();
+  const finishLanguage = ui.hold('set_language'), selecting = ui.changeLanguage('en'); await tick();
+  assert.equal(ui.document.documentElement.lang, 'en');
+  assert.match(ui.app.innerHTML, /Saving language preference/);
+  const finishPrepare = ui.hold('prepare_game'), preparing = ui.click('verify'); await tick();
+  finishPrepare(original); await preparing;
+  assert.equal(ui.document.documentElement.lang, 'en');
+  const result = { ...original, language: { preference: 'en', resolved: 'en', revision: 1 } };
+  ui.events.get('tauri:language-change')({ payload: result.language });
+  finishLanguage(result); await selecting;
+  assert.equal(ui.document.documentElement.lang, 'en');
+  assert.match(ui.app.innerHTML, /value="en" selected/);
 });

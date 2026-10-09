@@ -349,3 +349,19 @@ footer i { display: inline-block; height: 8px; width: 1px; background: #b0c1c5; 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* Language preferences share the scenery dialog and can be changed during play. */
+.language-setting { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 7px 16px; }
+.language-setting label { font-size: 13px; font-weight: 600; }
+.language-setting select { min-height: 38px; max-width: 220px; border: 1px solid var(--line); border-radius: 8px; padding: 0 11px; background: #142332; color: var(--text); font: inherit; font-size: 12px; }
+.language-setting select:focus-visible { outline: 2px solid var(--mint); outline-offset: 3px; }
+.language-setting small { grid-column: 1 / -1; color: var(--muted); font-size: 10px; line-height: 1.6; }
+html[lang="en"] .brand > div > span { letter-spacing: 1px; }
+html[lang="en"] .hero__copy { gap: 12px; }
+html[lang="en"] .hero h1 { font-size: clamp(24px, 3vw, 32px); }
+html[lang="en"] .hero h1 em { margin-left: .22em; }
+html[lang="en"] .hero__description { max-width: 185px; }
+html[lang="en"] .launch-actions { flex-wrap: wrap; }
+html[lang="en"] .resource-detail { flex-wrap: wrap; gap: 4px 12px; }
+html[lang="en"] .background-option > span { font-size: 9px; }
+@media (max-width: 700px) { html[lang="en"] .hero h1 { font-size: 24px; } .language-setting select { max-width: 180px; } }

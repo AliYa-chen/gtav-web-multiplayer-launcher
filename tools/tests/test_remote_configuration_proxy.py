@@ -111,6 +111,32 @@ class RemoteConfigurationProxyTests(unittest.TestCase):
         })):
             self.assertEqual(PROXY.online_remote_configuration()['source'], 'unavailable')
 
+    def test_translations_preserve_public_names_and_safe_titles(self):
+        server = {'address': 'example.com:47485', 'name': '公共战局',
+                  'i18n': {'en': {'name': 'Public Session', 'role': 'Main'},
+                           'zh-CN': {'name': '公共战局', 'role': '主线路'}}}
+        translations = {'en': {'oltitle': 'Online Session'},
+                        'zh-CN': {'oltitle': 'https://gtav.2t.hk'}}
+        with patch.object(PROXY, 'urlopen', return_value=response({
+                'oltitle': '公共战局', 'servers': [server], 'i18n': translations})):
+            result = PROXY.online_remote_configuration()
+        self.assertEqual(result['source'], 'remote')
+        self.assertEqual(result['config']['oltitle'], '公共战局')
+        self.assertEqual(result['config']['i18n'], translations)
+        self.assertEqual(result['config']['servers'][0]['i18n'], server['i18n'])
+
+    def test_unsafe_or_unsupported_translations_reject_current_response(self):
+        for translated in ['javascript:alert(1)', 'http://example.com',
+                           'https://user:secret@example.com', '<script>x</script>', 'x' * 161]:
+            with self.subTest(title=translated), patch.object(PROXY, 'urlopen', return_value=response({
+                    'oltitle': 'https://gtav.2t.hk', 'i18n': {'en': {'oltitle': translated}}})):
+                self.assertEqual(PROXY.online_remote_configuration()['source'], 'unavailable')
+        for field, translations in [('i18n', {'fr': {'oltitle': 'Online'}}),
+                                     ('servers', [{'address': 'example.com:47485', 'i18n': {'en': {'name': 'x' * 81}}}])]:
+            with self.subTest(field=field), patch.object(PROXY, 'urlopen', return_value=response({
+                    'oltitle': 'https://gtav.2t.hk', field: translations})):
+                self.assertEqual(PROXY.online_remote_configuration()['source'], 'unavailable')
+
 
 if __name__ == '__main__':
     unittest.main()

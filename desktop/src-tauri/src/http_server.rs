@@ -39,6 +39,7 @@ impl std::fmt::Debug for LanConfig {
 
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
+    pub language: crate::language::SharedLanguage,
     pub multiplayer_server: String,
     pub instance_name: String,
     pub log_file: PathBuf,
@@ -55,6 +56,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
+            language: crate::language::shared(),
             multiplayer_server: "183.66.27.21:47485".into(),
             instance_name: "玩家1".into(),
             log_file: std::env::temp_dir().join("gta5-launcher/browser-local.log"),
@@ -317,6 +319,13 @@ fn handle(request: Request, state: &State) {
     let readiness_probe = path == "/api/lan/ready";
     if !valid_origin(&request, state, readiness_probe) { return reply_error(request, 403, "仅允许当前游戏地址和局域网访问资源。 "); }
     if readiness_probe { return handle_ready(request, state); }
+    if path == "/api/language" {
+        if request.method()!=&Method::Get && request.method()!=&Method::Head {
+            return reply(request,405,b"Language configuration is read-only.".to_vec(),"text/plain; charset=utf-8",&[]);
+        }
+        let body=serde_json::to_vec(&crate::language::snapshot(&state.config.language)).unwrap();
+        return reply(request,200,body,"application/json; charset=utf-8",&[("Cache-Control","no-store".into())]);
+    }
     match request.method() {
         Method::Post => return handle_post(request, &path, query, state),
         Method::Get | Method::Head => {},
@@ -806,6 +815,22 @@ mod tests {
         assert!(normalized_path("/data/%252e%252e/secret").is_err());
         assert!(normalized_path("/data/%5csecret").is_err());
         assert_eq!(normalized_path("//b//file.js").unwrap(), "/b/file.js");
+    }
+    #[test]
+    fn language_config_is_shared_live_and_cannot_be_changed_by_web_clients() {
+        let (temp,info,runtime)=fixture();let language=crate::language::shared();
+        let config=ServerConfig { language: language.clone(), log_file:temp.path().join("language.log"), ..Default::default() };
+        let first=start(info.clone(),runtime.clone(),client(),config.clone()).unwrap();
+        let second=start(info,runtime,client(),config).unwrap();
+        *language.write().unwrap()=crate::language::LanguageConfig::with_preference("en",5).unwrap();
+        for server in [&first,&second] {
+            let (headers,body)=request(server,"GET","/api/language","",b"");
+            assert!(headers.starts_with("HTTP/1.1 200"));assert!(headers.to_lowercase().contains("cache-control: no-store"));
+            let value:Value=serde_json::from_slice(&body).unwrap();assert_eq!(value["resolved"],"en");assert_eq!(value["revision"],5);
+            assert!(request(server,"POST","/api/language","",b"{}").0.starts_with("HTTP/1.1 405"));
+        }
+        *language.write().unwrap()=crate::language::LanguageConfig::with_preference("zh-CN",6).unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&request(&second,"GET","/api/language","",b"").1).unwrap()["resolved"],"zh-CN");
     }
     #[test]
     fn actual_http_serves_embedded_client_and_isolated_engines_only() {
