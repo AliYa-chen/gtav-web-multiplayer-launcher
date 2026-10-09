@@ -278,7 +278,7 @@ async fn start_game(app: tauri::AppHandle, state: State<'_, LauncherState>, addi
     let prepared = inner.prepared.as_ref().ok_or("游戏资源尚未就绪。")?;
     let multiplayer_server = configured_remote(&state).ok()
         .and_then(|config| config.server.map(|server| server.websocket_url.unwrap_or(server.address)))
-        .unwrap_or_else(|| "183.66.27.21:47485".to_string());
+        .unwrap_or_default();
     let id = identity.id;
     let mut client = start_client_with_identity(prepared, lan, identity, &app.path().app_log_dir().map_err(|e| e.to_string())?,
         state.remote.clone(), multiplayer_server,state.language.clone())?;

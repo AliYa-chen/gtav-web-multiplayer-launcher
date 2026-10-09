@@ -16,10 +16,10 @@ const source = fs.readFileSync(path.join(root, 'client/multiplayer/join-modal.js
   .replace(/^import .*$/gm, '').replace(/^export /gm, '');
 const copy = (value) => JSON.parse(JSON.stringify(value));
 const panelKey = 'gta5.public.preferences', sessionKey = 'gta5.public.session', pendingKey = 'gta5.public.pending-join';
-const preferences = (extras = {}) => ({ name: '玩家甲', server: '183.66.27.21:47485', preset: 'npc_male', ...extras });
+const preferences = (extras = {}) => ({ name: '玩家甲', server: '198.51.100.21:47485', preset: 'npc_male', ...extras });
 const remoteSnapshot = (servers) => ({ config: { servers }, source: 'remote', stale: false });
 const remoteLines = () => [
-  { id: 'experimental', name: '实验战局', role: '实验线路', address: '183.66.27.21:47486' },
+  { id: 'experimental', name: '实验战局', role: '实验线路', address: '198.51.100.21:47486' },
   { id: 'main', name: '公共战局', role: '主线路', address: 'wss://main.example:443/public' },
 ];
 
@@ -93,7 +93,7 @@ async function harness(options = {}) {
 }
 
 test('启动器明确报告缺少多人副本时阻止加入并给出构建及重启说明', async () => {
-  const page = await harness({ config: { multiplayer_ready: false, multiplayer_server: '183.66.27.21:47485' } });
+  const page = await harness({ config: { multiplayer_ready: false, multiplayer_server: '198.51.100.21:47485' } });
   assert.equal(page.submitButton.disabled, true);
   page.modal.open();
   page.submit();
@@ -118,7 +118,7 @@ test('配置请求尚未完成时阻止提交，确认副本可用后才允许�
   assert.equal(page.submitButton.disabled, false);
   assert.equal(page.message.textContent, '');
   assert.equal(page.joined.length, 0, '检查完成不能自动消费检查期间的提交');
-  page.input('server', '183.66.27.21:47485');
+  page.input('server', '198.51.100.21:47485');
   page.submit();
   assert.equal(page.joined.length, 1);
 });
@@ -145,7 +145,7 @@ test('没有 local-config 接口或旧配置未提供 readiness 时仍允许已�
   ]) {
     const page = await harness(options);
     assert.equal(page.submitButton.disabled, false);
-    page.input('server', '183.66.27.21:47485');
+    page.input('server', '198.51.100.21:47485');
     page.submit();
     assert.equal(page.joined.length, 1);
   }
@@ -154,48 +154,50 @@ test('没有 local-config 接口或旧配置未提供 readiness 时仍允许已�
 test('服务器地址只显示主机和有效端口，支持 IPv4、IPv6 和标准端口', async () => {
   const { normalizeServerAddress, displayServerAddress } = await addressPromise;
   for (const [input, shown, normalized] of [
-    ['183.66.27.21', '183.66.27.21:47485', 'ws://183.66.27.21:47485/ws'],
+    ['198.51.100.21', '198.51.100.21:80', 'ws://198.51.100.21/ws'],
     ['ws://example.com:80/ws', 'example.com:80', 'ws://example.com/ws'],
     ['wss://example.com:443/ws', 'example.com:443', 'wss://example.com/ws'],
     ['wss://example.com:47485/custom', 'example.com:47485', 'wss://example.com:47485/custom'],
-    ['::1', '[::1]:47485', 'ws://[::1]:47485/ws'],
+    ['::1', '[::1]:80', 'ws://[::1]/ws'],
     ['[2001:db8::1]:47485', '[2001:db8::1]:47485', 'ws://[2001:db8::1]:47485/ws'],
   ]) {
     assert.equal(displayServerAddress(input), shown);
     assert.equal(normalizeServerAddress(input), normalized);
     assert.equal(normalizeServerAddress(normalized), normalized, '规范化后再次读取不能改变端口');
   }
-  assert.equal(displayServerAddress('example.com', 'https://game.example/'), 'example.com:47485');
+  assert.equal(displayServerAddress('example.com', 'https://game.example/'), 'example.com:443');
   assert.throws(() => displayServerAddress('ws://example.com', 'https://game.example/'), /wss/);
+  assert.throws(() => normalizeServerAddress(''));
+  assert.equal(normalizeServerAddress('custom.example:31415'), 'ws://custom.example:31415/ws');
 });
 
 test('远程 HTTPS 健康地址保留 WSS 和完整代理路径，不随 localhost 页面降为 WS', async () => {
   const { normalizeRemoteServerAddress } = await addressPromise;
-  const line = { id: 'main', name: '主线路', address: 'gtaserver.2t.hk:47485',
-    health_url: 'https://gtaserver.2t.hk:47485/47485/health' };
-  assert.equal(normalizeRemoteServerAddress(line), 'wss://gtaserver.2t.hk:47485/47485/ws');
-  assert.equal(normalizeRemoteServerAddress({ address: 'gtaserver.2t.hk', health_url: 'https://gtaserver.2t.hk/health/' }),
-    'wss://gtaserver.2t.hk/ws');
-  assert.equal(normalizeRemoteServerAddress({ address: '183.66.27.21:47485' }), 'ws://183.66.27.21:47485/ws');
-  assert.equal(normalizeRemoteServerAddress({ ...line, websocket_url: 'wss://gtaserver.2t.hk:47485/custom/ws' }),
-    'wss://gtaserver.2t.hk:47485/custom/ws');
-  assert.equal(normalizeRemoteServerAddress({ ...line, address: 'wss://gtaserver.2t.hk:47485/explicit' }),
-    'wss://gtaserver.2t.hk:47485/explicit');
+  const line = { id: 'main', name: '主线路', address: 'gtaserver-cn.2t.hk:47485',
+    health_url: 'https://gtaserver-cn.2t.hk:47485/47485/health' };
+  assert.equal(normalizeRemoteServerAddress(line), 'wss://gtaserver-cn.2t.hk:47485/47485/ws');
+  assert.equal(normalizeRemoteServerAddress({ address: 'gtaserver-cn.2t.hk', health_url: 'https://gtaserver-cn.2t.hk/health/' }),
+    'wss://gtaserver-cn.2t.hk/ws');
+  assert.equal(normalizeRemoteServerAddress({ address: '198.51.100.21:47485' }), 'ws://198.51.100.21:47485/ws');
+  assert.equal(normalizeRemoteServerAddress({ ...line, websocket_url: 'wss://gtaserver-cn.2t.hk:47485/custom/ws' }),
+    'wss://gtaserver-cn.2t.hk:47485/custom/ws');
+  assert.equal(normalizeRemoteServerAddress({ ...line, address: 'wss://gtaserver-cn.2t.hk:47485/explicit' }),
+    'wss://gtaserver-cn.2t.hk:47485/explicit');
   assert.equal(normalizeRemoteServerAddress({ ...line, health_url: 'https://different.example:47485/health' }),
-    'ws://gtaserver.2t.hk:47485/ws');
-  assert.equal(normalizeRemoteServerAddress({ ...line, health_url: 'https://gtaserver.2t.hk:443/47485/health' }),
-    'ws://gtaserver.2t.hk:47485/ws');
-  for (const value of ['https://gtaserver.2t.hk/ws', 'wss://user:secret@gtaserver.2t.hk/ws', 'javascript:alert(1)']) {
+    'ws://gtaserver-cn.2t.hk:47485/ws');
+  assert.equal(normalizeRemoteServerAddress({ ...line, health_url: 'https://gtaserver-cn.2t.hk:443/47485/health' }),
+    'ws://gtaserver-cn.2t.hk:47485/ws');
+  for (const value of ['https://gtaserver-cn.2t.hk/ws', 'wss://user:secret@gtaserver-cn.2t.hk/ws', 'javascript:alert(1)']) {
     assert.throws(() => normalizeRemoteServerAddress({ ...line, websocket_url: value }));
   }
   const page = await harness({ remoteConfig: remoteSnapshot([line]) });
   page.modal.open(); await page.settle();
-  assert.equal(page.fields.server.value, 'gtaserver.2t.hk:47485');
+  assert.equal(page.fields.server.value, 'gtaserver-cn.2t.hk:47485');
   page.input('nickname', '玩家WSS'); page.blur(); page.submit();
-  assert.equal(page.joined[0].server, 'wss://gtaserver.2t.hk:47485/47485/ws');
-  assert.equal(page.api.readPublicPreferences().server, 'wss://gtaserver.2t.hk:47485/47485/ws');
+  assert.equal(page.joined[0].server, 'wss://gtaserver-cn.2t.hk:47485/47485/ws');
+  assert.equal(page.api.readPublicPreferences().server, 'wss://gtaserver-cn.2t.hk:47485/47485/ws');
   page.modal.close(); page.modal.open(); await page.settle(); page.submit();
-  assert.equal(page.joined.at(-1).server, 'wss://gtaserver.2t.hk:47485/47485/ws');
+  assert.equal(page.joined.at(-1).server, 'wss://gtaserver-cn.2t.hk:47485/47485/ws');
 });
 
 test('面板偏好保存在 localStorage，昵称修剪、角色和安全地址均可重新读取', async () => {
@@ -227,7 +229,7 @@ test('浏览器拒绝 localStorage 读取或写入时可继续加入，不抛出
   const denied = await harness({ localStorageDenied: true });
   assert.equal(denied.api.readPanelPreferences(), null);
   assert.equal(denied.api.savePanelPreferences(preferences()), false);
-  denied.input('server', '183.66.27.21:47485');
+  denied.input('server', '198.51.100.21:47485');
   assert.doesNotThrow(() => denied.submit());
   assert.equal(denied.joined.length, 1);
   const rejected = await harness({ localStorage: {
@@ -235,7 +237,7 @@ test('浏览器拒绝 localStorage 读取或写入时可继续加入，不抛出
   } });
   assert.equal(rejected.api.readPanelPreferences(), null);
   assert.equal(rejected.api.savePanelPreferences(preferences()), false);
-  rejected.input('server', '183.66.27.21:47485');
+  rejected.input('server', '198.51.100.21:47485');
   assert.doesNotThrow(() => rejected.submit());
   assert.equal(rejected.joined.length, 1);
 });
@@ -305,7 +307,7 @@ test('输入完整安全地址失焦后仅显示主机和端口，提交仍连�
 
 test('不完整输入保留上次有效偏好，提交无效地址或昵称时不创建战局', async () => {
   const page = await harness();
-  page.input('server', '183.66.27.21:47485');
+  page.input('server', '198.51.100.21:47485');
   page.input('nickname', '玩家乙');
   const valid = page.localStorage.getItem(panelKey);
   page.input('server', 'ws://');
@@ -314,7 +316,7 @@ test('不完整输入保留上次有效偏好，提交无效地址或昵称时�
   assert.equal(page.joined.length, 0);
   assert.ok(page.message.textContent.includes('格式'));
   assert.equal(page.sessionStorage.values.size, 0);
-  page.input('server', '183.66.27.21:47485');
+  page.input('server', '198.51.100.21:47485');
   page.input('nickname', '😀'.repeat(25));
   page.submit();
   assert.equal(page.joined.length, 0);
@@ -324,7 +326,7 @@ test('不完整输入保留上次有效偏好，提交无效地址或昵称时�
 test('禁用会话存储会显示错误并停止加入，永久偏好存储成功不能替代战局会话', async () => {
   const page = await harness({ sessionStorage: { getItem: () => null,
     setItem() { throw new Error('SecurityError'); } } });
-  page.input('server', '183.66.27.21:47485');
+  page.input('server', '198.51.100.21:47485');
   page.submit();
   assert.equal(page.joined.length, 0);
   assert.ok(page.message.textContent.includes('会话存储'));
@@ -332,7 +334,7 @@ test('禁用会话存储会显示错误并停止加入，永久偏好存储成�
 
 test('模态框主动加入只创建一次新加入标记，首次导航后刷新按重连恢复', async () => {
   const page = await harness();
-  page.input('server', '183.66.27.21:47485');
+  page.input('server', '198.51.100.21:47485');
   page.submit();
   assert.equal(page.sessionStorage.getItem(pendingKey), '1');
   assert.equal(page.api.consumePublicEntryIntent('navigate'), false);
@@ -378,13 +380,13 @@ test('打开加入面板读取两条远程线路并优先主线路，选择后�
   page.modal.open();await page.settle();
   assert.match(page.overlay.innerHTML, /list="online-join-server-options"/);
   assert.equal(page.serverList.children.length, 2);
-  assert.equal(page.serverList.children[0].label, '实验战局 · 实验线路 · 183.66.27.21:47486');
+  assert.equal(page.serverList.children[0].label, '实验战局 · 实验线路 · 198.51.100.21:47486');
   assert.equal(page.fields.server.value, 'main.example:443');
   const remoteRequest = requests.find((item) => item.url.startsWith('/api/remote-config'));
   assert.equal(remoteRequest.url, '/api/remote-config?refresh=1');
   assert.equal(remoteRequest.options.cache, 'no-store');
-  page.input('server', '183.66.27.21:47486');page.submit();
-  assert.equal(page.joined[0].server, 'ws://183.66.27.21:47486/ws');
+  page.input('server', '198.51.100.21:47486');page.submit();
+  assert.equal(page.joined[0].server, 'ws://198.51.100.21:47486/ws');
   page.input('server', 'main.example:443');page.blur();page.submit();
   assert.equal(page.joined[1].server, 'wss://main.example/public');
   assert.equal(page.localStorage.getItem('gta5.remote.config'), null, '远程线路不保存为本地配置');
@@ -547,7 +549,7 @@ test('关闭后旧请求晚到不能替换新打开面板的线路与当前服�
 test('线路兼容对象和数组，拒绝缓存、无效地址和多余线路；名称按文本显示', async () => {
   const page = await harness({ install: false });
   const clean = (snapshot) => copy(page.api.cleanJoinServerOptions(snapshot, 'http://localhost:8010/'));
-  for (const server of [{ address: '183.66.27.21:47485' }, [{ address: '183.66.27.21:47485' }]])
+  for (const server of [{ address: '198.51.100.21:47485' }, [{ address: '198.51.100.21:47485' }]])
     assert.equal(clean({ source: 'remote', stale: false, config: { server } }).length, 1);
   for (const snapshot of [null, { source: 'cache', stale: false, config: { servers: remoteLines() } },
     { source: 'remote', stale: true, config: { servers: remoteLines() } }]) assert.deepEqual(clean(snapshot), []);
@@ -597,16 +599,16 @@ test('远程线路显式语言配置热切换覆盖默认名字，昵称与连�
 test('启动器在线选择直接生成首进偏好，保留完整WSS代理路径和中文昵称而不自动改语言', async () => {
   const page = await harness({ install: false, language: 'en' });
   const url = new URL('https://192.168.31.225/play/');
-  url.search = new URLSearchParams({ launcher:'1', name:' 玩家甲 ', server:'wss://gtaserver.2t.hk:47485/47485/ws?route=main',
+  url.search = new URLSearchParams({ launcher:'1', name:' 玩家甲 ', server:'wss://gtaserver-cn.2t.hk:47485/47485/ws?route=main',
     preset:'freemode_female', seed:'4294967295', lang:'zh-CN' }).toString();
   const result = copy(page.api.launcherPublicEntry(url.searchParams, url.href));
-  assert.deepEqual(result, { server:'wss://gtaserver.2t.hk:47485/47485/ws?route=main', name:'玩家甲', preset:'freemode_female', seed:4294967295 });
+  assert.deepEqual(result, { server:'wss://gtaserver-cn.2t.hk:47485/47485/ws?route=main', name:'玩家甲', preset:'freemode_female', seed:4294967295 });
   assert.equal(page.i18n.getLanguage(), 'en', 'query language cannot override launcher configuration');
   assert.equal(page.sessionStorage.values.size, 0, 'parser is pure and does not reuse/write identity storage');
   assert.equal(page.joined.length, 0, 'parser does not install or submit the web modal');
 });
 
-test('启动器裸服务器保留开发默认端口，首次加入消费fresh标记，清理URL后刷新恢复同一份选择', async () => {
+test('启动器裸服务器保留显式端口，首次加入消费fresh标记，清理URL后刷新恢复同一份选择', async () => {
   const page = await harness({ install:false, sessionStorage:storage({ [sessionKey]:JSON.stringify({ ...preferences(), seed:1 }),
     'gta5.public.identity:old':'existing-resume-token' }) });
   const query = new URLSearchParams({ launcher:'1', name:'New Player', server:'127.0.0.1:47485', preset:'npc_male', seed:'0' });

@@ -51,7 +51,6 @@ pub fn normalize_server(value: &str) -> Result<String, String> {
     let address=if explicit { input.to_owned() } else { format!("wss://{input}") };
     let mut url=Url::parse(&address).map_err(|_|"服务器地址格式无效。")?;
     if url.scheme()!="wss" || url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() { return Err("请输入不含用户名、密码或片段的 wss:// 地址。".into()); }
-    if !explicit && url.port().is_none() { url.set_port(Some(47485)).map_err(|_|"服务器端口无效。")?; }
     if url.path()=="/" { url.set_path("/ws"); }
     Ok(url.into())
 }

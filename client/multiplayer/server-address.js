@@ -1,12 +1,9 @@
 import { translateText } from '../i18n.js';
 
-const DEFAULT_PORT = '47485';
-
 // 可独立调用，便于检查域名、IPv4、IPv6 以及 HTTPS 下的地址输入。
 export function normalizeServerAddress(value, pageUrl = 'http://localhost:8000/') {
   const page = new URL(pageUrl);
   let address = String(value ?? '').trim();
-  if (!address) address = page.hostname;
   if (!address || /\s/.test(address) || address.startsWith('/')) {
     throw new Error(translateText('请输入有效的服务器 IP 或地址。'));
   }
@@ -30,11 +27,7 @@ export function normalizeServerAddress(value, pageUrl = 'http://localhost:8000/'
   if (page.protocol === 'https:' && url.protocol === 'ws:') {
     throw new Error(translateText('HTTPS 页面需要 wss:// 服务器地址，请使用加密连接。'));
   }
-  // 完整协议地址使用协议标准端口，裸主机使用战局默认端口。
-  // URL 会移除显式的 80/443；再次读取缓存地址时必须保持同一端口。
-  const authority = address.split('://')[1].split(/[/?#]/)[0];
-  const explicitPort = authority.startsWith('[') ? /\]:\d+$/.test(authority) : /:\d+$/.test(authority);
-  if (!url.port && !explicitPort && !hasScheme) url.port = DEFAULT_PORT;
+  // 未写端口时使用协议标准端口；公网游戏端口由配置接口明确提供。
   if (!url.pathname || url.pathname === '/') url.pathname = '/ws';
   return url.href;
 }

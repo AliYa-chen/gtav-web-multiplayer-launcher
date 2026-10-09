@@ -49,16 +49,27 @@ test('PHP syntax, bilingual output, HTTP/CORS contract and unsafe configuration 
     await writeFile(path.join(directory, 'index.php'), source);
     const lint = await runPhp(['-l', path.join(directory, 'index.php')], directory);
     assert.match(lint.stdout, /No syntax errors/);
+    // Release drafts intentionally omit downloads. Seed an isolated valid
+    // candidate so unsafe URL/hash checks still exercise publishedDownloads.
+    const downloadBlock = /\$downloadCandidates = \[[\s\S]*?\n\];/;
+    assert.match(source, downloadBlock);
+    const fixtureDownload = { url: 'https://oss.2t.hk/gtav/fixture-launcher.zip', sha256: 'a'.repeat(64) };
+    const populatedDownloads = source.replace(downloadBlock, `$downloadCandidates = [
+    'macos_arm64' => ['url' => '${fixtureDownload.url}', 'sha256' => '${fixtureDownload.sha256}'],
+];`);
     const variants = {
+      'unsafe-socket': source.replace(/('websocket_url' => ')[^']+(')/, '$1javascript:alert(1)$2'),
+      'unsafe-socket-credentials': source.replace(/('websocket_url' => ')[^']+(')/, '$1wss://user:secret@example.com/ws$2'),
       'unsafe-site': source.replace(/\$site = '[^']+';/, "$site = 'javascript:alert(1)';"),
-      'unsafe-download': source.replace(/('url' => ')https:(\/\/oss\.2t\.hk\/gtav\/[^']+')/, '$1http:$2'),
-      'unsafe-download-hash': source.replace(/('sha256' => ')[a-f0-9]{64}(')/i, `$1${'0'.repeat(64)}$2`),
+      'populated-downloads': populatedDownloads,
+      'unsafe-download': populatedDownloads.replace(fixtureDownload.url, fixtureDownload.url.replace('https:', 'http:')),
+      'unsafe-download-hash': populatedDownloads.replace(fixtureDownload.sha256, '0'.repeat(64)),
       'unsafe-translation-url': source.replace(/'oltitle' => \$site/g, "'oltitle' => 'https://user:password@example.com/'"),
       'unsafe-translation-script': source.replace(/'oltitle' => \$site/g, "'oltitle' => 'javascript:alert(1)'"),
       'plain-translation-title': source.replace(/'oltitle' => \$site/g, "'oltitle' => 'Public Session'"),
       'unsafe-translation-text': source.replace(/('release_notes' => )'Launcher[^']*'/, '$1"bad\\x00text"'),
       'duplicate-server': source.replace("'id' => 'experimental'", "'id' => 'main'"),
-      'empty-downloads': source.replace(/\$downloadCandidates = \[[\s\S]*?\n\];\n\/\/ ── 配置内容结束/, '$downloadCandidates = [];\n// ── 配置内容结束'),
+      'empty-downloads': source.replace(downloadBlock, '$downloadCandidates = [];'),
       'origin-whitelist': source.replace("    '*', //", "    'https://trusted.example', //"),
     };
     for (const [name, value] of Object.entries(variants)) {
@@ -104,6 +115,15 @@ test('PHP syntax, bilingual output, HTTP/CORS contract and unsafe configuration 
       if (process.env.GTA_EXPECT_VERSION) assert.equal(config.update.latest_version, process.env.GTA_EXPECT_VERSION);
       assert.deepEqual(config.server, config.servers);
       assert.ok(config.servers.length >= 1 && config.servers.length <= 32);
+      assert.deepEqual(config.servers.map(item => item.id), ['main', 'experimental', 'main-us', 'experimental-us']);
+      for (const item of config.servers) {
+        const endpoint = new URL(item.websocket_url), health = new URL(item.health_url);
+        assert.equal(endpoint.protocol, 'wss:');
+        assert.equal(endpoint.host, item.address); assert.equal(health.host, item.address);
+        assert.equal(endpoint.pathname, `/${endpoint.port}/ws`);
+        assert.equal(health.pathname, `/${health.port}/health`);
+        assert.equal(endpoint.hostname, item.region === 'US' ? 'gtaserver-us.2t.hk' : 'gtaserver-cn.2t.hk');
+      }
       assert.deepEqual(Object.keys(config.i18n).sort(), ['en', 'zh-CN']);
       assert.equal(config.i18n['zh-CN'].release_notes, config.update.release_notes);
       assert.deepEqual(config.i18n['zh-CN'].announcements, config.announcements);
@@ -145,7 +165,7 @@ test('PHP syntax, bilingual output, HTTP/CORS contract and unsafe configuration 
       const headers = await request('/', { method: 'OPTIONS', headers: { 'Access-Control-Request-Method': 'GET', 'Access-Control-Request-Headers': 'X-Unsafe-Header' } });
       assert.equal(headers.response.status, 400); assert.equal(headers.value.code, 'preflight_header_not_allowed');
     });
-    for (const name of ['unsafe-site', 'unsafe-download', 'unsafe-download-hash', 'unsafe-translation-url', 'unsafe-translation-script', 'unsafe-translation-text', 'duplicate-server']) await t.test(`${name} is rejected without exposing validation details`, async () => {
+    for (const name of ['unsafe-socket', 'unsafe-socket-credentials', 'unsafe-site', 'unsafe-download', 'unsafe-download-hash', 'unsafe-translation-url', 'unsafe-translation-script', 'unsafe-translation-text', 'duplicate-server']) await t.test(`${name} is rejected without exposing validation details`, async () => {
       const result = await request(`/${name}.php`); assert.equal(result.response.status, 500); assert.equal(result.value.code, 'config_invalid');
       assert.doesNotMatch(result.body, /password|javascript:|alert\(1\)|Invalid configuration|bad\\x00text/);
     });
@@ -156,6 +176,12 @@ test('PHP syntax, bilingual output, HTTP/CORS contract and unsafe configuration 
     });
     await t.test('an empty published download catalog stays a JSON object', async () => {
       const result = await request('/empty-downloads.php'); assert.equal(result.response.status, 200); assert.deepEqual(result.value.update.downloads, {}); assert.ok(!Array.isArray(result.value.update.downloads));
+    });
+    await t.test('a populated download catalog publishes the validated candidate independently of draft metadata', async () => {
+      const result = await request('/populated-downloads.php'); assert.equal(result.response.status, 200);
+      assert.deepEqual(result.value.update.downloads, { macos_arm64: fixtureDownload });
+      assert.equal(result.value.update.latest_version, config.update.latest_version);
+      assert.deepEqual(result.value.servers, config.servers);
     });
     await t.test('an optional origin whitelist permits native clients and rejects unlisted browser origins', async () => {
       const native = await request('/origin-whitelist.php'); assert.equal(native.response.status, 200); assert.equal(native.response.headers.get('access-control-allow-origin'), null);

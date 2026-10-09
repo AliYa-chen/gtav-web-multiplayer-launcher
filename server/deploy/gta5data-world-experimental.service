@@ -1,0 +1,23 @@
+[Unit]
+Description=GTA V experimental public session server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=gta5data
+Group=gta5data
+WorkingDirectory=/opt/gta5data-server/experimental
+ExecStart=/usr/bin/java -Xms64m -Xmx512m -jar /opt/gta5data-server/experimental/multiplayer-server.jar --host 127.0.0.1 --port 17486 --max-clients 8 --world-data /opt/gta5data-server/world-data
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+SuccessExitStatus=143
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/opt/gta5data-server
+
+[Install]
+WantedBy=multi-user.target

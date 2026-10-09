@@ -100,6 +100,22 @@ function configUrl($value, bool $httpsOnly = true): string
     return $value;
 }
 
+function configSocketUrl($value): string
+{
+    if (!is_string($value) || strlen($value) > 2048 || strpos($value, chr(92)) !== false
+        || preg_match('/[\s\x00-\x1F\x7F]/u', $value) !== 0
+        || filter_var($value, FILTER_VALIDATE_URL) === false) {
+        throw new InvalidArgumentException('Invalid WebSocket URL.');
+    }
+    $parts = parse_url($value);
+    if (!is_array($parts) || !in_array(strtolower($parts['scheme'] ?? ''), ['ws', 'wss'], true)
+        || empty($parts['host']) || isset($parts['user']) || isset($parts['pass']) || isset($parts['fragment'])
+        || (isset($parts['port']) && ($parts['port'] < 1 || $parts['port'] > 65535))) {
+        throw new InvalidArgumentException('Unsafe WebSocket URL.');
+    }
+    return $value;
+}
+
 function configTitle($value): string
 {
     $value = configText($value, 160, 'i18n.oltitle');
@@ -137,19 +153,33 @@ function publishedDownloads(array $candidates): stdClass
 
 // ── 配置内容：维护者只需要修改这一段 ──
 $site = 'https://gtav.2t.hk';
-$latestVersion = '0.2.13';
-$releaseNotes = "启动器 0.2.13 修复公共模式卡在 76% 的加载时序问题：引擎真正显示世界后才接管公共场景。故事、自由沙盒、公共战局及在线昵称、角色和服务器线路统一在启动器选择；线路只显示远程地址，通过浏览器健康检测后才可选择，并显示实测延迟。共享朋友保留网页模式选择和自己的在线表单。减少重复日志请求，游戏原始资源保持只读。服务端仍为 0.4.2；macOS 包为开发签名、未公证。";
+$latestVersion = '0.2.14';
+$releaseNotes = "启动器 0.2.14 统一中国与美国正式、实验战局线路，所有线路地址、端口、健康接口和 WSS 路径均由远程配置提供，不再内置公网默认地址。保留地区及中英文线路信息，浏览器健康检测后才可选择；故事、自由沙盒、公共战局与共享朋友入口沿用 0.2.13 的加载流程。中美服务端均为 0.4.2，使用维护者提供的证书。原游戏资源保持只读；macOS 包为开发签名、未公证。";
 $servers = [
-    ['id' => 'main', 'name' => '公共战局', 'role' => '主线路', 'address' => 'gtaserver.2t.hk:47485',
-        'health_url' => 'https://gtaserver.2t.hk:47485/47485/health',
+    ['id' => 'main', 'name' => '公共战局', 'role' => '主线路', 'address' => 'gtaserver-cn.2t.hk:47485',
+        'health_url' => 'https://gtaserver-cn.2t.hk:47485/47485/health',
+        'websocket_url' => 'wss://gtaserver-cn.2t.hk:47485/47485/ws',
         'region' => 'CN',
         'i18n' => ['zh-CN' => ['name' => '公共战局', 'role' => '主线路'],
             'en' => ['name' => 'Public Session', 'role' => 'Main']]],
-    ['id' => 'experimental', 'name' => '实验战局', 'role' => '实验线路', 'address' => 'gtaserver.2t.hk:47486',
-        'health_url' => 'https://gtaserver.2t.hk:47486/47486/health',
+    ['id' => 'experimental', 'name' => '实验战局', 'role' => '实验线路', 'address' => 'gtaserver-cn.2t.hk:47486',
+        'health_url' => 'https://gtaserver-cn.2t.hk:47486/47486/health',
+        'websocket_url' => 'wss://gtaserver-cn.2t.hk:47486/47486/ws',
         'region' => 'CN',
         'i18n' => ['zh-CN' => ['name' => '实验战局', 'role' => '实验线路'],
             'en' => ['name' => 'Experimental Session', 'role' => 'Experimental']]],
+    ['id' => 'main-us', 'name' => '美国公共战局', 'role' => '主线路', 'address' => 'gtaserver-us.2t.hk:47485',
+        'health_url' => 'https://gtaserver-us.2t.hk:47485/47485/health',
+        'websocket_url' => 'wss://gtaserver-us.2t.hk:47485/47485/ws',
+        'region' => 'US',
+        'i18n' => ['zh-CN' => ['name' => '美国公共战局', 'role' => '主线路'],
+            'en' => ['name' => 'US Public Session', 'role' => 'Main']]],
+    ['id' => 'experimental-us', 'name' => '美国实验战局', 'role' => '实验线路', 'address' => 'gtaserver-us.2t.hk:47486',
+        'health_url' => 'https://gtaserver-us.2t.hk:47486/47486/health',
+        'websocket_url' => 'wss://gtaserver-us.2t.hk:47486/47486/ws',
+        'region' => 'US',
+        'i18n' => ['zh-CN' => ['name' => '美国实验战局', 'role' => '实验线路'],
+            'en' => ['name' => 'US Experimental Session', 'role' => 'Experimental']]],
 ];
 // health_url 使用游戏服务器域名的 HTTPS 反向代理；status_url 是网页，不是健康接口。
 $announcements = [
@@ -170,7 +200,7 @@ $translations = [
     'zh-CN' => ['oltitle' => $site, 'release_notes' => $releaseNotes, 'announcements' => $announcements],
     'en' => [
         'oltitle' => $site,
-        'release_notes' => 'Launcher 0.2.13 fixes public sessions stopping at 76% by waiting for the real world scene before applying shared state. Choose story, sandbox or public session in the launcher, along with your online nickname, character and server route. Routes display the configured address, require a successful browser health check and show measured latency. Shared guests keep web mode selection and their own online form. Repeated diagnostic requests are reduced. Original game resources remain read-only. The server stays at 0.4.2; the macOS development build is not notarized.',
+        'release_notes' => 'Launcher 0.2.14 unifies the China and US main and experimental session routes. Server addresses, ports, health endpoints and WSS paths come from remote configuration, with no built-in public fallback. Region labels and Chinese/English route metadata are preserved; routes require a successful browser health check before selection. Story, sandbox, public sessions and shared guest entry retain the 0.2.13 loading flow. Both regions run server 0.4.2 using maintainer-provided certificates. Original game resources remain read-only; the macOS development build is not notarized.',
         'announcements' => [
             ['title' => 'Welcome to the GTA V public session',
                 'body' => "Select Public Session in the launcher, enter your nickname and choose an available route. Shared guests select online mode on the web page and enter their own details.\nPlayers must use the same server; each port has a separate session.",
@@ -183,14 +213,15 @@ $translations = [
 ];
 $downloadCandidates = [
     'macos_arm64' => [
-        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-macOS-arm64-v0.2.13-development.zip',
-        'sha256' => '1e5f625798abf957badeae9ace05d5a29e68e559e7c58f4f2d410945bfbdfc46',
+        'url' => '',
+        'sha256' => '',
     ],
     'windows_x64' => [
-        'url' => 'https://oss.2t.hk/gtav/GTA5Data-Launcher-Windows-x64-v0.2.13.exe',
-        'sha256' => '98385c353680548dd5b7aa5e745f22fa33345e5a525886917aa63655a7b6cd6c',
+        'url' => '',
+        'sha256' => '',
     ],
 ];
+// 新构建验证完成后填入下载 URL 与真实 SHA-256；未完成的包不显示。
 // ── 配置内容结束 ──
 
 try {
@@ -235,7 +266,10 @@ try {
             }
         }
         if (isset($server['health_url'])) {
-            configUrl($server['health_url'], false);
+            configUrl($server['health_url']);
+        }
+        if (isset($server['websocket_url'])) {
+            configSocketUrl($server['websocket_url']);
         }
     }
     foreach ($announcements as $announcement) {

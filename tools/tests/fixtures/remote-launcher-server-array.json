@@ -7,13 +7,13 @@
             "id": "main",
             "name": "公共战局",
             "role": "主线路",
-            "address": "183.66.27.21:47485"
+            "address": "198.51.100.21:47485"
         },
         {
             "id": "experimental",
             "name": "实验战局",
             "role": "实验线路",
-            "address": "183.66.27.21:47486"
+            "address": "198.51.100.21:47486"
         }
     ],
     "announcements": [

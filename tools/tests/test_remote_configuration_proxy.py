@@ -18,6 +18,32 @@ def response(value):
 
 
 class RemoteConfigurationProxyTests(unittest.TestCase):
+    def test_cli_local_startup_exposes_effective_address_without_public_fallback(self):
+        resources = {'root': ROOT / 'unused-test-game', 'runtime_root': ROOT / 'unused-test-cache',
+                     'multiplayer_ready': True}
+        for arguments, exposed, started in [
+            ([], '', None),
+            (['--room-server', 'custom.example:31415'], 'custom.example:31415', None),
+            (['--start-room-server'], '127.0.0.1:8787', '127.0.0.1:8787'),
+            (['--start-room-server', '--room-server', 'auto'], 'auto', '127.0.0.1:8787'),
+            (['--start-room-server', '--room-server', '127.0.0.1:29999'],
+             '127.0.0.1:29999', '127.0.0.1:29999'),
+        ]:
+            with self.subTest(arguments=arguments), \
+                    patch.object(PROXY, 'inspect_game_resources', return_value=resources), \
+                    patch.object(PROXY, 'start_room_server') as start, \
+                    patch.object(PROXY, 'create_local_servers', return_value=[]) as create, \
+                    patch.object(PROXY, 'stop_room_server'), \
+                    patch.object(PROXY.time, 'sleep', side_effect=KeyboardInterrupt), \
+                    patch('builtins.print'):
+                start.return_value.poll.return_value = 0
+                PROXY.main(['--host', '127.0.0.1', *arguments])
+                self.assertEqual(create.call_args.args[2], exposed)
+                if started is None:
+                    start.assert_not_called()
+                else:
+                    start.assert_called_once_with(started, 'java', '127.0.0.1')
+
     def test_each_request_reads_current_remote_response(self):
         with patch.object(PROXY, 'urlopen', side_effect=[
             response({'oltitle': 'https://first.example.com'}),
@@ -62,13 +88,13 @@ class RemoteConfigurationProxyTests(unittest.TestCase):
     def test_remote_server_routes_preserve_tls_and_proxy_paths(self):
         servers = [
             {'id': 'main', 'name': '公共战局', 'role': '主线路',
-             'address': 'gtaserver.2t.hk:47485',
-             'health_url': 'https://gtaserver.2t.hk:47485/47485/health'},
+             'address': 'gtaserver-cn.2t.hk:47485',
+             'health_url': 'https://gtaserver-cn.2t.hk:47485/47485/health'},
             {'id': 'experimental', 'name': '实验战局', 'role': '实验线路',
-             'address': 'gtaserver.2t.hk:47486',
-             'health_url': 'https://gtaserver.2t.hk:47486/47486/health',
-             'websocket_url': 'wss://gtaserver.2t.hk:47486/47486/ws',
-             'ws_url': 'wss://gtaserver.2t.hk:47486/47486/ws'},
+             'address': 'gtaserver-cn.2t.hk:47486',
+             'health_url': 'https://gtaserver-cn.2t.hk:47486/47486/health',
+             'websocket_url': 'wss://gtaserver-cn.2t.hk:47486/47486/ws',
+             'ws_url': 'wss://gtaserver-cn.2t.hk:47486/47486/ws'},
         ]
         with patch.object(PROXY, 'urlopen', return_value=response({
             'oltitle': 'https://gtav.2t.hk', 'server': servers,
@@ -79,6 +105,20 @@ class RemoteConfigurationProxyTests(unittest.TestCase):
         self.assertEqual(result['config']['server'], servers)
         self.assertEqual(request.call_count, 1)
         request.assert_called_once_with('https://oss.2t.hk/gtav/', timeout=4)
+
+    def test_routes_and_regions_change_only_with_the_current_interface_response(self):
+        first = {'id': 'main', 'address': 'new-region.example:31415', 'region': 'NEW',
+                 'health_url': 'https://new-region.example:31415/custom/health',
+                 'websocket_url': 'wss://transport.example:29999/session/socket?room=main',
+                 'i18n': {'en': {'name': 'New region', 'role': 'Main', 'region': 'New region'}}}
+        next_line = {'id': 'main', 'address': 'changed.example:32768', 'region': 'NEXT'}
+        with patch.object(PROXY, 'urlopen', side_effect=[
+                response({'servers': [first]}), response({'servers': [next_line]})]):
+            self.assertEqual(PROXY.online_remote_configuration()['config']['servers'], [first])
+            self.assertEqual(PROXY.online_remote_configuration()['config']['servers'], [next_line])
+        self.assertEqual(PROXY.DEFAULT_ROOM_SERVER, '')
+        with patch.object(PROXY, 'urlopen', return_value=response({'servers': [{**first, 'region': 'x' * 65}]})):
+            self.assertEqual(PROXY.online_remote_configuration()['source'], 'unavailable')
 
     def test_unsafe_server_fields_reject_entire_current_response(self):
         for field, value in [
