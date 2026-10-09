@@ -26,6 +26,47 @@ from inspect_native_bridge import Reader, WasmAudit
 
 
 class PublicEnginePatchTests(unittest.TestCase):
+    def test_public_radar_exports_preserve_abis_and_original_bodies(self):
+        expected = {
+            'mpDisplayHud': (51542, ['i32'], []),
+            'mpDisplayRadar': (51610, ['i32'], []),
+            'mpIsRadarHidden': (51614, [], ['i32']),
+            'mpIsMinimapRendering': (51615, [], ['i32']),
+            'mpHudPreference': (51539, [], ['i32']),
+            'mpRadarPreference': (51540, [], ['i32']),
+            'mpMinimapHideFog': (51755, ['i32'], []),
+            'mpMinimapPrologue': (51761, ['i32'], []),
+            'mpUnlockMinimapAngle': (51765, [], []),
+            'mpUnlockMinimapPosition': (51767, [], []),
+            'mpMinimapBackgroundInfo': (52350, ['i64'], []),
+        }
+        for name, (index, parameters, results) in expected.items():
+            self.assertIn(name, self.audits['public'].exports[index])
+            self.assertEqual(self.original.descriptor(index)['signature'], {'parameters': parameters, 'results': results})
+            self.assertEqual(self.body(self.original, index), self.body(self.audits['public'], index))
+        instructions = self.original.instructions(52350)['instructions']
+        self.assertEqual([op['operation'] for op in instructions],
+                         ['i64.const', 'local.get', 'i64.load', 'i32.load', 'i32.const', 'i32.ne', 'i32.store8', 'end'])
+        self.assertEqual(instructions[0]['value'], 19508521)
+        self.assertEqual(instructions[2]['memory']['offset'], 16)
+        self.assertEqual(instructions[3]['memory']['offset'], 0)
+        fog = self.original.instructions(51755)['instructions']
+        self.assertEqual(fog[0]['value'], 19520605)
+
+    def test_collision_query_exports_use_original_script_command_abis(self):
+        expected = {
+            'mpStartShapeTestLOS': (59400, ['i64', 'i64', 'i32', 'i32', 'i32'], ['i32']),
+            'mpStartShapeTestSweptSphere': (59407, ['i64', 'i64', 'f32', 'i32', 'i32', 'i32'], ['i32']),
+            'mpShapeTestResultMaterial': (59410, ['i32', 'i64', 'i64', 'i64', 'i64', 'i64'], ['i32']),
+            'mpCollisionLoadedAroundEntity': (50141, ['i32'], ['i32']),
+            'mpWaitingForWorldCollision': (50087, ['i32'], ['i32']),
+            'mpModelDimensions': (52892, ['i32', 'i64', 'i64'], []),
+        }
+        for name, (index, params, results) in expected.items():
+            self.assertIn(name, self.audits['public'].exports[index])
+            self.assertEqual(self.original.descriptor(index)['signature'], {'parameters': params, 'results': results})
+            self.assertEqual(self.body(self.original, index), self.body(self.audits['public'], index))
+
     def test_cached_melee_inputs_use_two_byte_outputs_and_preserve_original_body(self):
         index = 41719
         self.assertIn('mpCachedMeleeInputs', self.audits['public'].exports[index])
@@ -106,10 +147,31 @@ class PublicEnginePatchTests(unittest.TestCase):
         self.assertEqual(self.reports["probe"]["prototype"]["sha256"],
                          "bbf19a89c8327eb580eb3c7a1530dbd1988ac3f4624897aba3f348cf98393dd8")
         self.assertEqual(len(self.reports["probe"]["additional_exports"]), len(export_map(False)))
-        self.assertEqual(self.body(self.audits["replica"], HOOK_FUNCTION),
-                         self.body(self.audits["public"], HOOK_FUNCTION))
+        self.assertNotEqual(self.body(self.audits["replica"], HOOK_FUNCTION),
+                            self.body(self.audits["public"], HOOK_FUNCTION))
+        from build_native_probe import SCRIPT_GATE_MAGIC, signed_leb, unsigned_leb, CALLBACK_IMPORT
+        gate = b'\x20\x00\x41' + signed_leb(SCRIPT_GATE_MAGIC) + b'\x10' + unsigned_leb(CALLBACK_IMPORT) + b'\x0d\x00'
+        public_body = self.body(self.audits['public'], HOOK_FUNCTION)
+        self.assertEqual(public_body.count(gate), 1)
+        offset = self.reports['public']['hook']['original_file_offset'] - self.original.bodies[HOOK_FUNCTION][0]
+        original_body = self.body(self.original, HOOK_FUNCTION)
+        injected = bytes.fromhex(self.reports['public']['hook']['inserted_bytes_hex'])
+        self.assertEqual(public_body, original_body[:offset] + injected + original_body[offset:])
+        self.assertEqual(self.reports['public']['script_gate']['resume_instruction_offset'], 32869)
+        self.assertTrue(self.audits['public'].instructions(HOOK_FUNCTION)['decode_complete'])
         self.assertEqual(self.body(self.audits["replica"], PUBLIC_MODEL_WRAPPER), EXPECTED_MODEL_WRAPPER)
         self.assertEqual(self.source_digest, ORIGINAL_SHA256)
+
+    def test_server_rules_native_interfaces_preserve_verified_abis_and_bodies(self):
+        from build_native_probe import export_map
+        names = ['mpSetProofs', 'mpPlayerWeaponDamage', 'mpPlayerMeleeDamage', 'mpDriveToCoord',
+                 'mpVisualExplosion', 'mpDrawSphere', 'mpGetAmmo', 'mpControlJustPressed']
+        for name in names:
+            index, function_name, parameters, results = export_map(True)[name]
+            with self.subTest(name=name):
+                self.assertEqual(self.original.descriptor(index)['name'], function_name)
+                self.assertEqual(self.original.descriptor(index)['signature'], {'parameters': parameters, 'results': results})
+                self.assertEqual(self.body(self.original, index), self.body(self.audits['public'], index))
 
     def test_only_expected_function_bodies_change(self):
         for name, expected in (("probe", {HOOK_FUNCTION}), ("replica", {HOOK_FUNCTION}),

@@ -1,6 +1,6 @@
 import { normalizeServerAddress } from './server-address.js';
 import { modelForPreset, normalizeAppearance, randomAppearance } from './appearance.js';
-import { createWorldState, cleanWorldTransform } from './world-state.js';
+import { createWorldState, cleanWorldTransform, cleanSessionPolicy } from './world-state.js';
 
 const coordinates = (value) => Array.isArray(value) && value.length === 3
   && value.every((number) => typeof number === 'number' && Number.isFinite(number) && Math.abs(number) <= 16000);
@@ -48,6 +48,8 @@ function cleanShotResult(value) {
   if (Object.hasOwn(value, 'reason') && (typeof value.reason !== 'string' || !/^[a-z_]{1,64}$/.test(value.reason))) return null;
   if (Object.hasOwn(value, 'revision') && (!Number.isSafeInteger(value.revision) || value.revision < 0)) return null;
   return { seq: value.seq, weapon: value.weapon, accepted: value.accepted, hit,
+    ...(value.pending === true ? { pending: true } : {}),
+    ...(Number.isSafeInteger(value.scheduled_at) && value.scheduled_at >= 0 ? { scheduled_at: value.scheduled_at } : {}),
     ...(Object.hasOwn(value, 'victim_id') ? { victim_id: value.victim_id } : {}),
     ...(Object.hasOwn(value, 'damage') ? { damage: value.damage } : {}),
     ...(Object.hasOwn(value, 'health') ? { health: value.health } : {}),
@@ -62,16 +64,63 @@ function cleanCombatPlayer(value) {
   return { ...value, revision, ...(coordinates(value.spawn) ? { spawn: value.spawn.slice() } : {}) };
 }
 function cleanWeaponRules(value) {
-  if (!Array.isArray(value) || value.length > 128) return null;
+  if (!Array.isArray(value) || value.length > 256) return null;
   const hashes = new Set(), rules = [];
   for (const rule of value) {
-    if (!rule || typeof rule !== 'object' || Array.isArray(rule) || Object.keys(rule).length !== 3
+    if (!rule || typeof rule !== 'object' || Array.isArray(rule)
       || !unsignedHash(rule.weapon) || hashes.has(rule.weapon)
-      || !Number.isInteger(rule.cooldown_ms) || rule.cooldown_ms < 1 || rule.cooldown_ms > 2000
+      || !Number.isInteger(rule.cooldown_ms) || rule.cooldown_ms < 1 || rule.cooldown_ms > 10000
       || !Number.isInteger(rule.damage) || rule.damage < 0 || rule.damage > 200) return null;
-    hashes.add(rule.weapon); rules.push({ weapon: rule.weapon, cooldown_ms: rule.cooldown_ms, damage: rule.damage });
+    if (Object.keys(rule).some(key => !['weapon', 'name', 'mode', 'cooldown_ms', 'damage', 'range', 'pellets', 'spread',
+      'blast_radius', 'speed', 'fuse_ms', 'melee_damage', 'melee_range', 'detonation', 'gravity', 'lifetime_ms',
+      'effect_duration_ms', 'effect_interval_ms', 'asset_damage', 'asset_fire_type', 'damage_type', 'collision_model'].includes(key))) return null;
+    if (rule.mode !== undefined && !['hitscan', 'shotgun', 'projectile', 'melee', 'utility', 'environment'].includes(rule.mode)) return null;
+    if (rule.name !== undefined && (typeof rule.name !== 'string' || !/^[A-Za-z0-9_]{1,80}$/.test(rule.name))) return null;
+    for (const key of ['range', 'spread', 'blast_radius', 'speed', 'melee_range', 'gravity']) {
+      if (rule[key] !== undefined && (!Number.isFinite(rule[key]) || rule[key] < 0 || rule[key] > 10000)) return null;
+    }
+    if (rule.asset_damage !== undefined && (!Number.isFinite(rule.asset_damage) || rule.asset_damage < -1 || rule.asset_damage > 10000)) return null;
+    for (const [key, max] of [['pellets', 128], ['fuse_ms', 120000], ['melee_damage', 200], ['lifetime_ms', 600000],
+      ['effect_duration_ms', 600000], ['effect_interval_ms', 600000]]) {
+      if (rule[key] !== undefined && (!Number.isInteger(rule[key]) || rule[key] < 0 || rule[key] > max)) return null;
+    }
+    if (rule.detonation !== undefined && !['impact', 'timed', 'remote', 'none'].includes(rule.detonation)) return null;
+    for (const key of ['damage_type', 'asset_fire_type']) if (rule[key] !== undefined
+      && (typeof rule[key] !== 'string' || !/^[A-Z_]{1,64}$/.test(rule[key]))) return null;
+    if (rule.collision_model !== undefined && !['ped_capsules', 'ped_capsules_aim_terminal', 'server_trajectories_world_queries'].includes(rule.collision_model)) return null;
+    hashes.add(rule.weapon); rules.push({ ...rule });
   }
   return rules;
+}
+
+function cleanProjectileEffect(value, { area = false } = {}) {
+  const id = text => typeof text === 'string' && /^[A-Za-z0-9_.:-]{1,160}$/.test(text);
+  const time = number => Number.isSafeInteger(number) && number >= 0;
+  if (!value || !id(value.projectile_id) || !unsignedHash(value.weapon) || !coordinates(value.position)) return null;
+  if (area || value.type === 'area_effect') {
+    if (!time(value.expires_at) || !Number.isFinite(value.radius) || value.radius < 0 || value.radius > 100
+      || typeof value.damage_type !== 'string' || !/^[A-Z_]{1,64}$/.test(value.damage_type)) return null;
+    return { type: 'area_effect', projectile_id: value.projectile_id, weapon: value.weapon, position: [...value.position],
+      expires_at: value.expires_at, radius: value.radius, damage_type: value.damage_type };
+  }
+  if (!id(value.player_id) || !time(value.shot_seq) || !time(value.world_tick)) return null;
+  if (value.type === 'explosion_event') {
+    if (!Number.isFinite(value.radius) || value.radius < 0 || value.radius > 100
+      || !time(value.effect_duration_ms) || value.effect_duration_ms > 600000
+      || typeof value.damage_type !== 'string' || !/^[A-Z_]{1,64}$/.test(value.damage_type)) return null;
+    return { ...value, position: [...value.position] };
+  }
+  if (!['launch', 'landed', 'flight', 'expired'].includes(value.phase) || !coordinates(value.origin)
+      || !coordinates(value.target) || !time(value.created_at) || !time(value.expires_at)
+      || !time(value.flight_ms) || value.flight_ms < 1 || value.flight_ms > 120000
+      || !time(value.fuse_ms) || value.fuse_ms > 120000 || !Number.isFinite(value.gravity)
+      || value.gravity < 0 || value.gravity > 100 || !['impact', 'timed', 'remote', 'none'].includes(value.detonation)) return null;
+  if (Object.hasOwn(value, 'physics') && !['ballistic', 'legacy_arc'].includes(value.physics)) return null;
+  if (value.physics === 'ballistic' && (!coordinates(value.motion_origin) || !coordinates(value.velocity)
+      || !time(value.motion_at) || value.motion_at > value.world_tick)) return null;
+  return { ...value, origin: [...value.origin], target: [...value.target], position: [...value.position],
+    ...(value.physics === 'ballistic' ? { motion_origin: [...value.motion_origin], velocity: [...value.velocity],
+      motion_at: value.motion_at } : {}) };
 }
 
 // 游戏页直接持有连接。关闭大厅不会影响战局，也不需要另开浏览器标签页。
@@ -83,16 +132,23 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   const requestNamespace = newRequestNamespace(), requestAliases = new Map();
   let wireRequestSequence = 0;
   const meleeRequests = new Map(), consumedMeleeEvents = new Set();
+  const quietRejections = new Set(['rate_limited', 'cooldown', 'stale_seq', 'stale_input', 'stale_owner', 'stale_generation',
+    'stale_revision', 'invalid_revision', 'seat_unavailable', 'too_far', 'not_facing', 'player_dead', 'weapon_mismatch', 'not_ready', 'stale_collision']);
+  let collisionNoticeShown = false;
   let pendingMelee = null, meleeTimer = 0;
+  const meleeQueue = [];
   const pendingEntityInputs = new Map();
   let entityTimer = 0, lastEntityBatchSentAt = -Infinity;
   let lastWorldSyncAt = -Infinity, interactionSequence = 0;
   const weaponRuleByHash = new Map();
   let weaponRules = [];
+  let sessionPolicy = null;
   // 每个游戏页独占连接与桥接，避免同一来源的多个标签页混用角色和身份。
   let receiver = null, latestStatus = null;
   const pendingControls = [];
   const pendingWorldEvents = new Map();
+  const projectileEffects = new Map();
+  const collisionQueries = new Map();
   const identityKey = 'gta5.public.identity:' + address + ':' + preferences.name;
   let savedIdentity = null;
   // 主页主动选择角色属于新加入；刷新游戏页才读取上一身份。当前连接的自动重连仍使用之后保存的身份。
@@ -193,6 +249,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
       resume_position: resumeState?.position || null,
       spawn: connected ? spawn : null,
       weapon_rules: weaponRules.map((rule) => ({ ...rule })),
+      session_policy: sessionPolicy && { ...sessionPolicy, allowed_scripts: [...sessionPolicy.allowed_scripts] },
       world_v2: supportsWorldV2,
       melee_events: supportsMeleeEvents,
       avatar: preferences.preset.endsWith('_female') ? 'female' : 'male', preset: preferences.preset, seed: preferences.seed,
@@ -221,13 +278,15 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   }
   function receiveMeleeEvent(message) {
     const current = world.state();
+    const meleeRule = weaponRuleByHash.get(message.weapon);
+    const maximumDamage = meleeRule?.melee_damage ?? 20;
     const id = (value) => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,160}$/.test(value);
     const generation = (value) => Number.isSafeInteger(value) && value > 0;
     if (!supportsMeleeEvents || message.schema_version !== 2 || message.world_epoch !== current.world_epoch
       || !id(message.event_id) || !id(message.request_id) || !id(message.attacker_entity_id)
       || !id(message.attacker_id) || !generation(message.attacker_generation) || message.action !== 'punch'
       || message.accepted !== true || typeof message.hit !== 'boolean' || !Number.isInteger(message.damage)
-      || message.damage < 0 || message.damage > 20 || !Number.isSafeInteger(message.revision) || message.revision < 0
+      || message.damage < 0 || message.damage > maximumDamage || !Number.isSafeInteger(message.revision) || message.revision < 0
       || !Number.isSafeInteger(message.world_tick) || message.world_tick < 0) return;
     const attacker = world.entity(message.attacker_entity_id);
     const target = message.target_entity_id === null ? null : world.entity(message.target_entity_id);
@@ -245,12 +304,18 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
       attacker_id: message.attacker_id, attacker_generation: message.attacker_generation,
       target_entity_id: message.target_entity_id, target_generation: message.target_generation,
       accepted: true, hit: message.hit, damage: message.damage, health: message.health, revision: message.revision, world_tick: message.world_tick };
+    if (unsignedHash(message.weapon)) event.weapon = message.weapon;
+    if (typeof message.melee_style === 'string' && /^[a-z_]{1,32}$/.test(message.melee_style)) event.melee_style = message.melee_style;
     logMelee({ stage: 'event', request_id: event.request_id, event_id: event.event_id,
       attacker_entity_id: event.attacker_entity_id, target_entity_id: event.target_entity_id,
       hit: event.hit, damage: event.damage, health: event.health, revision: event.revision, reason: '' });
     emit(event);
   }
-  function clearPendingMelee() { pendingMelee = null; clearTimeout(meleeTimer); meleeTimer = 0; }
+  function clearPendingMelee() { pendingMelee = null; meleeQueue.length = 0; clearTimeout(meleeTimer); meleeTimer = 0; }
+  function nextMelee() {
+    pendingMelee = meleeQueue.shift() || null; clearTimeout(meleeTimer); meleeTimer = 0;
+    if (pendingMelee) meleeTimer = setTimeout(flushMelee, 10);
+  }
   function flushMelee() {
     clearTimeout(meleeTimer); meleeTimer = 0;
     if (!pendingMelee || stopped || !profiled) return;
@@ -270,7 +335,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
       attacker_generation: actor.generation, target_entity_id: target?.entity_id || null, target_generation: target?.generation || null };
     meleeRequests.set(attempt.request_id, details);
     if (meleeRequests.size > 128) meleeRequests.delete(meleeRequests.keys().next().value);
-    logMelee({ stage: 'sent', ...details }); clearPendingMelee();
+    logMelee({ stage: 'sent', ...details }); nextMelee();
   }
   function clearEntityInputs() {
     pendingEntityInputs.clear(); clearTimeout(entityTimer); entityTimer = 0;
@@ -320,7 +385,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
         && socket.bufferedAmount > 65536)) return;
     const current = world.state();
     const ownPlayer = current.entities.find((entry) => entry.player_id === clientId);
-    const meleeNoTarget = data.type === 'interaction_request' && data.action === 'melee' && !data.entity_id;
+    const meleeNoTarget = data.type === 'interaction_request' && ['melee', 'detonate'].includes(data.action) && !data.entity_id;
     const leaveFromPlayer = data.type === 'interaction_request' && data.action === 'leave_vehicle'
       && (!data.entity_id || data.entity_id === ownPlayer?.entity_id);
     const targetId = leaveFromPlayer ? ownPlayer?.components.attachment?.entity_id
@@ -336,7 +401,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
       return;
     }
     if (data.type === 'interaction_request') {
-      if (!['enter_vehicle', 'leave_vehicle', 'melee'].includes(data.action)
+      if (!['enter_vehicle', 'leave_vehicle', 'melee', 'detonate'].includes(data.action)
         || Object.keys(data).some((key) => !['type', 'world_epoch', 'entity_id', 'action', 'seat', 'request_id', 'expected_revision', 'target_generation', 'attacker_generation', 'actor_generation', 'state'].includes(key))
         || (data.action === 'enter_vehicle' && (entity.kind !== 'vehicle' || !/^(driver|passenger:(?:[0-9]|1[0-5]))$/.test(data.seat)))
         || (!meleeNoTarget && Object.hasOwn(data, 'target_generation') && data.target_generation !== entity.generation)
@@ -344,6 +409,9 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
           || data.expected_revision < 0 || data.expected_revision > entity.revision))) return;
       const requestId = wireRequestId(data.request_id ?? 'request-' + (++interactionSequence));
       if (!requestId) return;
+      if (data.action === 'detonate') {
+        send('interaction_request', { world_epoch: current.world_epoch, request_id: requestId, action: 'detonate' }); return;
+      }
       if (data.action === 'melee') {
         if (!ownPlayer || entity.kind !== 'ped'
           || (Object.hasOwn(data, 'attacker_generation') && data.attacker_generation !== ownPlayer.generation)
@@ -354,9 +422,11 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
           latestLocalState = clean; pendingState = clean;
         }
         if (!latestLocalState) return;
-        pendingMelee = { world_epoch: current.world_epoch, request_id: requestId, entity_id: meleeNoTarget ? null : entity.entity_id,
+        const attempt = { world_epoch: current.world_epoch, request_id: requestId, entity_id: meleeNoTarget ? null : entity.entity_id,
           target_generation: meleeNoTarget ? null : entity.generation, attacker_generation: ownPlayer.generation,
           expected_revision: meleeNoTarget ? null : (data.expected_revision ?? entity.revision), at: performance.now() };
+        if (pendingMelee) { meleeQueue.push(attempt); if (meleeQueue.length > 8) meleeQueue.splice(7, 1); }
+        else pendingMelee = attempt;
         flushMelee(); return;
       }
       send('interaction_request', { world_epoch: current.world_epoch, request_id: requestId, action: data.action,
@@ -506,7 +576,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
       clearPendingShot(); return;
     }
     const rule = weaponRuleByHash.get(shot.event.weapon);
-    const delay = Math.max(0, (rule ? Math.max(50, rule.cooldown_ms + 15) : 50) - (now - lastShotSentAt));
+    const delay = Math.max(0, (rule ? Math.max(10, rule.cooldown_ms + 15) : 50) - (now - lastShotSentAt));
     if (delay || !socket || socket.bufferedAmount > 65536) { scheduleShot(delay || 10); return; }
     // 一条有限寿命的射击等待最新同武器状态，防止单发被状态节流或短暂背压丢弃。
     pendingState = latestLocalState || shot.state;
@@ -515,13 +585,24 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     shotSequence++; lastShotSentAt = now;
     logCombat({ stage: 'sent', client_id: clientId, seq: shotSequence, weapon: shot.event.weapon });
     clearPendingShot();
-    clearPendingMelee(); meleeRequests.clear(); consumedMeleeEvents.clear();
-    pendingWorldEvents.clear();
-    clearEntityInputs(); lastEntityBatchSentAt = -Infinity;
   }
   function onWorkerMessage(data) {
     if (data?.type === 'bridge_ready') { postSession(); postWorld(); return; }
     if (!room || !profiled || stopped) return;
+    if (data?.type === 'collision_result') {
+      const query = collisionQueries.get(data.query_id);
+      if (!query || data.world_epoch !== query.world_epoch || data.world_epoch !== world.state().world_epoch
+        || typeof data.complete !== 'boolean' || performance.now() > query.local_expires) return;
+      collisionQueries.delete(data.query_id);
+      const hits = data.hits;
+      if (!Array.isArray(hits) || (data.complete && hits.length !== query.segments.length)
+        || hits.some(hit => hit !== null && (!coordinates(hit.position) || !coordinates(hit.normal) || !unsignedHash(hit.material)))) return;
+      send('collision_result', { schema_version: 2, world_epoch: query.world_epoch, query_id: query.query_id,
+        complete: data.complete, hits: data.complete ? hits.map(hit => hit && ({ position: hit.position,
+          normal: hit.normal, material: hit.material })) : [],
+        ...(typeof data.reason === 'string' && /^[a-z_]{1,64}$/.test(data.reason) ? { reason: data.reason } : {}) });
+      return;
+    }
     if (['entity_ready', 'entity_input', 'interaction_request', 'simulation_result'].includes(data?.type)) { worldWorkerMessage(data); return; }
     if (data?.type === 'local_state') {
       const clean = cleanPlayerState(data.state);
@@ -543,7 +624,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
       }
       latestLocalState = state;
       const rule = weaponRuleByHash.get(event.weapon);
-      pendingShot = { event, state, at: now, maxWait: Math.min(2250, Math.max(250, (rule?.cooldown_ms || 0) + 100)) };
+      pendingShot = { event, state, at: now, maxWait: Math.min(10250, Math.max(250, (rule?.cooldown_ms || 0) + 100)) };
       flushShot();
     }
   }
@@ -552,6 +633,9 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     clearTimeout(connectionTimer); connectionTimer = 0;
     clearTimeout(stateTimer); stateTimer = 0;
     clearPendingShot();
+    clearPendingMelee(); meleeRequests.clear(); consumedMeleeEvents.clear();
+    pendingWorldEvents.clear(); projectileEffects.clear(); collisionQueries.clear();
+    clearEntityInputs(); lastEntityBatchSentAt = -Infinity;
     clearTimeout(heartbeatTimer); heartbeatTimer = 0;
     clearTimeout(snapshotTimer); snapshotTimer = 0;
     const previous = socket; socket = null;
@@ -585,8 +669,10 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
       ...(supportsCombatFeedback ? ['combat_feedback'] : []),
       ...(supportsActions ? ['actions'] : []),
       ...(supportsWorldV2 ? ['world_v2'] : []),
+      ...(supportsWorldV2 && serverFeatures.has('session_policy') ? ['session_policy'] : []),
       ...(supportsWorldV2 && serverFeatures.has('world_environment') ? ['world_environment'] : []),
       ...(supportsWorldV2 && serverFeatures.has('shared_law') ? ['shared_law'] : []),
+      ...(supportsWorldV2 && serverFeatures.has('physics_queries') ? ['physics_queries'] : []),
       ...(supportsEntityBatch ? ['entity_batch'] : []),
       ...(supportsMeleeEvents ? ['melee_events'] : []),
     ];
@@ -655,6 +741,9 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
         supportsMeleeEvents = supportsWorldV2 && message.capabilities.includes('melee_events');
         weaponRules = Object.hasOwn(message, 'weapon_rules') ? cleanWeaponRules(message.weapon_rules) : [];
         if (!weaponRules) throw new Error('服务器武器规则格式无效。');
+        sessionPolicy = Object.hasOwn(message, 'session_policy') ? cleanSessionPolicy(message.session_policy) : null;
+        if (Object.hasOwn(message, 'session_policy') && !sessionPolicy) throw new Error('服务器战局脚本策略格式无效。');
+        if (serverFeatures.has('session_policy') && !sessionPolicy) throw new Error('服务器未提供已声明的战局脚本策略。');
         weaponRuleByHash.clear(); for (const rule of weaponRules) weaponRuleByHash.set(rule.weapon, rule);
         hello();
         status('joining', '加入战局中');
@@ -704,11 +793,31 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
         const result = world.receive(message);
         if ((message.type === 'snapshot_begin' && result.changed) || result.needsSnapshot
           || previousEpoch !== world.state().world_epoch) { clearEntityInputs(); clearPendingMelee(); }
-        if (previousEpoch && previousEpoch !== world.state().world_epoch) pendingWorldEvents.clear();
+        if (previousEpoch && previousEpoch !== world.state().world_epoch) { pendingWorldEvents.clear(); projectileEffects.clear(); }
         if (result.changed) postWorld();
         if (result.needsSnapshot) requestWorldSync();
         completeInitialJoin();
         break;
+      }
+      case 'collision_query': {
+        if (!supportsWorldV2 || !serverFeatures.has('physics_queries') || !world.state().ready
+          || message.world_epoch !== world.state().world_epoch || message.observer_id !== clientId
+          || message.schema_version !== 2 || typeof message.query_id !== 'string'
+          || !message.query_id || message.query_id.length > 128 || collisionQueries.has(message.query_id)
+          || !['shot', 'projectile', 'visibility'].includes(message.purpose)
+          || !Number.isSafeInteger(message.issued_at) || !Number.isSafeInteger(message.expires_at)
+          || message.expires_at <= message.issued_at || message.expires_at - message.issued_at > 5000
+          || !Array.isArray(message.segments) || !message.segments.length || message.segments.length > 16
+          || message.segments.some(segment => !coordinates(segment?.from) || !coordinates(segment?.to)
+            || !Number.isFinite(segment.radius) || segment.radius < 0 || segment.radius > 2)) break;
+        const query = { type: 'collision_query', schema_version: 2, world_epoch: message.world_epoch,
+          query_id: message.query_id, observer_id: clientId, purpose: message.purpose,
+          segments: message.segments.map(segment => ({ from: [...segment.from], to: [...segment.to], radius: segment.radius })),
+          issued_at: message.issued_at, expires_at: message.expires_at };
+        for (const [id, old] of collisionQueries) if (old.local_expires < performance.now()) collisionQueries.delete(id);
+        if (collisionQueries.size >= 32) break;
+        collisionQueries.set(query.query_id, { ...query, local_expires: performance.now() + Math.min(1000, query.expires_at - query.issued_at) });
+        emit(query); break;
       }
       case 'interaction_result':
         if (supportsWorldV2 && typeof message.request_id === 'string' && message.request_id.length <= 64
@@ -728,11 +837,39 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
         break;
       case 'world_shot_event': {
         const current = world.state(), attacker = world.entity(message.attacker_entity_id), target = world.entity(message.target_entity_id);
+        const task = attacker?.ai_task;
         if (!current.ready || message.world_epoch !== current.world_epoch || typeof message.event_id !== 'string'
-            || message.event_id.length > 200 || !attacker || !target || attacker.law_response?.role !== 'officer'
+            || message.event_id.length > 200 || !attacker || !target || task?.action !== 'combat'
+            || task.target_entity_id !== target.entity_id || task.target_generation !== target.generation
             || attacker.generation !== message.attacker_generation || target.generation !== message.target_generation
-            || message.weapon !== 0x1b06d571 || !coordinates(message.origin) || !coordinates(message.target)) break;
+            || message.weapon !== attacker.components.ped.weapon || !coordinates(message.origin) || !coordinates(message.target)) break;
         emit({ type: 'world_shot_event', ...message }); break;
+      }
+      case 'projectile_event':
+      case 'explosion_event': {
+        const current = world.state();
+        if (!supportsWorldV2 || message.room_id !== room?.id || message.world_epoch !== current.world_epoch) break;
+        const effect = cleanProjectileEffect(message);
+        if (!effect) throw new Error('服务器投射物事件格式无效。');
+        if (effect.type === 'projectile_event') {
+          if (effect.phase === 'expired') projectileEffects.delete(effect.projectile_id);
+          else projectileEffects.set(effect.projectile_id, effect);
+        } else {
+          projectileEffects.delete(effect.projectile_id);
+          if (effect.effect_duration_ms) projectileEffects.set(effect.projectile_id, { type: 'area_effect',
+            projectile_id: effect.projectile_id, weapon: effect.weapon, position: effect.position,
+            expires_at: effect.world_tick + effect.effect_duration_ms, radius: effect.radius, damage_type: effect.damage_type });
+        }
+        emit(effect); break;
+      }
+      case 'projectile_state': {
+        const current = world.state();
+        if (!supportsWorldV2 || message.room_id !== room?.id || message.world_epoch !== current.world_epoch) break;
+        if (!Array.isArray(message.effects) || message.effects.length > 256) throw new Error('服务器投射物基线格式无效。');
+        const effects = message.effects.map(value => cleanProjectileEffect(value, { area: value.type === 'area_effect' }));
+        if (effects.some(value => !value)) throw new Error('服务器投射物基线格式无效。');
+        projectileEffects.clear(); for (const effect of effects) projectileEffects.set(effect.projectile_id, effect);
+        emit({ type: 'projectile_state', world_epoch: current.world_epoch, world_tick: current.world_tick, effects }); break;
       }
       case 'player_state': {
         if (message.room_id !== room?.id || !room.members.some(({ id }) => id === message.player_id)) return;
@@ -746,6 +883,12 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
         if (message.room_id !== room?.id || !room.members.some(({ id }) => id === message.player_id)) return;
         if (!cleanShotEvent(message.event) || !Number.isSafeInteger(message.event.seq) || message.event.seq < 0) throw new Error('服务器射击事件格式无效。');
         emit(message); break;
+      case 'shot_queued':
+      case 'shot_geometry_pending':
+      case 'shot_cancelled':
+        // 执行队列与地图验证是合法进度；最终反馈使用 shot_result / damage。
+        // 此广播也会到达旁观玩家，不可把等待几何结果当作未知协议而断线。
+        break;
       case 'shot_result': {
         // 战斗反馈不可把正常拒绝或未来版本扩展变成整个战局断线。
         if (!supportsCombatFeedback || !profiled) break;
@@ -788,12 +931,20 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
           hello(false);
           break;
         }
+        if (profiled && quietRejections.has(message.code)) break;
+        if (profiled && message.code === 'invalid_collision') {
+          if (!collisionNoticeShown) {
+            collisionNoticeShown = true;
+            status('notice', '碰撞观测未通过服务器校验，本次判定已跳过。');
+          }
+          break;
+        }
         if (profiled && ['rate_limited', 'stale_seq', 'invalid_shot', 'invalid_movement', 'not_ready', 'player_dead', 'unsupported_weapon', 'weapon_mismatch',
           'stale_input', 'wrong_world', 'invalid_owner', 'not_owner', 'invalid_lease', 'invalid_revision', 'attached_entity', 'dead_entity',
           'seat_unavailable', 'invalid_seat', 'invalid_component', 'unsupported_interaction', 'stale_owner', 'simulation_not_ready',
           'player_input_required', 'health_increase_denied', 'unsupported_simulation', 'invalid_target', 'invalid_reason', 'not_facing', 'invalid_request',
           'too_far', 'stale_revision', 'stale_generation', 'unknown_entity', 'snapshot_required', 'invalid_batch', 'invalid_message', 'static_entity'].includes(message.code)) {
-          const text = message.code === 'unsupported_weapon' ? '当前武器暂不支持多人伤害同步，请使用普通枪械。'
+          const text = message.code === 'unsupported_weapon' ? '服务器武器目录不识别当前武器，请更新服务端资源目录。'
             : message.code === 'weapon_mismatch' ? '武器切换尚未同步，请稍后重新射击。'
             : typeof message.message === 'string' ? message.message : '服务器未接受这次操作';
           status('notice', text);
@@ -844,11 +995,18 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     if (receiver) {
       postSession();
       postWorld();
+      if (projectileEffects.size) emit({ type: 'projectile_state', world_epoch: world.state().world_epoch,
+        world_tick: world.state().world_tick, effects: [...projectileEffects.values()] });
       if (latestStatus) emit(latestStatus);
       const controls = pendingControls.splice(0);
       for (const control of controls) emit(control);
       const events = [...pendingWorldEvents.values()]; pendingWorldEvents.clear();
       for (const event of events) if (event.world_epoch === world.state().world_epoch) emit(event);
+      for (const query of collisionQueries.values()) {
+        if (query.world_epoch === world.state().world_epoch && query.local_expires > performance.now()) {
+          const { local_expires, ...wireQuery } = query; emit(wireQuery);
+        }
+      }
     }
   }
   function close() {

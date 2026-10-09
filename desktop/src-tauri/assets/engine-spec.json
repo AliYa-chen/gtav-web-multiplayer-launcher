@@ -3,8 +3,8 @@
   "purpose": "玩家提供原引擎；启动器仅在外部缓存生成离线和公共战局运行副本。",
   "original_sha256": "11ca8d2c04c5e843d18ff4aea4899d72c86973c6b031df334e67c446b2ae83e0",
   "original_bytes": 63201802,
-  "online_sha256": "589f0c604a5a4e501b141ada1293e0b7257e6a184b814861d7e20274d72c9b26",
-  "online_bytes": 63205284,
+  "online_sha256": "ef2585118fe65fa929bbb93bdf1cd0c3918fc27fceb4531f35557cef7238c58e",
+  "online_bytes": 63205878,
   "imported_functions": 85,
   "callback_import": 11,
   "exports": [
@@ -58,6 +58,80 @@
       "name": "mpFree",
       "function_index": 91002,
       "parameters": [
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpStartShapeTestLOS",
+      "function_index": 59400,
+      "parameters": [
+        "i64",
+        "i64",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpStartShapeTestSweptSphere",
+      "function_index": 59407,
+      "parameters": [
+        "i64",
+        "i64",
+        "f32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpShapeTestResultMaterial",
+      "function_index": 59410,
+      "parameters": [
+        "i32",
+        "i64",
+        "i64",
+        "i64",
+        "i64",
+        "i64"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpCollisionLoadedAroundEntity",
+      "function_index": 50141,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpWaitingForWorldCollision",
+      "function_index": 50087,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpModelDimensions",
+      "function_index": 52892,
+      "parameters": [
+        "i32",
+        "i64",
         "i64"
       ],
       "results": []
@@ -998,6 +1072,103 @@
       ]
     },
     {
+      "name": "mpGetAmmo",
+      "function_index": 62929,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpControlJustPressed",
+      "function_index": 56846,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpSetProofs",
+      "function_index": 50145,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpPlayerWeaponDamage",
+      "function_index": 58802,
+      "parameters": [
+        "i32",
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpPlayerMeleeDamage",
+      "function_index": 58805,
+      "parameters": [
+        "i32",
+        "f32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpDriveToCoord",
+      "function_index": 60575,
+      "parameters": [
+        "i32",
+        "i32",
+        "i64",
+        "f32",
+        "i32",
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpVisualExplosion",
+      "function_index": 50437,
+      "parameters": [
+        "i64",
+        "i32",
+        "f32",
+        "i32",
+        "i32",
+        "f32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpDrawSphere",
+      "function_index": 50518,
+      "parameters": [
+        "i64",
+        "f32",
+        "i32",
+        "i32",
+        "i32",
+        "f32"
+      ],
+      "results": []
+    },
+    {
       "name": "mpCurrentWeaponEntity",
       "function_index": 62919,
       "parameters": [
@@ -1354,6 +1525,90 @@
       ]
     },
     {
+      "name": "mpDisplayHud",
+      "function_index": 51542,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpDisplayRadar",
+      "function_index": 51610,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpIsRadarHidden",
+      "function_index": 51614,
+      "parameters": [],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpIsMinimapRendering",
+      "function_index": 51615,
+      "parameters": [],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpHudPreference",
+      "function_index": 51539,
+      "parameters": [],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpRadarPreference",
+      "function_index": 51540,
+      "parameters": [],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpMinimapHideFog",
+      "function_index": 51755,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpMinimapPrologue",
+      "function_index": 51761,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpUnlockMinimapAngle",
+      "function_index": 51765,
+      "parameters": [],
+      "results": []
+    },
+    {
+      "name": "mpUnlockMinimapPosition",
+      "function_index": 51767,
+      "parameters": [],
+      "results": []
+    },
+    {
+      "name": "mpMinimapBackgroundInfo",
+      "function_index": 52350,
+      "parameters": [
+        "i64"
+      ],
+      "results": []
+    },
+    {
       "name": "mpFrontendReady",
       "function_index": 51856,
       "parameters": [],
@@ -1694,8 +1949,8 @@
       "original_body_bytes": 32915,
       "original_body_sha256": "1708011660672d8db72b6fbf8b96e21488ec78ca3b35ad63022e4ea63b319973",
       "operation": "insert",
-      "offset": 115,
-      "bytes_hex": "200041c2a8c1ea04100b1a",
+      "offset": 117,
+      "bytes_hex": "200041c2a8c1ea04100b1a200041c3a6c1ea04100b0d00",
       "expected_prefix_hex": "031a7e0c7f067d230042f00b7d220521082005240042b0d6ac07200042ac037c22143703002000280220221d417e714102470440200042c0017c210642a0d6ac07290300211a42a0d6ac072000370300230122024298187c221b41013a000020024290187c2218290300211920182000370300",
       "expected_tail_hex": ""
     },

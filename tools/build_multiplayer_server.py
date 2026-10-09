@@ -1,10 +1,12 @@
 """将多人大厅服务端编译成 Java 17 可执行 JAR，不依赖 Maven 或第三方库。"""
 import argparse
+import io
 import shutil
 import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
+from readonly_game_outputs import atomic_write_bytes, validate_output
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -19,8 +21,11 @@ def main(argv=None):
     sources = sorted((ROOT / 'server/src/main/java').rglob('*.java'))
     if not sources:
         parser.error('没有找到多人服务端 Java 源码')
-    output = args.output.expanduser().resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
+    boundary = {'sources': sources, 'protected_roots': (ROOT / 'gta5data',)}
+    try:
+        output = validate_output(args.output, **boundary)
+    except ValueError as error:
+        parser.error(str(error))
     with tempfile.TemporaryDirectory(prefix='gta5-lobby-build-') as temp:
         classes = Path(temp) / 'classes'
         classes.mkdir()
@@ -29,19 +34,16 @@ def main(argv=None):
         result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, encoding='utf-8')
         if result.returncode:
             parser.exit(result.returncode, 'Java 编译失败：\n' + result.stdout + result.stderr)
-        temporary = output.with_suffix('.jar.tmp')
-        try:
-            with zipfile.ZipFile(temporary, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+        with io.BytesIO() as payload:
+            with zipfile.ZipFile(payload, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
                 archive.writestr('META-INF/MANIFEST.MF',
                                  'Manifest-Version: 1.0\r\nMain-Class: offline.multiplayer.Main\r\n\r\n')
                 for source in sorted(classes.rglob('*.class')):
                     archive.write(source, source.relative_to(classes).as_posix())
-            with zipfile.ZipFile(temporary) as archive:
+            with zipfile.ZipFile(payload) as archive:
                 assert archive.testzip() is None
                 assert 'offline/multiplayer/Main.class' in archive.namelist()
-            temporary.replace(output)
-        finally:
-            temporary.unlink(missing_ok=True)
+            atomic_write_bytes(output, payload.getvalue(), **boundary)
     print('多人大厅 JAR 已生成：%s（%d 字节，运行需要 Java 17+）' % (output, output.stat().st_size))
 
 

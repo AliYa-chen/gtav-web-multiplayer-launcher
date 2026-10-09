@@ -12,12 +12,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 from pathlib import Path
 import sys
 
 sys.dont_write_bytecode = True
 from inspect_native_bridge import DEFAULT_WASM, ROOT, Reader, WasmAudit
+from readonly_game_outputs import atomic_write_bytes, atomic_write_text, validate_outputs
 
 ORIGINAL_SHA256 = "11ca8d2c04c5e843d18ff4aea4899d72c86973c6b031df334e67c446b2ae83e0"
 HOOK_FUNCTION = 16953
@@ -25,6 +25,7 @@ HOOK_INSTRUCTION_START = 9966559
 HOOK_INSTRUCTION_OFFSET = 108
 MAGIC = 0x4D505442
 FRONTEND_MAGIC = 0x4D505549
+SCRIPT_GATE_MAGIC = 0x4D505343
 FRONTEND_FUNCTION = 36291
 FRONTEND_BODY_SHA256 = '77649c56f6a2303de1a31efd373ae4757fde6a95bf6e77d3cf33f8f1e6df3c63'
 FRONTEND_TAIL = bytes.fromhex('20064280047c24000b')
@@ -46,6 +47,15 @@ ADDITIONAL_EXPORTS = {
     "mpFree": (91002, "emscripten_builtin_free", ["i64"], []),
 }
 ENTITY_EXPORTS = {
+    # 只在活动脚本上下文发起异步形状查询；不导出内部 phBound/WorldProbe 指针接口。
+    # 输入 scrVector: f32 @0/8/16；结果 Vector3: f32 @0/4/8，但原实现写满16字节。
+    # Get 返回 0=无效,1=待完成,2=完成并消费句柄；material 为名称 Jenkins hash。
+    "mpStartShapeTestLOS": (59400, "shapetest_commands::CommandStartShapeTestLOSProbe(rage::scrVector const&, rage::scrVector const&, int, int, int)", ["i64", "i64", "i32", "i32", "i32"], ["i32"]),
+    "mpStartShapeTestSweptSphere": (59407, "shapetest_commands::CommandStartShapeTestSweptSphere(rage::scrVector const&, rage::scrVector const&, float, int, int, int)", ["i64", "i64", "f32", "i32", "i32", "i32"], ["i32"]),
+    "mpShapeTestResultMaterial": (59410, "shapetest_commands::CommandGetShapeTestResultIncludingMaterial(int, int&, rage::Vector3&, rage::Vector3&, int&, int&)", ["i32", "i64", "i64", "i64", "i64", "i64"], ["i32"]),
+    "mpCollisionLoadedAroundEntity": (50141, "entity_commands::CommandHasCollisionLoadedAroundEntity(int)", ["i32"], ["i32"]),
+    "mpWaitingForWorldCollision": (50087, "entity_commands::CommandIsEntityWaitingForWorldCollision(int)", ["i32"], ["i32"]),
+    "mpModelDimensions": (52892, "misc_commands::CommandGetModelDimensions(int, rage::Vector3&, rage::Vector3&)", ["i32", "i64", "i64"], []),
     # 共同世界的时钟/天气仅由服务器基线驱动；采用单机安全命令，不伪造网络会话。
     # 服务端时钟先按 anchor_tick/rate 推算，再 PauseClock(true)+SetClockTime 应用。
     # 天气字符串为本 tick 内有效的 NUL 结尾 UTF-8；客户端只接受已校验的天气枚举。
@@ -158,6 +168,14 @@ ENTITY_EXPORTS = {
     "mpSelectedWeapon": (62955, "weapon_commands::CommandGetSelectedPedWeapon(int)", ["i32"], ["i32"]),
     "mpGetCurrentPedWeapon": (62918, "weapon_commands::CommandGetCurrentPedWeapon(int, int&, bool)", ["i32", "i64", "i32"], ["i32"]),
     "mpGetAmmoInClip": (62942, "weapon_commands::CommandGetAmmoInClip(int, int, int&)", ["i32", "i32", "i64"], ["i32"]),
+    "mpGetAmmo": (62929, "weapon_commands::CommandGetAmmoInPedWeapon(int, int)", ["i32", "i32"], ["i32"]),
+    "mpControlJustPressed": (56846, "pad_commands::CommandIsControlJustPressed(int, int)", ["i32", "i32"], ["i32"]),
+    "mpSetProofs": (50145, "entity_commands::CommandSetEntityProofs(int, bool, bool, bool, bool, bool, bool, bool, bool)", ["i32"] * 9, []),
+    "mpPlayerWeaponDamage": (58802, "player_commands::CommandSetPlayerWeaponDamageModifier(int, float)", ["i32", "f32"], []),
+    "mpPlayerMeleeDamage": (58805, "player_commands::CommandSetPlayerMeleeWeaponDamageModifier(int, float, bool)", ["i32", "f32", "i32"], []),
+    "mpDriveToCoord": (60575, "task_commands::CommandTaskVehicleDriveToCoordLongRange(int, int, rage::scrVector const&, float, int, float)", ["i32", "i32", "i64", "f32", "i32", "f32"], []),
+    "mpVisualExplosion": (50437, "fire_commands::CommandAddExplosion(rage::scrVector const&, int, float, bool, bool, float, bool)", ["i64", "i32", "f32", "i32", "i32", "f32", "i32"], []),
+    "mpDrawSphere": (50518, "graphics_commands::CommandDrawMarkerSphere(rage::scrVector const&, float, int, int, int, float)", ["i64", "f32", "i32", "i32", "i32", "f32"], []),
     # 视觉弹起点沿真实武器对象的 gun_muzzle 获取；名字查询前须确认 BoneCount > 0。
     # 未就绪返回 0/-1/零向量；输出和 PedBoneCoords 的偏移都是 0/8/16 的 scrVector。
     "mpCurrentWeaponEntity": (62919, "weapon_commands::CommandGetCurrentPedWeaponEntityIndex(int, bool)", ["i32", "i32"], ["i32"]),
@@ -205,6 +223,19 @@ ENTITY_EXPORTS = {
     # 仅覆盖已打开的原生暂停菜单表现，不伪造原网络 flag/session 或切换到原 MP 菜单。
     # Begin 返回 true 后同一脚本 tick 连续 Add/End；字符串为 NUL 结尾 UTF-8。
     "mpPauseMenuActive": (51840, "hud_commands::CommandIsPauseMenuActive()", [], ["i32"]),
+    "mpDisplayHud": (51542, "hud_commands::CommandDisplayHud(bool)", ["i32"], []),
+    "mpDisplayRadar": (51610, "hud_commands::CommandDisplayRadar(bool)", ["i32"], []),
+    "mpIsRadarHidden": (51614, "hud_commands::CommandIsRadarHidden()", [], ["i32"]),
+    "mpIsMinimapRendering": (51615, "hud_commands::CommandIsMiniMapRendering()", [], ["i32"]),
+    "mpHudPreference": (51539, "hud_commands::CommandIsHudPreferenceSwitchedOn()", [], ["i32"]),
+    "mpRadarPreference": (51540, "hud_commands::CommandIsRadarPreferenceSwitchedOn()", [], ["i32"]),
+    "mpMinimapHideFog": (51755, "hud_commands::CommandSetMinimapHideFoW(bool)", ["i32"], []),
+    "mpMinimapPrologue": (51761, "hud_commands::CommandSetMiniMapInPrologue(bool)", ["i32"], []),
+    "mpUnlockMinimapAngle": (51765, "hud_commands::CommandUnlockMiniMapAngle()", [], []),
+    "mpUnlockMinimapPosition": (51767, "hud_commands::CommandUnlockMiniMapPosition()", [], []),
+    # This command exists only as a script wrapper. Its argument is Info*, not bool:
+    # Info+16 points to the caller-owned argument array; first i32 is hidden.
+    "mpMinimapBackgroundInfo": (52350, "hud_commands::SetupScriptCommands()::scrWrapped_SET_MINIMAP_BACKGROUND_HIDDEN::Call(rage::scrThread::Info&)", ["i64"], []),
     "mpFrontendReady": (51856, "hud_commands::CommandIsFrontendReadyForControl()", [], ["i32"]),
     "mpBeginPauseHeader": (50805, "graphics_commands::CommandBeginScaleformMovieMethodOnFrontendHeader(char const*)", ["i64"], ["i32"]),
     # MenuScreenId 是四字节返回结构，首 i64 指向本调用者分配的输出槽；不得传假 CMenuScreen*。
@@ -326,6 +357,12 @@ def checked_audit(path: Path, entity_probe: bool = False, public_client: bool = 
     if public_client:
         checked_public_wrapper(audit)
         checked_frontend_tail(audit)
+        # 在已验证的外层block内跳过VM，仍落入原TLS/active-thread恢复尾部。
+        gates = {op['instruction_offset']: op for op in decoded['instructions']}
+        if (gates[108]['operation'] != 'block' or gates[32868]['operation'] != 'end'
+                or gates[32869]['operation'] != 'local.get' or gates[32869].get('index') != 24
+                or gates[32873]['operation'] != 'i64.store'):
+            raise ValueError('脚本隔离跳转与TLS恢复边界不匹配')
     return audit
 
 
@@ -340,6 +377,11 @@ def build(audit: WasmAudit, entity_probe: bool = False, public_client: bool = Fa
     hook_position = HOOK_INSTRUCTION_START + HOOK_INSTRUCTION_OFFSET
     # local.get 0；i32.const MAGIC；call 11；drop。沿用已有导入，不移动函数索引。
     hook_bytes = b"\x20\x00\x41" + signed_leb(MAGIC) + b"\x10" + unsigned_leb(CALLBACK_IMPORT) + b"\x1a"
+    # 回调只返回是否冻结此轮已审计脚本，br_if 0跳到原block末尾，不中断资源清理。
+    script_gate = b'\x20\x00\x41' + signed_leb(SCRIPT_GATE_MAGIC) + b'\x10' + unsigned_leb(CALLBACK_IMPORT) + b'\x0d\x00'
+    if public_client:
+        hook_position += 2  # 已核对的原block头后，一次插入桥回调与条件gate。
+        hook_bytes += script_gate
     frontend_bytes = b'\x42\x00\x41' + signed_leb(FRONTEND_MAGIC) + b'\x10' + unsigned_leb(CALLBACK_IMPORT) + b'\x1a'
     source = Reader(data, 8)
     output = bytearray(data[:8])
@@ -414,7 +456,7 @@ def build(audit: WasmAudit, entity_probe: bool = False, public_client: bool = Fa
         "original": {"path": str(audit.path.resolve()), "sha256": ORIGINAL_SHA256, "bytes": len(data)},
         "prototype": {"sha256": hashlib.sha256(output).hexdigest(), "bytes": len(output)},
         "hook": {"function_index": HOOK_FUNCTION, "function_name": audit.names[HOOK_FUNCTION],
-                 "original_instruction_start": HOOK_INSTRUCTION_START, "instruction_offset": HOOK_INSTRUCTION_OFFSET,
+                 "original_instruction_start": HOOK_INSTRUCTION_START, "instruction_offset": HOOK_INSTRUCTION_OFFSET + (2 if public_client else 0),
                  "original_file_offset": hook_position, "verified_prefix_sha256": hashlib.sha256(EXPECTED_RUN_PREFIX).hexdigest(),
                  "verified_prefix_bytes": len(EXPECTED_RUN_PREFIX), "callback_import": audit.descriptor(CALLBACK_IMPORT),
                  "magic_hex": hex(MAGIC), "magic_i32": MAGIC, "inserted_bytes_hex": hook_bytes.hex(),
@@ -427,6 +469,9 @@ def build(audit: WasmAudit, entity_probe: bool = False, public_client: bool = Fa
         "runtime_status": "尚未在实际游戏中验证；编译成功也不代表脚本上下文、生命周期或多人同步可用。",
     }
     if public_client:
+        evidence['script_gate'] = {'callback_magic': SCRIPT_GATE_MAGIC, 'branch_depth': 0,
+            'insertion_instruction_offset': 110, 'resume_instruction_offset': 32869,
+            'policy': '角色放置且完整世界就绪后按服务器session_policy白名单暂停原脚本VM；空名单暂停全部，桥回调和原TLS恢复保留，断线不恢复剧情。'}
         evidence['frontend_hook'] = {'function_index': FRONTEND_FUNCTION, 'function_name': 'CPauseMenu::Update()',
             'original_file_offset': frontend_position, 'original_body_sha256': FRONTEND_BODY_SHA256,
             'magic_i32': FRONTEND_MAGIC, 'inserted_bytes_hex': frontend_bytes.hex(),
@@ -445,32 +490,35 @@ def build(audit: WasmAudit, entity_probe: bool = False, public_client: bool = Fa
     return bytes(output), evidence
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wasm", type=Path, default=DEFAULT_WASM, help="必须匹配已审计 SHA256 的原始引擎")
     parser.add_argument("--output", type=Path, help="独立输出路径；默认只读 native-probe.wasm，实体实验 native-replica.wasm，公共战局 native-public.wasm")
     parser.add_argument("--entity-probe", action="store_true", help="增加隔离实体复制实验导出；不改变默认只读探针")
     parser.add_argument("--public-client", action="store_true", help="仅公共战局屏蔽单机脚本角色切换；必须同时指定 --entity-probe")
-    arguments = parser.parse_args()
+    arguments = parser.parse_args(argv)
     if arguments.public_client and not arguments.entity_probe:
         parser.error("--public-client 必须与 --entity-probe 一起使用")
     output_name = "native-public.wasm" if arguments.public_client else "native-replica.wasm" if arguments.entity_probe else "native-probe.wasm"
     default_output = ROOT / "archive/cache" / output_name
-    original, output = arguments.wasm.resolve(), (arguments.output or default_output).resolve()
-    production_root = (ROOT / "gta5data").resolve()
-    if output == original or output == DEFAULT_WASM.resolve() or production_root in output.parents:
-        parser.error("不能将探针写入原引擎或生产镜像目录；请选择 archive/cache 或独立实验目录")
+    original = arguments.wasm.resolve()
+    output = arguments.output or default_output
+    protected_roots = tuple(path.parents[2] for path in (arguments.wasm.absolute(), original)
+                            if path.parent.parent.name == "b")
+    sources = (original, DEFAULT_WASM)
+    try:
+        output, evidence_path = validate_outputs(
+            (output, output.with_suffix(".json")), sources=sources, protected_roots=protected_roots)
+    except ValueError as error:
+        parser.error(str(error))
     if output.suffix != ".wasm":
         parser.error("探针输出必须是独立的 .wasm 文件")
     audit = checked_audit(original, arguments.entity_probe, arguments.public_client)
     prototype, evidence = build(audit, arguments.entity_probe, arguments.public_client)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_name(output.name + ".tmp")
-    temporary.write_bytes(prototype)
-    os.replace(temporary, output)
     evidence["prototype"]["path"] = str(output)
-    evidence_path = output.with_suffix(".json")
-    evidence_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_write_bytes(output, prototype, sources=sources, protected_roots=protected_roots)
+    atomic_write_text(evidence_path, json.dumps(evidence, ensure_ascii=False, indent=2) + "\n",
+                      sources=sources, protected_roots=protected_roots)
     print(json.dumps({"探针": str(output), "证据": str(evidence_path), "新增导出": len(export_map(arguments.entity_probe)),
                       "hook": evidence["hook"]["original_file_offset"], "生产引擎未改动": True}, ensure_ascii=False))
 

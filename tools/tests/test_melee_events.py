@@ -18,7 +18,7 @@ class MeleeEventTests(world_tests.WorldV2Harness):
         client = super().client(name)
         if events:
             client.send({"type": "hello", "name": name,
-                         "capabilities": ["world_v2", "combat", "resume", "melee_events", "world_environment", "shared_law"]})
+                         "capabilities": ["world_v2", "combat", "resume", "melee_events", "world_environment", "shared_law", "session_policy"]})
             client.profile = client.expect("profile")
             self.read_snapshot(client)
             self.assertIn("melee_events", client.welcome["capabilities"])
@@ -26,7 +26,7 @@ class MeleeEventTests(world_tests.WorldV2Harness):
 
     def pose(self, client, heading=270, *, position=None, sequence=1):
         message = {**world_tests.protocol.MultiplayerIntegrationTests.state(sequence),
-                   "heading": heading, "position": position or client.spawn}
+                   "heading": heading, "position": position or client.spawn, "weapon": 0xa2719263}
         client.send(message)
         client.expect("player_state", lambda event: event.get("player_id") == client.player_id
                       and event.get("state", {}).get("seq") == sequence)
@@ -85,11 +85,10 @@ class MeleeEventTests(world_tests.WorldV2Harness):
         self.assertIsNone(event["health"])
         self.assertEqual(self.world()["cut_revision"], before["cut_revision"])
         self.assertEqual(self.entity(victim.entity_id)["components"]["combat"]["health"], 200)
-        self.swing(attacker, "too-fast")
-        self.error(attacker, "rate_limited")
-        self.barrier(victim, attacker)
-        self.assertFalse(any(event.get("type") == "melee_event" and event.get("request_id") == "too-fast"
-                             for event in victim.pending))
+        self.swing(attacker, "next-swing")
+        queued = attacker.expect("interaction_result", lambda event: event.get("request_id") == "next-swing")
+        self.assertTrue(queued["accepted"]); self.assertTrue(queued["pending"])
+        victim.expect("melee_event", lambda event: event.get("request_id") == "next-swing")
 
     def test_replay_is_result_only_and_unsupported_peers_receive_no_animation(self):
         attacker, victim = self.client("幂等"), self.client("目标")

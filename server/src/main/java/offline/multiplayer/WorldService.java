@@ -11,15 +11,21 @@ final class WorldService {
     private static final long UNARMED=0xa2719263L;
     private final WorldRegistry registry;
     private final CombatWorld combat;
+    private final WorldCollision collision;
+    private final RoadNetwork roads;
     private final long epochMillis=System.currentTimeMillis(),started=System.nanoTime();
     private final WorldEnvironment environment=new WorldEnvironment(epochMillis);
     private final WorldLaw law;
+    private final WorldAi ai;
     private final Map<String,Long> npcShots=new HashMap<>();
     private long worldShotEvents;
     private record WorldCut(Snapshot entities,long tick,Map<String,Object> environment,Map<String,Object> law) {}
     private final Map<String,Offer> offers=new LinkedHashMap<>();
     private final Map<String,LinkedHashMap<String,CompletedRequest>> completedRequests=new HashMap<>();
     private record CompletedRequest(Map<String,Object> input,Map<String,Object> result) {}
+    private record PendingMelee(String actor,long generation,long weapon,long due,Map<String,Object> input) {}
+    private final Map<String,ArrayDeque<PendingMelee>> meleeQueues=new LinkedHashMap<>();
+    private boolean executingQueuedMelee;
     private long meleeRequests,meleeEvents,meleeHits;
     private final Map<String,Long> interactions=new HashMap<>(),lifeReports=new LinkedHashMap<>();
     private final Map<String,String> playerCell=new HashMap<>();
@@ -32,22 +38,30 @@ final class WorldService {
         final String code;
         Problem(String code,String message){super(message);this.code=code;}
     }
-    WorldService(){
+    WorldService(){this(StaticCollision.empty(),RoadNetwork.empty());}
+    WorldService(StaticCollision geometry,RoadNetwork roads){
+        this.roads=Objects.requireNonNull(roads);
         Set<Long> weapons=new HashSet<>(Set.of(0L,UNARMED));
         for(Map<String,Object> rule:CombatWorld.weaponRules())weapons.add(((Number)rule.get("weapon")).longValue());
         registry=new WorldRegistry(UUID.randomUUID().toString(),Map.of(
             Kind.PED,Set.of(0x705e61f2L,0x9c9effd8L,0xc99f21c4L,0xd1feb884L,0x2307a353L,0x2799efd8L,0xc79f6928L,0x9cf26183L,WorldLaw.COP_MODEL),
             Kind.VEHICLE,Set.of(BLISTA,ASEA,WorldLaw.POLICE_MODEL)),weapons,new Limits(256,4096,4096,1000,5000));
-        combat=new CombatWorld(registry);
+        collision=new WorldCollision(registry.worldEpoch());collision.geometry(geometry);
+        combat=new CombatWorld(registry,collision);
         law=new WorldLaw(registry.worldEpoch());
+        ai=new WorldAi(registry.worldEpoch(),roads);
         try{registry.createTrusted(Kind.VEHICLE,BLISTA,null,Components.vehicle(
             Transform.at(new Vector(715.5,-1088.1,22.4),90),Vehicle.empty(3)),null,0,now());}
         catch(WorldRegistry.Rejection error){throw new IllegalStateException(error);}
     }
     void worldParticipant(String id,boolean enabled){
-        if(enabled){worldParticipants.add(id);ensurePopulation(id);assignPopulation();}
+        if(enabled){worldParticipants.add(id);ensurePopulation(id);assignPopulation();maintainAi();}
         else worldParticipants.remove(id);
     }
+    void physicsParticipant(String id,boolean enabled){collision.observer(id,enabled);}
+    void collisionResult(String id,Map<String,Object> message)throws Problem{collision.accept(id,message,now());}
+    List<Map<String,Object>> collisionQueries(){return collision.drain();}
+    Map<String,Object> collisionStatus(){return collision.status();}
     private void ensurePopulation(String actor){
         Entity player=registry.playerEntity(actor);if(player==null)return;Vector origin=position(player);
         String cell=(int)Math.floor(origin.x()/256)+":"+(int)Math.floor(origin.y()/256);
@@ -60,8 +74,20 @@ final class WorldService {
                 Entity walker=registry.createTrusted(Kind.PED,0xc99f21c4L,null,Components.ped(Transform.at(new Vector(origin.x()+8+i*3,origin.y()-10,origin.z()),90),
                     new PedView(null,Actions.idle(),UNARMED,false,null),new Combat(200,200,0,0,0)),null,0,now()).entities().get(0);
                 populationEntities.add(walker.entityId());entityCells.put(walker.entityId(),cell);
+                Vector carPosition=new Vector(origin.x()+18+i*9,origin.y()+18,origin.z());
+                double carHeading=90;
+                if(roads.nodeCount()>0){
+                    RoadNetwork.Snap road=roads.nearest(new RoadNetwork.Point(carPosition.x(),carPosition.y(),carPosition.z()),60);
+                    if(road==null)continue;
+                    carPosition=new Vector(road.position().x(),road.position().y(),road.position().z()+1);
+                    carHeading=roads.heading(road);
+                    boolean crowded=false;
+                    for(Entity existing:registry.snapshot().entities())if(existing.kind()==Kind.VEHICLE
+                        && position(existing).distance(carPosition)<6){crowded=true;break;}
+                    if(crowded)continue;
+                }
                 Entity car=registry.createTrusted(Kind.VEHICLE,i%2==0?BLISTA:ASEA,null,Components.vehicle(
-                    Transform.at(new Vector(origin.x()+18+i*9,origin.y()+18,origin.z()),90),Vehicle.empty(3)),null,0,now()).entities().get(0);
+                    Transform.at(carPosition,carHeading),Vehicle.empty(3)),null,0,now()).entities().get(0);
                 Entity driver=registry.createTrusted(Kind.PED,0xc99f21c4L,null,Components.ped(car.components().transform(),
                     new PedView(null,Actions.idle(),UNARMED,false,null),new Combat(200,200,0,0,0)),null,0,now()).entities().get(0);
                 registry.assignNpcSeatTrusted(driver.entityId(),car.entityId(),"driver",now());
@@ -100,26 +126,35 @@ final class WorldService {
     }
     long now(){return epochMillis+(System.nanoTime()-started)/1_000_000;}
     String epoch(){return registry.worldEpoch();}
+    Map<String,Object> sessionPolicy(){
+        return Map.of("revision",1,"story_enabled",false,"local_script_mode","suspend_after_ready",
+            "allowed_scripts",List.of(),"mission_events","server_only");
+    }
     Map<String,Object> join(String id){
         Map<String,Object> profile=combat.join(id,now());
         Entity entity=registry.playerEntity(id);
         profile.put("entity_id",entity.entityId());profile.put("world_epoch",epoch());profile.put("owner_epoch",entity.ownerEpoch());
+        profile.put("session_policy",sessionPolicy());
         return profile;
     }
     void setConnected(String id,boolean connected){
         combat.setConnected(id,connected);
         if(!connected){
+            collision.observer(id,false);
             worldParticipants.remove(id);
             try{registry.disconnectOwnerTrusted(id,now());}catch(WorldRegistry.Rejection error){throw new IllegalStateException(error);}
             offers.entrySet().removeIf(item->id.equals(item.getValue().owner));
+            meleeQueues.remove(id);
         }
+        maintainAi();
     }
     void remove(String id){
+        collision.observer(id,false);
         Entity entity=registry.playerEntity(id);combat.remove(id);
         if(entity!=null)try{registry.disconnectOwnerTrusted(id,now());entity=registry.playerEntity(id);
             registry.deleteTrusted(entity.entityId(),entity.revision(),now());}
         catch(WorldRegistry.Rejection error){throw new IllegalStateException(error);}
-        playerCell.remove(id);worldParticipants.remove(id);interactions.remove(id);completedRequests.remove(id);
+        playerCell.remove(id);worldParticipants.remove(id);interactions.remove(id);completedRequests.remove(id);meleeQueues.remove(id);
         law.removePlayer(id);
         lifeReports.keySet().removeIf(key->key.startsWith(id+":"));
     }
@@ -128,24 +163,39 @@ final class WorldService {
     int statePlayers(){return combat.statePlayers();}
     Map<String,Object> combatState(){return combat.combatState();}
     Map<String,Object> worldState(){return combat.worldState();}
+    Map<String,Object> projectileState(){return combat.projectileState(now());}
     CombatWorld.Outcome updateState(String id,Map<String,Object> message,long unused)throws CombatWorld.Rejection{
         CombatWorld.Outcome result=combat.updateState(id,message,now());
         if(result.accepted() && worldParticipants.contains(id)){ensurePopulation(id);assignPopulation();}
+        if(result.accepted())maintainAi();
         return result;
     }
     List<Map<String,Object>> shoot(String id,Map<String,Object> message,long unused)throws CombatWorld.Rejection{
         List<Map<String,Object>> events=combat.shoot(id,message,now());
-        Entity attacker=registry.playerEntity(id);
-        law.reportAcceptedShot(attacker,((Number)message.get("weapon")).longValue(),position(attacker),now());
+        recordCombatEvents(events);
+        maintainLaw();maintainAi();return events;
+    }
+    private void recordCombatEvents(List<Map<String,Object>> events){
+        for(Map<String,Object> event:events)if("shot_event".equals(event.get("type"))){
+            Entity attacker=registry.playerEntity((String)event.get("player_id"));
+            if(attacker==null)continue;
+            Map<?,?> shot=(Map<?,?>)event.get("event");
+            long weapon=((Number)shot.get("weapon")).longValue();
+            law.reportAcceptedShot(attacker,weapon,position(attacker),now());
+            ai.reportAcceptedShot(attacker,weapon,position(attacker),now());
+        }
         for(Map<String,Object> event:events)if("damage".equals(event.get("type"))){
+            Entity attacker=registry.playerEntity((String)event.get("attacker_id"));
             String victimId=(String)event.get("victim_id");Entity victim=registry.playerEntity(victimId);
             if(victim==null)victim=registry.entity(victimId);
-            law.reportAcceptedDamage(attacker,victim,((Number)event.get("damage")).intValue(),now());
+            int amount=((Number)event.get("damage")).intValue();
+            law.reportAcceptedDamage(attacker,victim,amount,now());
+            ai.reportAcceptedDamage(attacker,victim,amount,now());
         }
-        maintainLaw();return events;
     }
     List<Map<String,Object>> maintain(long unused){
         List<Map<String,Object>> events=combat.maintain(now());
+        recordCombatEvents(events);
         for(Map<String,Object> event:events)if("respawn".equals(event.get("type"))){
             Entity player=registry.playerEntity((String)event.get("player_id"));
             if(player!=null)law.clearAfterRedeploy(player.playerId(),player.generation(),now());
@@ -155,7 +205,51 @@ final class WorldService {
             offers.entrySet().removeIf(item->{Entity entity=registry.entity(item.getKey());
                 return entity==null || entity.ownerId()==null || now()>=item.getValue().deadline;});
         }catch(WorldRegistry.Rejection error){throw new IllegalStateException(error);}
-        assignPopulation();maintainLaw();return events;
+        npcShots.keySet().removeIf(id->registry.entity(id)==null);
+        runQueuedMelee(events);assignPopulation();maintainLaw();maintainAi();return events;
+    }
+    private void runQueuedMelee(List<Map<String,Object>> events){
+        for(String actor:new ArrayList<>(meleeQueues.keySet())){
+            ArrayDeque<PendingMelee> queue=meleeQueues.get(actor);
+            Entity player=registry.playerEntity(actor);
+            if(player==null || player.ownerId()==null || !player.components().combat().alive()){
+                meleeQueues.remove(actor);continue;
+            }
+            PendingMelee pending=queue.peekFirst();if(pending==null){meleeQueues.remove(actor);continue;}
+            if(pending.generation()!=player.generation() || pending.weapon()!=player.components().ped().weapon()){
+                meleeQueues.remove(actor);continue;
+            }
+            WeaponCatalog.Rule rule=WeaponCatalog.rule(pending.weapon());
+            long cooldown=rule!=null && "melee".equals(rule.mode())?rule.cooldownMillis():700;
+            long last=interactions.getOrDefault(actor,Long.MIN_VALUE/2);
+            if(now()<Math.max(pending.due(),last+cooldown))continue;
+            queue.removeFirst();
+            String request=(String)pending.input().get("request_id");
+            completedRequests.getOrDefault(actor,new LinkedHashMap<>()).remove(request);
+            try{
+                executingQueuedMelee=true;
+                for(Map<String,Object> event:interaction(actor,pending.input()))
+                    if(!"interaction_result".equals(event.get("type")))events.add(event);
+            }catch(Problem|WorldRegistry.Rejection ignored){
+                // The target may have left or changed life while this action was queued.
+                // Expire that intent without an obsolete UI rejection or damaging a new life.
+                cacheResult(actor,pending.input(),Collections.unmodifiableMap(map("type","interaction_result",
+                    "request_id",request,"accepted",true,"expired",true)));
+            }finally{executingQueuedMelee=false;}
+            if(queue.isEmpty())meleeQueues.remove(actor);
+        }
+    }
+    private void cacheResult(String actor,Map<String,Object> input,Map<String,Object> result){
+        LinkedHashMap<String,CompletedRequest> cache=completedRequests.computeIfAbsent(actor,ignored->new LinkedHashMap<>());
+        cache.put((String)input.get("request_id"),new CompletedRequest(Collections.unmodifiableMap(new LinkedHashMap<>(input)),result));
+        while(cache.size()>64)cache.remove(cache.keySet().iterator().next());
+    }
+    private void maintainAi(){
+        for(String id:ai.tick(now(),registry.snapshot().entities(),worldParticipants,law)){
+            Entity entity=registry.entity(id);if(entity==null)continue;
+            try{registry.touchTrusted(id,entity.revision(),now());}
+            catch(WorldRegistry.Rejection error){throw new IllegalStateException(error);}
+        }
     }
     private void maintainLaw(){
         Snapshot current=registry.snapshot();
@@ -196,7 +290,9 @@ final class WorldService {
                         if(entity.ownerId()!=null)registry.revokeOwnerTrusted(id,entity.revision(),now());offers.remove(id);
                     }else{
                         if(entity.components().combat()!=null && !entity.components().combat().alive())continue;
-                        if(entity.kind()==Kind.PED && entity.components().attachment()!=null){
+                        Entity target=registry.entity(decision.targetEntityId());
+                        if(entity.kind()==Kind.PED && entity.components().attachment()!=null && target!=null
+                            && position(entity).distance(position(target))<=35){
                             registry.releaseNpcSeatTrusted(id,now());entity=registry.entity(id);
                         }
                         if(!Objects.equals(entity.ownerId(),decision.ownerId()) || entity.leaseUntilTick()<=now())offer(id,decision.ownerId());
@@ -223,12 +319,12 @@ final class WorldService {
         List<Map<String,Object>> visible=new ArrayList<>();for(Entity entity:cut.entities())if(scope.contains(entity.entityId()))visible.add(entity(entity));
         List<Map<String,Object>> result=new ArrayList<>();
         result.add(map("type","snapshot_begin","schema_version",2,"world_epoch",epoch(),"snapshot_id",snapshotId,
-            "cut_revision",cut.cutRevision(),"world_tick",captured.tick(),"stream_seq",streamSeq,"environment",captured.environment(),"law",captured.law()));
+            "cut_revision",cut.cutRevision(),"world_tick",captured.tick(),"stream_seq",streamSeq,"environment",captured.environment(),"law",captured.law(),"session_policy",sessionPolicy()));
         for(int start=0,index=0;start<visible.size();start+=16,index++)result.add(map("type","snapshot_chunk","schema_version",2,
             "world_epoch",epoch(),"snapshot_id",snapshotId,"cut_revision",cut.cutRevision(),"index",index,
             "entities",visible.subList(start,Math.min(visible.size(),start+16)),"tombstones",List.of()));
         result.add(map("type","snapshot_end","schema_version",2,"world_epoch",epoch(),"snapshot_id",snapshotId,
-            "cut_revision",cut.cutRevision(),"world_tick",captured.tick(),"stream_seq",streamSeq,"environment",captured.environment(),"law",captured.law()));
+            "cut_revision",cut.cutRevision(),"world_tick",captured.tick(),"stream_seq",streamSeq,"environment",captured.environment(),"law",captured.law(),"session_policy",sessionPolicy()));
         return result;
     }
     Map<String,Object> delta(String id,Set<String> previous,long afterRevision,long afterEnvironmentRevision,long afterLawRevision,long streamSeq)throws Problem{
@@ -250,7 +346,7 @@ final class WorldService {
         long environmentRevision=((Number)captured.environment().get("revision")).longValue();
         if(entities.isEmpty() && deleted.isEmpty() && leaving.isEmpty() && afterEnvironmentRevision==environmentRevision && afterLawRevision==law.revision())return null;
         return map("type","world_delta","schema_version",2,"world_epoch",epoch(),"world_revision",cut.cutRevision(),
-            "world_tick",captured.tick(),"stream_seq",streamSeq,"environment",captured.environment(),"law",captured.law(),
+            "world_tick",captured.tick(),"stream_seq",streamSeq,"environment",captured.environment(),"law",captured.law(),"session_policy",sessionPolicy(),
             "entities",entities,"tombstones",deleted,"scope_leave",leaving);
     }
     private Set<String> scope(String id,Set<String> previous){
@@ -278,6 +374,7 @@ final class WorldService {
         if(offer==null || !offer.owner.equals(actor) || offer.epoch!=leaseEpoch || offer.deadline<=now() || entity.ownerEpoch()!=leaseEpoch)
             throw new Problem("stale_owner","该模拟邀请无效或已过期");
         offers.remove(id);registry.renewLeaseTrusted(id,leaseEpoch,now()+5000,now());
+        maintainAi();
     }
     void entityInput(String actor,Map<String,Object> input)throws Problem,WorldRegistry.Rejection{
         fields(input,"type","world_epoch","entity_id","owner_epoch","input_seq","based_on_revision","transform","view");epoch(input);
@@ -300,6 +397,7 @@ final class WorldService {
                 && vehicleIds.contains(entity.components().attachment().entityId()) && actor.equals(entity.ownerId())
                 && entity.leaseUntilTick()>tick && !offers.containsKey(entity.entityId()))readyDependents.add(entity.entityId());
         registry.proposeBatch(actor,proposals,tick,readyDependents);
+        maintainAi();
     }
     private Proposal parseProposal(Map<String,Object> input)throws Problem{
         String id=text(input.get("entity_id"),128);Entity entity=required(id);
@@ -311,8 +409,9 @@ final class WorldService {
             Map<String,Object> value=object(input.get("view"));
             if(entity.kind()==Kind.VEHICLE){fields(value,"engine_on","lights_on");view=new VehicleView(bool(value.get("engine_on")),bool(value.get("lights_on")));}
             else if(entity.kind()==Kind.PED){fields(value,"weapon","shooting","actions","aim_target");
+                integer(value.get("weapon"),0,0xffffffffL);
                 view=new PedView(entity.components().ped().appearance(),actions(object(value.get("actions"))),
-                    integer(value.get("weapon"),0,0xffffffffL),bool(value.get("shooting")),value.containsKey("aim_target")?vector(value.get("aim_target")):null);}
+                    entity.components().ped().weapon(),bool(value.get("shooting")),value.containsKey("aim_target")?vector(value.get("aim_target")):null);}
         }
         return new Proposal(epoch(),id,ownerEpoch,integer(input.get("input_seq"),0,9_007_199_254_740_991L),
             integer(input.get("based_on_revision"),0,9_007_199_254_740_991L),transform(input.get("transform")),view);
@@ -320,7 +419,9 @@ final class WorldService {
     List<Map<String,Object>> interaction(String actor,Map<String,Object> input)throws Problem,WorldRegistry.Rejection{
         fields(input,"type","world_epoch","request_id","action","entity_id","seat","expected_revision","target_generation");epoch(input);
         String request=text(input.get("request_id"),64),action=text(input.get("action"),40);
-        if("melee".equals(action))meleeRequests++;
+        if(!Set.of("enter_vehicle","leave_vehicle","melee","detonate").contains(action))
+            throw new Problem("unsupported_interaction","公共战局仅执行服务器定义的交互，不启动本地剧情或任务");
+        if("melee".equals(action) && !executingQueuedMelee)meleeRequests++;
         LinkedHashMap<String,CompletedRequest> cache=completedRequests.get(actor);
         CompletedRequest previous=cache==null?null:cache.get(request);
         if(previous!=null){
@@ -329,7 +430,7 @@ final class WorldService {
         }
         Entity player=registry.playerEntity(actor);
         if(player==null)throw new Problem("not_in_room","请先加入公共世界");
-        boolean untargeted="melee".equals(action) && (!input.containsKey("entity_id") || input.get("entity_id")==null);
+        boolean untargeted=Set.of("melee","detonate").contains(action) && (!input.containsKey("entity_id") || input.get("entity_id")==null);
         if(untargeted && (input.containsKey("expected_revision") || input.containsKey("target_generation")))
             throw new Problem("invalid_message","无目标近战不应携带目标版本");
         long revision=untargeted?0:integer(input.get("expected_revision"),0,9_007_199_254_740_991L);
@@ -342,7 +443,13 @@ final class WorldService {
             if(revision>targetEntity.revision())throw new Problem("invalid_revision","请求基线超出当前目标版本");
         }
         List<Map<String,Object>> events=new ArrayList<>();Map<String,Object> meleeResult=null;
-        if("enter_vehicle".equals(action)){
+        if("detonate".equals(action)){
+            if(input.containsKey("entity_id") || input.containsKey("seat") || input.containsKey("expected_revision") || input.containsKey("target_generation"))
+                throw new Problem("invalid_message","引爆只接受玩家意图，不能指定爆点、目标或版本");
+            try{events.addAll(combat.detonate(actor,now()));}
+            catch(CombatWorld.Rejection error){throw new Problem(error.code,error.getMessage());}
+            recordCombatEvents(events);
+        }else if("enter_vehicle".equals(action)){
             String seat=text(input.get("seat"),32);registry.enterSeat(actor,player.entityId(),player.ownerEpoch(),target,seat,revision,now());
             if("driver".equals(seat))offer(target,actor);
         }else if("leave_vehicle".equals(action)){
@@ -352,6 +459,8 @@ final class WorldService {
             if(input.containsKey("seat"))throw new Problem("invalid_message","近战不接受座位字段");
             if(!actor.equals(player.ownerId()) || player.leaseUntilTick()<=now())throw new Problem("stale_owner","玩家角色需要有效活动租约");
             if(!player.components().combat().alive())throw new Problem("dead_entity","死亡角色不能参与近战");
+            WeaponCatalog.Rule rule=WeaponCatalog.rule(player.components().ped().weapon());
+            if(rule==null || rule.meleeDamage()<=0)throw new Problem("unsupported_weapon","当前武器没有近战规则");
             Entity victim=untargeted?nearestMeleeTarget(player):targetEntity;
             if(victim!=null){
                 if(victim.kind()!=Kind.PED || victim.entityId().equals(player.entityId()) || victim.components().combat()==null)
@@ -359,17 +468,30 @@ final class WorldService {
                 if(!victim.components().combat().alive())throw new Problem("dead_entity","死亡角色不能参与近战");
                 String geometry=meleeGeometry(player,victim);
                 if(geometry!=null)throw new Problem(geometry,"too_far".equals(geometry)?"近战距离或高度差超出范围":"近战目标必须位于角色前方");
+                Vector a=position(player),b=position(victim);
+                if(collision.first(new WorldCollision.Segment(new Vector(a.x(),a.y(),a.z()+.8),new Vector(b.x(),b.y(),b.z()+.8),0))!=null)
+                    victim=null;
             }
             long tick=now(),last=interactions.getOrDefault(actor,Long.MIN_VALUE);
-            if(last!=Long.MIN_VALUE && tick-last<700)throw new Problem("rate_limited","近战冷却尚未结束");
-            boolean hit=victim!=null;int damage=hit?Math.min(20,victim.components().combat().health()):0;
-            if(hit)events.addAll(applyDamage(player,victim,20,tick));
+            long cooldown="melee".equals(rule.mode())?rule.cooldownMillis():700;
+            if(!executingQueuedMelee && ((meleeQueues.containsKey(actor) && !meleeQueues.get(actor).isEmpty()) || (last!=Long.MIN_VALUE && tick-last<cooldown))){
+                ArrayDeque<PendingMelee> queue=meleeQueues.computeIfAbsent(actor,ignored->new ArrayDeque<>());
+                boolean coalesced=queue.size()>=4;
+                if(coalesced)queue.removeLast();
+                long due=queue.isEmpty()?last+cooldown:queue.peekLast().due()+cooldown;
+                queue.addLast(new PendingMelee(actor,player.generation(),rule.hash(),due,new LinkedHashMap<>(input)));
+                Map<String,Object> queued=Collections.unmodifiableMap(map("type","interaction_result","request_id",request,
+                    "action","melee","accepted",true,"pending",true,"coalesced",coalesced,"scheduled_at",due));
+                cacheResult(actor,input,queued);return List.of(queued);
+            }
+            boolean hit=victim!=null;int damage=hit?Math.min(rule.meleeDamage(),victim.components().combat().health()):0;
+            if(hit)events.addAll(applyDamage(player,victim,rule.meleeDamage(),tick));
             interactions.put(actor,tick);meleeEvents++;if(hit)meleeHits++;
             Entity updated=hit?registry.entity(victim.entityId()):registry.entity(player.entityId());
             Integer health=hit?updated.components().combat().health():null;
             long currentRevision=updated.revision();
             Map<String,Object> event=map("type","melee_event","schema_version",2,"world_epoch",epoch(),
-                "event_id","m:"+epoch()+":"+meleeEvents,"request_id",request,"action","punch","accepted",true,
+                "event_id","m:"+epoch()+":"+meleeEvents,"request_id",request,"action","punch","accepted",true,"weapon",rule.hash(),
                 "attacker_entity_id",player.entityId(),"attacker_id",actor,"attacker_generation",player.generation(),
                 "target_entity_id",hit?victim.entityId():null,"target_generation",hit?victim.generation():null,
                 "hit",hit,"damage",damage,"health",health,"revision",currentRevision,
@@ -383,13 +505,12 @@ final class WorldService {
         Map<String,Object> resultValues=map("type","interaction_result","request_id",request,"accepted",true);
         if(meleeResult!=null)resultValues.putAll(meleeResult);
         Map<String,Object> result=Collections.unmodifiableMap(resultValues);
-        cache=completedRequests.computeIfAbsent(actor,ignored->new LinkedHashMap<>());
-        cache.put(request,new CompletedRequest(Collections.unmodifiableMap(new LinkedHashMap<>(input)),result));
-        while(cache.size()>64)cache.remove(cache.keySet().iterator().next());
-        events.add(result);return events;
+        cacheResult(actor,input,result);
+        events.add(result);maintainAi();return events;
     }
     private Entity nearestMeleeTarget(Entity player){
-        Entity target=null;double nearest=2.0001;
+        WeaponCatalog.Rule rule=WeaponCatalog.rule(player.components().ped().weapon());
+        Entity target=null;double nearest=rule==null?2.0001:rule.meleeRange()+.0001;
         for(Entity candidate:registry.snapshot().entities()){
             if(candidate.kind()!=Kind.PED || candidate.entityId().equals(player.entityId()) || candidate.components().combat()==null
                 || !candidate.components().combat().alive() || meleeGeometry(player,candidate)!=null)continue;
@@ -405,7 +526,9 @@ final class WorldService {
     private String meleeGeometry(Entity attacker,Entity victim){
         Vector source=position(attacker),destination=position(victim);
         double dx=destination.x()-source.x(),dy=destination.y()-source.y(),horizontal=Math.hypot(dx,dy);
-        if(source.distance(destination)>2 || Math.abs(destination.z()-source.z())>1.5)return "too_far";
+        WeaponCatalog.Rule rule=WeaponCatalog.rule(attacker.components().ped().weapon());
+        double range=rule==null?2:rule.meleeRange();
+        if(source.distance(destination)>range || Math.abs(destination.z()-source.z())>1.5)return "too_far";
         if(horizontal>.1){double heading=Math.toRadians(attacker.components().transform().rotation().heading());
             if((-Math.sin(heading)*dx+Math.cos(heading)*dy)/horizontal<.15)return "not_facing";}
         return null;
@@ -446,21 +569,22 @@ final class WorldService {
             registry.setVehicleHealthTrusted(entity.entityId(),engine,body,entity.revision(),now());
         }else if("npc_shot".equals(kind)){
             fields(input,"type","world_epoch","entity_id","owner_epoch","input_seq","kind","target_entity_id","target_generation");
-            WorldLaw.ResponseInfo response=law.responseForEntity(entity.entityId());
-            if(response==null || !"officer".equals(response.role()) || !"active".equals(response.phase()) || entity.components().combat()==null || !entity.components().combat().alive()
-                || entity.components().attachment()!=null || entity.lastInputSequence()<0 || entity.model()!=WorldLaw.COP_MODEL
-                || entity.components().ped().weapon()!=WorldLaw.POLICE_WEAPON)throw new Problem("invalid_target","只有当前已确认模拟位置的共同警员可提交射击意图");
+            if(entity.playerId()!=null || entity.kind()!=Kind.PED || entity.components().combat()==null || !entity.components().combat().alive()
+                || entity.components().attachment()!=null || entity.lastInputSequence()<0)throw new Problem("invalid_target","只有当前已确认模拟位置的共同NPC可提交射击意图");
+            WeaponCatalog.Rule rule=WeaponCatalog.rule(entity.components().ped().weapon());
+            if(rule==null || !Set.of("hitscan","shotgun").contains(rule.mode()))throw new Problem("invalid_target","该NPC没有服务器批准的枪械");
             Entity victim=required(text(input.get("target_entity_id"),128));
             long generation=integer(input.get("target_generation"),1,9_007_199_254_740_991L);
-            if(!response.targetEntityId().equals(victim.entityId()) || response.targetGeneration()!=generation || victim.generation()!=generation
-                || victim.playerId()==null || !victim.components().combat().alive() || victim.ownerId()==null || victim.leaseUntilTick()<=now())
-                throw new Problem("stale_generation","警员目标已失效");
+            if(victim.generation()!=generation || !ai.authorizesShot(entity,victim,now()))
+                throw new Problem("stale_generation","NPC任务目标已失效");
             if(position(entity).distance(position(victim))>40)throw new Problem("too_far","警员射击距离超出已确认位置范围");
             if(now()-npcShots.getOrDefault(entity.entityId(),Long.MIN_VALUE/2)<1500)throw new Problem("rate_limited","共同警员射击冷却尚未结束");
-            npcShots.put(entity.entityId(),now());events.addAll(applyDamage(entity,victim,10,now()));
+            npcShots.put(entity.entityId(),now());
+            try{events.addAll(combat.npcShot(entity,victim,10,now()));}
+            catch(CombatWorld.Rejection problem){throw new Problem(problem.code,problem.getMessage());}
             events.add(map("type","world_shot_event","schema_version",2,"world_epoch",epoch(),"event_id","s:"+epoch()+":"+(++worldShotEvents),
                 "attacker_entity_id",entity.entityId(),"attacker_generation",entity.generation(),"target_entity_id",victim.entityId(),"target_generation",generation,
-                "weapon",WorldLaw.POLICE_WEAPON,"origin",position(entity).values(),"target",position(victim).values(),"world_tick",now()));
+                "weapon",entity.components().ped().weapon(),"origin",position(entity).values(),"target",position(victim).values(),"world_tick",now()));
         }else throw new Problem("unsupported_simulation","不支持此类模拟候选");
         lifeReports.put(key,seq);while(lifeReports.size()>2048)lifeReports.remove(lifeReports.keySet().iterator().next());return events;
     }
@@ -470,6 +594,7 @@ final class WorldService {
         if(health==0)changes.put(attacker.entityId(),new Combat(a.health(),a.maxHealth(),a.kills()+1,a.deaths(),a.respawnAtTick()));
         registry.setCombatBatchTrusted(changes,tick);List<Map<String,Object>> events=new ArrayList<>();
         if(attacker.playerId()!=null)law.reportAcceptedDamage(registry.entity(attacker.entityId()),registry.entity(victim.entityId()),amount,now());
+        ai.reportAcceptedDamage(registry.entity(attacker.entityId()),registry.entity(victim.entityId()),amount,now());
         if(victim.playerId()!=null){events.add(map("type","damage","victim_id",victim.playerId(),"attacker_id",attacker.playerId(),"health",health,"damage",amount,"revision",registry.entity(victim.entityId()).revision()));
             if(health==0)events.add(map("type","death","player_id",victim.playerId(),"killer_id",attacker.playerId(),"kills",a.kills()+1,"deaths",life.deaths()+1,"respawn_at",tick+4000,"revision",registry.entity(victim.entityId()).revision()));}
         events.add(combatState());return events;
@@ -487,7 +612,11 @@ final class WorldService {
         List<Map<String,Object>> entities=new ArrayList<>(),deleted=new ArrayList<>();for(Entity entity:snapshot.entities())entities.add(entity(entity));
         for(Tombstone tomb:snapshot.tombstones())deleted.add(tombstone(tomb));
         return map("schema_version",2,"world_epoch",epoch(),"cut_revision",snapshot.cutRevision(),"world_tick",captured.tick(),"environment",captured.environment(),"law",captured.law(),
-            "entities",entities,"tombstones",deleted,"source","authoritative_world_registry","shared_population",!populationEntities.isEmpty(),"native_clone_transport",false);
+            "entities",entities,"tombstones",deleted,"source","authoritative_world_registry","shared_population",!populationEntities.isEmpty(),"native_clone_transport",false,"session_policy",sessionPolicy(),
+            "navigation",roads.metadata(),"collision",collision.status(),
+            "world_policy",map("pvp",true,"ai_decisions","server","navigation","server_roads_with_leased_steering","scripts","server_allowlist_after_ready",
+                "weapons",WeaponCatalog.rules().size(),"weapon_source_sha256",WeaponCatalog.SOURCE_SHA256,"collision","server_triangles_and_native_queries",
+                "input_policy","queued_combat_coalesced_bursts"));
     }
     Map<String,Object> entity(Entity entity){
         Components c=entity.components();Map<String,Object> components=map("transform",map("position",c.transform().position().values(),"rotation",c.transform().rotation().values(),
@@ -505,6 +634,8 @@ final class WorldService {
             "population_cell",entityCells.get(entity.entityId()),"simulation_task",entity.playerId()==null && entity.kind()==Kind.PED?(entity.components().attachment()==null?"wander":"driver"):null,
             "ownership",entity.ownerId()==null?"unowned":offers.containsKey(entity.entityId())?"offered":"active","combat_revision",entity.revision(),"task_revision",law.revision(),"components",components);
         if(response!=null){value.put("law_response",response.values());value.put("simulation_task",entity.kind()==Kind.PED?"police_pursuit":"police_vehicle");}
+        Map<String,Object> task=ai.taskForEntity(entity.entityId());
+        if(task!=null){value.put("ai_task",task);value.put("simulation_task",task.get("action"));value.put("task_revision",Math.max(law.revision(),((Number)task.get("revision")).longValue()));}
         return value;
     }
     private Map<String,Object> tombstone(Tombstone value){return map("entity_id",value.entityId(),"revision",value.revision(),"generation",value.generation(),"world_revision",value.worldRevision());}

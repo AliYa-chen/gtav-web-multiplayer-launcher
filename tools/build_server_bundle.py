@@ -1,6 +1,7 @@
 """生成可脱离游戏资源独立部署的公共战局服务端压缩包。"""
 import argparse
 import hashlib
+import io
 import json
 import re
 import subprocess
@@ -8,18 +9,30 @@ import sys
 import zipfile
 from datetime import date
 from pathlib import Path
+from readonly_game_outputs import atomic_write_bytes, validate_outputs
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--skip-build', action='store_true', help='复用现有 JAR，不重新编译；封包前核对 JAR 与源码版本')
     parser.add_argument('--java', default='java', help='验证现有 JAR 版本使用的 Java 路径')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    source = ROOT / 'server'
+    files = [source / name for name in ['multiplayer-server.jar', 'README.md', 'Start-Server.cmd',
+                                       'Start-Server.command', 'Start-Server.sh']]
+    files += sorted((source / 'src').rglob('*.java'))
+    files += sorted(path for path in (source / 'deploy').rglob('*') if path.is_file())
+    output = ROOT / 'archive/packages' / ('gta5-public-server-' + date.today().isoformat() + '.zip')
+    version_output, sums_output = source / 'VERSION.json', source / 'SHA256SUMS.txt'
+    boundary = {'sources': files, 'protected_roots': (ROOT / 'gta5data',)}
+    try:
+        validate_outputs((output, version_output, sums_output), **boundary)
+    except ValueError as error:
+        parser.error(str(error))
     if not args.skip_build:
         subprocess.run([sys.executable, '-B', str(ROOT / 'tools/build_multiplayer_server.py')], check=True)
-    source = ROOT / 'server'
     main_source = (source / 'src/main/java/offline/multiplayer/Main.java').read_text(encoding='utf-8')
     version = re.search(r'private static final String VERSION = "([^"]+)";', main_source)
     if not version:
@@ -32,10 +45,6 @@ def main():
     jar_version = re.search(r'^GTA V 沙盒公共战局服务 ([^\s（]+)', result.stdout, re.MULTILINE)
     if not jar_version or jar_version.group(1) != version.group(1):
         parser.error('现有 JAR 版本与源码不一致，拒绝生成部署包；请先构建当前服务端')
-    files = [source / name for name in ['multiplayer-server.jar', 'README.md', 'Start-Server.cmd',
-                                       'Start-Server.command', 'Start-Server.sh']]
-    files += sorted((source / 'src').rglob('*.java'))
-    files += sorted(path for path in (source / 'deploy').rglob('*') if path.is_file())
     manifest = {
         'version': version.group(1), 'protocol': 1, 'world_protocol': 2,
         'launcher_minimum': '0.2.0', 'java_minimum': 17,
@@ -53,28 +62,22 @@ def main():
     bodies['VERSION.json'] = (json.dumps(manifest, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
     bodies['SHA256SUMS.txt'] = ('\n'.join(
         hashlib.sha256(body).hexdigest() + '  ' + name for name, body in bodies.items()) + '\n').encode('utf-8')
-    output_dir = ROOT / 'archive/packages'
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output = output_dir / ('gta5-public-server-' + date.today().isoformat() + '.zip')
-    temporary = output.with_suffix('.zip.tmp')
     prefix = 'gta5-public-server/'
-    try:
-        with zipfile.ZipFile(temporary, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+    with io.BytesIO() as payload:
+        with zipfile.ZipFile(payload, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
             for relative, body in bodies.items():
                 info = zipfile.ZipInfo(prefix + relative)
                 info.compress_type = zipfile.ZIP_DEFLATED
                 info.external_attr = ((0o100755 if relative.endswith(('.sh', '.command')) else 0o100644) << 16)
                 archive.writestr(info, body)
-        with zipfile.ZipFile(temporary) as archive:
+        with zipfile.ZipFile(payload) as archive:
             assert archive.testzip() is None
             for name, body in bodies.items():
                 assert hashlib.sha256(archive.read(prefix + name)).digest() == hashlib.sha256(body).digest()
             assert not any(name.endswith(('.wasm', '.rpf', '.gfx')) for name in archive.namelist())
-        temporary.replace(output)
-    finally:
-        temporary.unlink(missing_ok=True)
-    (source / 'VERSION.json').write_bytes(bodies['VERSION.json'])
-    (source / 'SHA256SUMS.txt').write_bytes(bodies['SHA256SUMS.txt'])
+        atomic_write_bytes(output, payload.getvalue(), **boundary)
+    atomic_write_bytes(version_output, bodies['VERSION.json'], **boundary)
+    atomic_write_bytes(sums_output, bodies['SHA256SUMS.txt'], **boundary)
     print(json.dumps({'服务端压缩包': str(output), '字节数': output.stat().st_size,
                       '文件数': len(bodies), '校验': 'ZIP CRC 与所有文件 SHA-256 通过',
                       '不包含游戏资源': True}, ensure_ascii=False, indent=2))

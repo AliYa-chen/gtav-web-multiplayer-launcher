@@ -30,7 +30,7 @@ class WorldV2Harness(unittest.TestCase):
 
     def client(self, name="世界玩家", *, v2=True, resume=None):
         client = self.raw_client()
-        capabilities = ["combat", "resume", "combat_feedback"] + (["world_v2", "world_environment", "shared_law"] if v2 else [])
+        capabilities = ["combat", "resume", "combat_feedback"] + (["world_v2", "world_environment", "shared_law", "session_policy"] if v2 else [])
         hello = {"type": "hello", "name": name, "capabilities": capabilities}
         if resume:
             hello.update(client_id=resume["client_id"], resume_token=resume["resume_token"])
@@ -241,13 +241,13 @@ class WorldV2IntegrationTests(WorldV2Harness):
         self.assertEqual(self.entity(victim.entity_id)["components"]["combat"]["health"], 200)
         self.accepted_interaction(first, "melee", victim.entity_id)
         damage = victim.expect("damage", lambda event: event.get("victim_id") == victim.player_id)
-        self.assertEqual(damage["damage"], 20)
-        self.assertEqual(damage["health"], 180)
-        self.interaction(first, "melee", victim.entity_id)
-        self.error(first, "rate_limited")
-        self.assertEqual(self.entity(victim.entity_id)["components"]["combat"]["health"], 180)
-        self.interaction(first, "melee", victim.entity_id, revision=initial["revision"])
-        self.error(first, "rate_limited",)
+        self.assertEqual(damage["damage"], 35)
+        self.assertEqual(damage["health"], 165)
+        queued = self.accepted_interaction(first, "melee", victim.entity_id)
+        self.assertTrue(queued["pending"])
+        self.assertEqual(self.entity(victim.entity_id)["components"]["combat"]["health"], 165)
+        queued_again = self.accepted_interaction(first, "melee", victim.entity_id, revision=initial["revision"])
+        self.assertTrue(queued_again["pending"])
         remote = self.client("远距离目标")
         self.state(remote, position=[first.spawn[0] + 8, first.spawn[1], first.spawn[2]])
         self.interaction(first, "melee", remote.entity_id); self.error(first, "too_far")
@@ -280,7 +280,7 @@ class WorldV2IntegrationTests(WorldV2Harness):
         after = self.world()
         self.assertEqual(after["cut_revision"], before["cut_revision"])
         self.assertEqual(after["entities"], before["entities"], "重放成功动作不能重新扣血或续写实体")
-        self.assertEqual(self.entity(victim.entity_id, after)["components"]["combat"]["health"], 180)
+        self.assertEqual(self.entity(victim.entity_id, after)["components"]["combat"]["health"], 165)
         attacker.send({**request, "expected_revision": request["expected_revision"] + 1})
         self.error(attacker, "invalid_request")
         self.assertEqual(self.world()["cut_revision"], before["cut_revision"])
@@ -293,7 +293,7 @@ class WorldV2IntegrationTests(WorldV2Harness):
         self.state(victim, 2, position=[attacker.spawn[0] + 1.6, attacker.spawn[1], attacker.spawn[2]])
         self.assertGreater(self.entity(victim.entity_id)["revision"], old["revision"])
         self.accepted_interaction(attacker, "melee", victim.entity_id, revision=old["revision"], target_generation=old["generation"])
-        self.assertEqual(self.entity(victim.entity_id)["components"]["combat"]["health"], 180)
+        self.assertEqual(self.entity(victim.entity_id)["components"]["combat"]["health"], 165)
         self.interaction(attacker, "melee", victim.entity_id, revision=self.entity(victim.entity_id)["revision"] + 10)
         self.error(attacker, "invalid_revision")
 
@@ -318,7 +318,7 @@ class WorldV2IntegrationTests(WorldV2Harness):
         self.heading_state(attacker, 270)
         self.state(victim, position=[attacker.spawn[0] + 1.5, attacker.spawn[1], attacker.spawn[2]])
         self.accepted_interaction(attacker, "melee", victim.entity_id, revision=0)
-        self.assertEqual(self.entity(victim.entity_id)["components"]["combat"]["health"], 180)
+        self.assertEqual(self.entity(victim.entity_id)["components"]["combat"]["health"], 165)
 
     def test_leave_emits_tombstone_without_removing_public_population(self):
         first, observer = self.client("离开玩家"), self.client("观察玩家")

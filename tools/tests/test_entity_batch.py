@@ -168,25 +168,23 @@ class EntityBatchTests(world_tests.WorldV2Harness):
         self.assertGreaterEqual(time.monotonic() - started, 5)
         self.assertEqual((states, batches, shots), (151, 51, 101))
         errors = [event for event in player.pending if event.get("type") == "error"]
-        self.assertEqual(errors, [], "正常聚合负载不应触发80msg或30Hz状态限流")
+        self.assertEqual(errors, [], "正常聚合负载不应因高频状态和攻击受到拒绝")
 
-    def test_batch_over_budget_is_limited_without_partial_commit_or_disconnect(self):
+    def test_fast_batch_burst_is_accepted_atomically_without_disconnect(self):
         player, entities = self.owner()
         before = self.world()
-        # 独立10Hz/burst20批预算必须限制突发；仍低于全连接80Hz/burst160消息预算。
+        # 一次突发超过旧10Hz/burst20预算，全部有效批次应得到处理。
         for sequence in range(1, 41):
             updates = [self.proposal(self.entity(item["entity_id"], before), sequence=sequence, offset=.01) for item in entities]
             self.batch(player, updates)
         player.send({"type": "ping", "nonce": 766})
         player.expect("pong", lambda event: event.get("nonce") == 766)
         errors = [event for event in player.pending if event.get("type") == "error"]
-        self.assertTrue(any(event.get("code") == "rate_limited" for event in errors), "独立批预算必须拒绝过量消息")
+        self.assertEqual(errors, [], "正常批次突发不应触发旧玩法限流")
         after = self.world()
         sequences = {self.entity(item["entity_id"], after)["last_input_seq"] for item in entities}
-        self.assertEqual(len(sequences), 1, "限流不能部分提交一批中的少数实体")
-        self.assertGreater(next(iter(sequences)), 0)
-        self.assertLess(next(iter(sequences)), 40)
-        # 被限流后连接和玩家独立状态预算仍可用。
+        self.assertEqual(sequences, {40}, "每批保持原子提交，最后一批完整生效")
+        # 快速提交后连接和玩家状态仍可用。
         self.state(player, 1)
 
 

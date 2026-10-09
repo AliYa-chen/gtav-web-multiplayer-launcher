@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 from pathlib import Path
 import zipfile
+from readonly_game_outputs import atomic_write_bytes, validate_output
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_EXTENSIONS = {'.js', '.css', '.html', '.json', '.svg'}
-TOOLS = ('build_multiplayer_client.py', 'build_native_probe.py', 'inspect_native_bridge.py', 'build_launcher_zip.py')
+TOOLS = ('build_multiplayer_client.py', 'build_native_probe.py', 'inspect_native_bridge.py',
+         'readonly_game_outputs.py', 'build_launcher_zip.py')
 FORBIDDEN_SUFFIXES = {'.wasm', '.rpf', '.gfx', '.ytd', '.ydd', '.yft', '.ymt', '.fxc', '.jar', '.class',
                       '.ttf', '.otf', '.woff', '.woff2', '.bik', '.bk2', '.log', '.zip'}
 
@@ -42,16 +45,19 @@ def launcher_sources(root=ROOT, include_server=False):
 
 
 def build_launcher(output, *, root=ROOT, include_server=False):
-    root, output = Path(root).resolve(), Path(output).expanduser().resolve()
-    if output.is_relative_to(root / 'gta5data'):
-        raise ValueError('启动器压缩包不能写入游戏资源目录。')
+    root = Path(root).resolve()
     sources = launcher_sources(root, include_server)
+    boundary = {'sources': sources, 'protected_roots': (root / 'gta5data',)}
+    try:
+        output = validate_output(output, **boundary)
+    except ValueError as error:
+        raise ValueError('启动器压缩包不能写入游戏资源、源文件或符号链接：' + str(error)) from error
     records = [{'path': path.relative_to(root).as_posix(), 'bytes': path.stat().st_size,
                 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()} for path in sources]
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_suffix(output.suffix + '.tmp')
-    try:
-        with zipfile.ZipFile(temporary, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+    # This package contains only small launcher sources. Build and inspect it in
+    # memory, then publish through the same input-safe boundary as engine copies.
+    with io.BytesIO() as payload:
+        with zipfile.ZipFile(payload, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
             for source in sources:
                 archive.write(source, source.relative_to(root).as_posix())
             archive.writestr('启动器说明.txt',
@@ -64,12 +70,10 @@ def build_launcher(output, *, root=ROOT, include_server=False):
                 'kind': 'source_only_launcher', 'game_resources_included': False,
                 'runtime_resources_included': False, 'server_source_included': include_server, 'files': records,
             }, ensure_ascii=False, indent=2) + '\n')
-        with zipfile.ZipFile(temporary) as archive:
+        with zipfile.ZipFile(payload) as archive:
             if archive.testzip() is not None:
                 raise ValueError('启动器压缩包校验失败。')
-        temporary.replace(output)
-    finally:
-        temporary.unlink(missing_ok=True)
+        atomic_write_bytes(output, payload.getvalue(), **boundary)
     return {'path': str(output), 'bytes': output.stat().st_size, 'source_files': len(sources),
             'sha256': hashlib.sha256(output.read_bytes()).hexdigest(), 'game_resources_included': False}
 

@@ -236,22 +236,23 @@ class CombatWorldIntegrationTests(unittest.TestCase):
         second.expect("chat", lambda event: event.get("text") == "回执验证完成")
         self.assertFalse(any(event.get("type") == "shot_result" for event in second.pending))
 
-    def test_weapon_rules_are_authoritative_and_cooldown_stays_strict(self):
-        """公开枪械规则与实际伤害相同，冷却拒绝带剩余时间且不能注入自选规则。"""
+    def test_weapon_rules_are_authoritative_and_fast_intents_queue(self):
+        """完整目录与实际伤害一致；快速正常输入排队，客户端不能注入自选规则。"""
         first = self.client("规则射手", feedback=True)
         second = self.client("规则目标")
         self.assertIn("weapon_rules", first.welcome["capabilities"])
         rules = first.welcome["weapon_rules"]
-        self.assertEqual(len(rules), 22)
+        self.assertEqual(len(rules), 95)
         self.assertEqual(len({rule["weapon"] for rule in rules}), len(rules))
         for rule in rules:
-            self.assertEqual(set(rule), {"weapon", "cooldown_ms", "damage"})
+            self.assertTrue({"weapon", "cooldown_ms", "damage", "mode", "name", "range"} <= set(rule))
             self.assertIsInstance(rule["weapon"], int)
             self.assertGreater(rule["cooldown_ms"], 0)
-            self.assertGreater(rule["damage"], 0)
+            self.assertGreaterEqual(rule["damage"], 0)
         catalog = {rule["weapon"]: rule for rule in rules}
-        self.assertEqual(catalog[MINIGUN], {"weapon": MINIGUN, "cooldown_ms": 20, "damage": 25})
-        # 慢枪可稳定验证公网消息突发也不能绕过严格服务端冷却。
+        self.assertEqual({key: catalog[MINIGUN][key] for key in ("weapon", "cooldown_ms", "damage")},
+                         {"weapon": MINIGUN, "cooldown_ms": 20, "damage": 25})
+        # 慢枪验证公网突发能排队，但不能把所有伤害压在同一个时刻。
         shotgun = 0x1D073A89
         self.state(first, weapon=shotgun)
         self.state(second, position=[first.spawn[0] + 6, first.spawn[1], first.spawn[2]])
@@ -260,23 +261,21 @@ class CombatWorldIntegrationTests(unittest.TestCase):
         self.assertEqual(result["damage"], catalog[shotgun]["damage"])
         self.assertEqual(result["health"], 200 - catalog[shotgun]["damage"])
         self.shot(first, 2, self.body(second.position), weapon=shotgun)
-        rejected = first.expect("shot_result", lambda event: event.get("seq") == 2)
-        self.assertFalse(rejected["accepted"])
-        self.assertEqual(rejected["reason"], "rate_limited")
-        self.assertGreater(rejected["retry_after_ms"], 0)
-        self.assertLessEqual(rejected["retry_after_ms"], catalog[shotgun]["cooldown_ms"])
-        error = self.error(first, "rate_limited")
-        self.assertEqual(error["retry_after_ms"], rejected["retry_after_ms"])
+        queued = first.expect("shot_result", lambda event: event.get("seq") == 2)
+        self.assertTrue(queued["accepted"])
+        self.assertTrue(queued["pending"])
+        self.assertIsInstance(queued["scheduled_at"], int)
+        first.expect("damage", lambda event: event.get("shot_seq") == 2)
         first.send({"type": "shot_event", "seq": 3, "origin": self.body(first.position),
                     "target": self.body(second.position), "weapon": shotgun, "cooldown_ms": 0, "damage": 200})
         self.error(first, "invalid_message")
-        time.sleep(rejected["retry_after_ms"] / 1000 + .05)
         self.shot(first, 4, self.body(second.position), weapon=shotgun)
         final = first.expect("shot_result", lambda event: event.get("seq") == 4)
         self.assertTrue(final["accepted"])
-        self.assertEqual(final["damage"], catalog[shotgun]["damage"])
-        self.assertGreater(final["revision"], result["revision"])
-        self.assertEqual(final["health"], 200 - 2 * catalog[shotgun]["damage"])
+        final_damage = first.expect("damage", lambda event: event.get("shot_seq") == 4)
+        self.assertEqual(final_damage["damage"], catalog[shotgun]["damage"])
+        self.assertGreater(final_damage["revision"], result["revision"])
+        self.assertEqual(final_damage["health"], 200 - 3 * catalog[shotgun]["damage"])
 
     def test_client_without_feedback_capability_receives_no_shot_result(self):
         """原客户端仍收到射击和伤害广播，不额外接收新回执类型。"""
@@ -304,10 +303,10 @@ class CombatWorldIntegrationTests(unittest.TestCase):
         self.accepted_shot(first, 5, target)
         first.expect("damage", lambda event: event.get("shot_seq") == 5)
         self.shot(first, 6, target)
-        self.error(first)
         self.shot(first, 5, target)
         self.error(first, "stale_seq")
-        self.assertEqual(self.state(second, 2, position=second.position, health=1000)["health"], 165)
+        first.expect("damage", lambda event: event.get("shot_seq") == 6)
+        self.assertEqual(self.state(second, 2, position=second.position, health=1000)["health"], 130)
 
     def test_stale_state_cannot_shoot(self):
         """过期位置不作为命中判定依据，重发新位置后才可射击。"""

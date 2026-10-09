@@ -65,7 +65,7 @@ pub fn prepare(original: &Path, runtime: &Path) -> Result<(), String> {
     let original = fs::canonicalize(original).map_err(|e| fail("无法读取玩家原引擎", e))?;
     let game_root = original_game_root(&original)?;
     let runtime = resolve_destination(runtime)?;
-    if runtime.starts_with(&game_root) {
+    if runtime.starts_with(&game_root) || game_root.starts_with(&runtime) {
         return Err("运行缓存必须位于玩家游戏资源目录之外；未修改任何游戏资源。".into());
     }
     let source_metadata = fs::metadata(&original).map_err(|e| fail("读取原引擎信息失败", e))?;
@@ -80,7 +80,7 @@ pub fn prepare(original: &Path, runtime: &Path) -> Result<(), String> {
     }
     fs::create_dir_all(&runtime).map_err(|e| fail("创建启动器运行缓存失败", e))?;
     let runtime = fs::canonicalize(&runtime).map_err(|e| fail("解析运行缓存目录失败", e))?;
-    if runtime.starts_with(&game_root) {
+    if runtime.starts_with(&game_root) || game_root.starts_with(&runtime) {
         return Err("运行缓存指向游戏资源目录，已拒绝写入。".into());
     }
     let online_path = runtime.join("online/game.wasm");
@@ -621,6 +621,25 @@ mod tests {
         )
         .is_err());
         assert!(!game.join("game.wasm").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_cache_ancestor_and_child_link_back_to_game() {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir().unwrap();
+        let game = directory.path().join("game");
+        let original = game.join("b/build-id/game.wasm");
+        fs::create_dir_all(original.parent().unwrap()).unwrap();
+        let original_bytes = b"player original must remain untouched";
+        fs::write(&original, original_bytes).unwrap();
+        // A cache ancestor can otherwise admit child links back into the source game.
+        symlink(original.parent().unwrap(), directory.path().join("online")).unwrap();
+        assert!(prepare(&original, directory.path())
+            .unwrap_err().contains("游戏资源目录之外"));
+        assert_eq!(fs::read(&original).unwrap(), original_bytes);
+        assert!(!directory.path().join("offline").exists());
+        assert!(!original.with_extension("json").exists());
     }
 
     /// Maintainers can exercise the production transform without a browser:

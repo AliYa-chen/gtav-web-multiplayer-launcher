@@ -41,6 +41,7 @@ self.createWorldEnvironmentBridge = function ({ ex, memory, post }) {
     for (let service = 1; service <= 15; service++) ex.mpDispatchService?.(service, 0);
     ex.mpRandomCops?.(0); ex.mpRandomCopsNotScenarios?.(0); ex.mpRandomCopsScenarios?.(0);
     ex.mpAIWeaponDamage?.(0); ex.mpAIMeleeDamage?.(0);
+    ex.mpPlayerWeaponDamage?.(ex.mpPlayerId(), 0); ex.mpPlayerMeleeDamage?.(ex.mpPlayerId(), 0, 1);
     ex.mpSuppressWitnesses?.(ex.mpPlayerId());
     const wanted = world.law?.players?.find((value) => value.player_id === packet.client_id);
     const stars = wanted?.stars || 0;

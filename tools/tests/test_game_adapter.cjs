@@ -55,7 +55,7 @@ function engine(options = {}) {
   let now = 100, allocated = 4096, nextPed = 100, localPosition = [...(options.localPosition || [711.5, -1088, 22.41])];
   let localPed = options.localPed ?? 7, localModel = options.localModel ?? 0x705e61f2;
   let localHeading = options.localHeading ?? 180, localWeapon = options.localWeapon ?? 0;
-  let localShooting = false, localClip = 30, weaponReady = true, lastImpact = null;
+  let localShooting = false, localClip = 30, localAmmo = 30, detonatePressed = false, weaponReady = true, lastImpact = null;
   let localActions = { aiming: false, reloading: false, jumping: false, ducking: false, sprinting: false };
   let remoteEquipBlocked = false;
   const equippedWeapons = new Map();
@@ -69,7 +69,9 @@ function engine(options = {}) {
   const visualVectors = [];
   let localRecoveryBlocked = options.localRecoveryBlocked ?? false;
   const state = { active: 11n, handler: 12n, fadedOut: false, controlsEnabled: true,
-    deathState: false, deathRestartPaused: false, gamePlaying: true };
+    deathState: false, deathRestartPaused: false, gamePlaying: true,
+    radar: { hidden: true, rendering: false, fog: true, backgroundHidden: true, prologue: true,
+      hudPreference: true, radarPreference: true } };
   const vector = (pointer, values) => values.forEach((value, index) => new DataView(memory.buffer).setFloat32(Number(pointer) + 8 * index, value, true));
   const readNativeVector = (pointer) => [0, 8, 16].map((offset) => new DataView(memory.buffer).getFloat32(Number(pointer) + offset, true));
   const readString = (pointer) => {
@@ -124,6 +126,8 @@ function engine(options = {}) {
       if (ped !== localPed || !weaponReady || options.noClip) return 0;
       new DataView(memory.buffer).setInt32(Number(pointer), localClip, true); return 1;
     },
+    mpGetAmmo: () => localAmmo,
+    mpControlJustPressed: (_group, control) => control === 47 && detonatePressed ? 1 : 0,
     mpLastWeaponImpact: (_ped, pointer) => {
       if (!lastImpact) return 0;
       lastImpact.forEach((value, index) => new DataView(memory.buffer).setFloat32(Number(pointer) + 4 * index, value, true));
@@ -213,6 +217,24 @@ function engine(options = {}) {
     },
     mpBeginSetBlipName: () => {}, mpEndSetBlipName: () => {},
     mpPauseMenuActive: () => state.pauseActive ? 1 : 0,
+    mpDisplayHud: () => {},
+    mpDisplayRadar: (enabled) => { state.radar.hidden = !enabled;
+      state.radar.rendering = Boolean(enabled && state.radar.radarPreference && !state.radar.fog && !state.radar.backgroundHidden); },
+    mpIsRadarHidden: () => state.radar.hidden ? 1 : 0,
+    mpIsMinimapRendering: () => state.radar.rendering ? 1 : 0,
+    mpHudPreference: () => state.radar.hudPreference ? 1 : 0,
+    mpRadarPreference: () => state.radar.radarPreference ? 1 : 0,
+    mpMinimapHideFog: (enabled) => { state.radar.fog = !enabled; },
+    mpMinimapPrologue: (enabled) => { state.radar.prologue = Boolean(enabled); },
+    mpUnlockMinimapAngle: () => {}, mpUnlockMinimapPosition: () => {},
+    mpMinimapBackgroundInfo: (info) => {
+      if (state.radar.throwBackground) throw new Error('minimap still loading');
+      const data = new DataView(memory.buffer), address = Number(info);
+      const args = Number(data.getBigUint64(address + 16, true));
+      assert.equal(args, address + 32, 'wrapper必须使用独立的Info参数数组');
+      assert.ok(address > 0 && args + 4 <= memory.buffer.byteLength);
+      state.radar.backgroundHidden = Boolean(data.getInt32(args, true));
+    },
     mpFrontendReady: () => state.pauseActive ? 1 : 0,
     mpBeginPauseHeader: (pointer) => { uiCalls.push({ method: readString(pointer).text, parameters: [] }); return 1; },
     mpScaleformString: (pointer) => uiCalls.at(-1).parameters.push(readString(pointer).text),
@@ -290,6 +312,11 @@ function engine(options = {}) {
     remotePositions, remoteHeadings, frozen, tasks, animations, uiCalls, occupiedVehicles, visualVectors, blipStyles,
     setBlipReady: (value) => { blipReady = value; }, setShootThrows: (value) => { shootThrows = value; },
     frontendTick: (at = now + 100) => { now = at; return imports.env.wasm_module_int_js(0n, 0x4d505549); },
+    scriptGate: (name) => {
+      new Uint8Array(memory.buffer, 11 + 428, 32).fill(0);
+      new Uint8Array(memory.buffer, 11 + 428, 32).set(new TextEncoder().encode(name));
+      return imports.env.wasm_module_int_js(11n, 0x4d505343);
+    },
     now: () => now, setLocalModel: (model) => { localModel = model >>> 0; },
     localPed: () => localPed, position: () => [...localPosition],
     setLocalPed: (ped) => { alive.delete(localPed); localPed = ped; if (ped) alive.add(ped); },
@@ -298,6 +325,7 @@ function engine(options = {}) {
     setWeapon: (weapon) => { localWeapon = weapon >>> 0; }, weapon: () => localWeapon,
     setShooting: (value) => { localShooting = value; },
     setClip: (value) => { localClip = value; },
+    setAmmo: (value) => { localAmmo = value; }, setDetonate: (value) => { detonatePressed = value; },
     setWeaponReady: (value) => { weaponReady = value; },
     setActions: (value) => { localActions = { ...localActions, ...value }; },
     setLastImpact: (value) => { lastImpact = value; },
@@ -328,7 +356,7 @@ function adapter(network = null, options = {}) {
     close() {}
   }
   const context = vm.createContext({ BroadcastChannel: Channel, TextEncoder, TextDecoder, Atomics, Int32Array,
-    Uint8Array, DataView, SharedArrayBuffer, document: { getElementById: () => hud }, addEventListener() {},
+    Uint8Array, DataView, SharedArrayBuffer, performance: { now: () => 100 }, document: { getElementById: () => hud }, addEventListener() {},
     fetch(url, options) { requests.push({ url, ...options }); return Promise.resolve({ ok: true }); },
     setTimeout(callback) { const id = nextTimer++; timers.set(id, callback); return id; },
     clearTimeout(id) { timers.delete(id); } });
@@ -1672,4 +1700,110 @@ test('启动器动态配置进入共享快照，配置更新不清除角色或�
   update({ oltitle: 'https://gtav.2t.hk/status', source: 'remote', stale: false }); page.flush();
   assert.equal(page.read().remote_config.oltitle, 'https://gtav.2t.hk/status');
   assert.equal(page.read().peers[0].player_id, 'REMOTE');
+});
+
+test('公共战局只挂起审核的单机事件脚本，加载输入暂停和未知脚本继续运行', () => {
+  const bridge=engine();assert.equal(bridge.scriptGate('respawn_controller'),0);
+  bridge.connect(packet({world_v2:true,world:{ready:true,entities:[],world_epoch:'A'}}));
+  for(const name of ['respawn_controller','mission_triggerer_a','randomchar_controller','re_arrests'])assert.equal(bridge.scriptGate(name),1,name);
+  for(const name of ['main_persistent','initial','player_controller','pausemenu','unreviewed_script'])assert.equal(bridge.scriptGate(name),0,name);
+  assert.ok(bridge.messages.some(m=>m.multiplayer?.type==='script_policy'&&m.multiplayer.phase==='suspended'));
+});
+test('无弹夹投掷减总弹药仍上报一次，黏弹引爆只发服务器意图', () => {
+  const weapon=0x2c3731d9, bridge=engine({localWeapon:weapon,noClip:true});
+  bridge.connect(packet({weapon_rules:[{weapon,mode:'projectile',cooldown_ms:200,damage:100}]}));
+  bridge.setAmmo(29);bridge.tick();bridge.tick();
+  assert.equal(bridge.messages.filter(m=>m.multiplayer?.type==='local_shot').length,1);
+  bridge.setDetonate(true);bridge.tick();bridge.setDetonate(false);
+  assert.ok(bridge.messages.some(m=>m.multiplayer?.type==='interaction_request'&&m.multiplayer.action==='detonate'));
+});
+
+test('排队和投射物的异步权威damage会提示命中，同受害同版本不重复', () => {
+  const page=adapter(directNetwork());
+  page.receive({type:'session',connected:true,client_id:'LOCAL',members:[{id:'LOCAL'},{id:'REMOTE'}]});page.flush();
+  page.receive({type:'damage',victim_id:'REMOTE',attacker_id:'LOCAL',shot_seq:2,weapon:0xb1ca77b1,damage:100,health:100,revision:4});page.flush();
+  const notices=page.read().notices.length;assert.ok(page.read().notices.at(-1).text.includes('100'));
+  page.receive({type:'damage',victim_id:'REMOTE',attacker_id:'LOCAL',shot_seq:2,weapon:0xb1ca77b1,damage:100,health:100,revision:4});
+  page.receive({type:'combat_feedback',accepted:true,hit:true,victim_id:'REMOTE',damage:100,health:100,revision:4});page.flush();
+  assert.equal(page.read().notices.length,notices);
+  page.receive({type:'damage',victim_id:'OTHER',attacker_id:'LOCAL',shot_seq:2,weapon:0xb1ca77b1,damage:100,health:0,revision:4});page.flush();
+  assert.equal(page.read().notices.length,notices+1,'同一爆炸的另一个受害者保留独立反馈');
+});
+
+test('服务器空白名单冻结全部本地VM含未知剧情，owner桥继续回调且断线不恢复剧情', () => {
+  const policy={revision:1,story_enabled:false,local_script_mode:'suspend_after_ready',allowed_scripts:[],mission_events:'server_only'};
+  const bridge=engine();bridge.setup();
+  bridge.publish(packet({world_v2:true,session_policy:policy,world:{ready:false,entities:[],world_epoch:'A'}}));
+  bridge.tick();
+  assert.equal(bridge.scriptGate('main_persistent'),0,'初始化前保留加载VM');
+  assert.equal(bridge.state.controlsEnabled,false,'加载阶段禁止玩家输入触发剧情');
+  bridge.connect(packet({world_v2:true,session_policy:policy,world:{ready:true,entities:[],world_epoch:'A'}}));
+  for(const script of ['unknown_mission','main_persistent','main','initial','player_controller','pausemenu','re_arrests'])
+    assert.equal(bridge.scriptGate(script),1,script);
+  assert.equal(bridge.state.controlsEnabled,true,'仅在角色和完整战局就绪后释放控制');
+  const before=bridge.messages.filter(m=>m.multiplayer?.type==='local_state').length;
+  bridge.tick(bridge.now()+100);assert.equal(bridge.scriptGate('main_persistent'),1);
+  assert.ok(bridge.messages.filter(m=>m.multiplayer?.type==='local_state').length>before,'VM暂停不能暂停owner桥回调');
+  bridge.publish(packet({connected:false,world_v2:false,world:null}));bridge.tick();
+  assert.equal(bridge.scriptGate('unknown_mission'),1,'断线维持服务端禁止剧情的策略');
+  const offline=engine();offline.setup();assert.equal(offline.scriptGate('unknown_mission'),0,'离线入口不套用公共战局策略');
+});
+test('脚本例外仅按服务器更高版本白名单生效，同版本和旧策略不能开放脚本', () => {
+  const policy={revision:2,story_enabled:false,local_script_mode:'suspend_after_ready',allowed_scripts:['permitted_loader'],mission_events:'server_only'};
+  const bridge=engine();bridge.connect(packet({world_v2:true,session_policy:policy,world:{ready:true,entities:[],world_epoch:'A'}}));
+  assert.equal(bridge.scriptGate('permitted_loader'),0);assert.equal(bridge.scriptGate('unknown_story'),1);
+  bridge.publish(packet({world_v2:true,session_policy:{...policy,revision:1,allowed_scripts:['unknown_story']},world:{ready:true,entities:[],world_epoch:'A'}}));
+  bridge.tick();assert.equal(bridge.scriptGate('unknown_story'),1);assert.equal(bridge.scriptGate('permitted_loader'),0);
+});
+
+test('公共战局小地图恢复道路底图，解除单机迷雾和背景隐藏而保持剧情禁用', () => {
+  const policy = { revision: 1, story_enabled: false, local_script_mode: 'suspend_after_ready', allowed_scripts: [], mission_events: 'server_only' };
+  const bridge = engine();
+  bridge.connect(packet({ world_v2: true, session_policy: policy, world: { ready: true, entities: [], world_epoch: 'A' } }));
+  assert.equal(bridge.state.radar.rendering, true);
+  assert.equal(bridge.state.radar.fog, false);
+  assert.equal(bridge.state.radar.backgroundHidden, false);
+  assert.equal(bridge.state.radar.prologue, false);
+  assert.equal(bridge.scriptGate('main_persistent'), 1, '恢复底图不重新运行剧情');
+  assert.ok(bridge.messages.some(m => m.multiplayer?.type === 'radar_status' && m.multiplayer.rendering));
+});
+
+test('小地图维护只作用于就绪公共世界，不改离线、加载中或暂停地图', () => {
+  const bridge = engine(); bridge.connect();
+  assert.equal(bridge.calls.filter(c => c.name === 'mpDisplayRadar').length, 0, '非world_v2不动雷达');
+  bridge.publish(packet({ world_v2: true, world: { ready: false, entities: [], world_epoch: 'A' } })); bridge.tick();
+  assert.equal(bridge.calls.filter(c => c.name === 'mpDisplayRadar').length, 0);
+  bridge.state.pauseActive = true;
+  bridge.publish(packet({ world_v2: true, world: { ready: true, entities: [], world_epoch: 'A' } })); bridge.tick();
+  assert.equal(bridge.calls.filter(c => c.name === 'mpDisplayRadar').length, 0, '暂停大地图不受干扰');
+  bridge.state.pauseActive = false; bridge.tick();
+  assert.equal(bridge.state.radar.rendering, true);
+});
+
+test('小地图恢复限频执行，换角色和重新显示时仍能修复，不覆盖用户偏好', () => {
+  const bridge = engine();
+  bridge.connect(packet({ world_v2: true, world: { ready: true, entities: [], world_epoch: 'A' } }));
+  const count = () => bridge.calls.filter(c => c.name === 'mpDisplayRadar').length;
+  const before = count(); bridge.tick(bridge.now() + 50); assert.equal(count(), before);
+  bridge.state.radar.fog = true; bridge.state.radar.backgroundHidden = true;
+  bridge.tick(bridge.now() + 600); assert.equal(bridge.state.radar.rendering, true);
+  bridge.state.radar.radarPreference = false;
+  bridge.tick(bridge.now() + 600);
+  assert.equal(bridge.state.radar.radarPreference, false, '不修改用户自己的地图设置');
+  assert.ok(bridge.messages.some(m => m.multiplayer?.type === 'radar_status' && m.multiplayer.radar_preference === false));
+  const unlocked = () => bridge.calls.filter(c => c.name === 'mpUnlockMinimapPosition').length;
+  const old = unlocked(); bridge.setLocalPed(81); bridge.tick();
+  assert.equal(unlocked(), old + 1, '新角色立即清理旧雷达坐标锁');
+});
+
+test('小地图native暂不可用时限频重试，不中断角色同步', () => {
+  const bridge = engine(); bridge.state.radar.throwBackground = true;
+  bridge.connect(packet({ world_v2: true, world: { ready: true, entities: [], world_epoch: 'A' } }));
+  const count = () => bridge.calls.filter(c => c.name === 'mpMinimapBackgroundInfo').length;
+  const attempts = count(); bridge.tick(bridge.now() + 50); assert.equal(count(), attempts);
+  assert.ok(bridge.messages.some(m => m.multiplayer?.type === 'local_state'));
+  assert.ok(bridge.messages.some(m => m.multiplayer?.type === 'radar_status' && m.multiplayer.retrying));
+  bridge.state.radar.throwBackground = false; bridge.tick(bridge.now() + 600);
+  assert.equal(bridge.state.radar.rendering, true);
+  assert.equal(bridge.messages.filter(m => m.multiplayer?.type === 'bridge_error').length, 0);
 });

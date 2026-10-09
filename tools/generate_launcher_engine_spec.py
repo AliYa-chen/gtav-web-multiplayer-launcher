@@ -21,6 +21,7 @@ from build_native_probe import (  # noqa: E402
     build, checked_audit, export_map,
 )
 from inspect_native_bridge import DEFAULT_WASM, ROOT  # noqa: E402
+from readonly_game_outputs import atomic_write_text, validate_output  # noqa: E402
 
 
 def generate(path: Path) -> dict:
@@ -29,7 +30,7 @@ def generate(path: Path) -> dict:
     patches = []
     for index, label, operation, offset, patch_bytes, prefix, tail in (
         (HOOK_FUNCTION, 'script_context_callback', 'insert',
-         HOOK_INSTRUCTION_START + HOOK_INSTRUCTION_OFFSET - audit.bodies[HOOK_FUNCTION][0],
+         report['hook']['original_file_offset'] - audit.bodies[HOOK_FUNCTION][0],
          bytes.fromhex(report['hook']['inserted_bytes_hex']), EXPECTED_RUN_PREFIX, b''),
         (FRONTEND_FUNCTION, 'pause_menu_callback', 'insert',
          audit.bodies[FRONTEND_FUNCTION][1] - audit.bodies[FRONTEND_FUNCTION][0] - len(FRONTEND_TAIL),
@@ -73,14 +74,23 @@ def main(argv=None) -> int:
     parser.add_argument('--output', type=Path, default=ROOT / 'desktop/src-tauri/assets/engine-spec.json')
     parser.add_argument('--check', action='store_true', help='仅校验已提交描述与当前构建器是否一致')
     args = parser.parse_args(argv)
+    original = args.wasm.resolve()
+    protected_roots = tuple(path.parents[2] for path in (args.wasm.absolute(), original)
+                            if path.parent.parent.name == 'b')
+    if not args.check:
+        try:
+            args.output = validate_output(args.output, sources=(original, DEFAULT_WASM),
+                                          protected_roots=protected_roots)
+        except ValueError as error:
+            parser.error(str(error))
     text = json.dumps(generate(args.wasm), ensure_ascii=False, indent=2) + '\n'
     if args.check:
         if not args.output.is_file() or args.output.read_text(encoding='utf-8') != text:
             parser.error('桌面引擎补丁描述已过期，请重新生成并提交。')
         print('桌面引擎补丁描述与 Python 参考构建器一致。')
     else:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(text, encoding='utf-8')
+        atomic_write_text(args.output, text, sources=(original, DEFAULT_WASM),
+                          protected_roots=protected_roots)
         print(f'已生成不含完整游戏引擎的补丁描述：{args.output}')
     return 0
 

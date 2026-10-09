@@ -10,6 +10,16 @@ const actions = (value) => record(value) && Object.keys(value).length === 5
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const weatherTypes = new Set(['EXTRASUNNY', 'CLEAR', 'CLOUDS', 'OVERCAST', 'RAIN', 'THUNDER', 'CLEARING', 'SMOG', 'FOGGY']);
 
+export function cleanSessionPolicy(value) {
+  if (!record(value) || !integer(value.revision, 1) || value.story_enabled !== false
+      || value.local_script_mode !== 'suspend_after_ready' || value.mission_events !== 'server_only'
+      || !Array.isArray(value.allowed_scripts) || value.allowed_scripts.length > 128
+      || value.allowed_scripts.some(name => typeof name !== 'string' || !/^[A-Za-z0-9_.-]{1,32}$/.test(name))
+      || new Set(value.allowed_scripts).size !== value.allowed_scripts.length
+      || Object.keys(value).some(key => !['revision', 'story_enabled', 'local_script_mode', 'allowed_scripts', 'mission_events'].includes(key))) return null;
+  return clone(value);
+}
+
 export function cleanWorldEnvironment(value) {
   if (!record(value) || !integer(value.revision, 1) || !record(value.clock) || !record(value.weather)) return null;
   const c = value.clock, w = value.weather;
@@ -41,6 +51,26 @@ export function cleanWorldTransform(value) {
   return clone(value);
 }
 
+export function cleanWorldAiTask(value, entity) {
+  if (!record(value) || !integer(value.revision, 1) || value.entity_id !== entity.entity_id
+      || value.generation !== entity.generation || value.owner_epoch !== entity.owner_epoch
+      || !['idle', 'wander', 'drive', 'flee', 'combat', 'pursue'].includes(value.action)
+      || typeof value.reason !== 'string' || !/^[a-z_]{1,64}$/.test(value.reason)
+      || !integer(value.expires_at_tick) || !Number.isFinite(value.speed) || value.speed < 0 || value.speed > 80
+      || !(value.target_entity_id === null || identifier(value.target_entity_id))
+      || !(value.target_generation === null || integer(value.target_generation, 1))
+      || ((value.target_entity_id === null) !== (value.target_generation === null))
+      || !(value.target_position === null || vector(value.target_position))
+      || !(value.destination === null || vector(value.destination))
+      || !(value.vehicle_entity_id === null || identifier(value.vehicle_entity_id))) return null;
+  if (Object.keys(value).some(key => !['revision', 'entity_id', 'generation', 'owner_epoch', 'action', 'reason', 'target_entity_id',
+    'target_generation', 'target_position', 'destination', 'speed', 'vehicle_entity_id', 'expires_at_tick'].includes(key))) return null;
+  if (value.action === 'combat' && !value.target_entity_id) return null;
+  if (['flee', 'pursue'].includes(value.action) && !value.destination) return null;
+  if (value.action === 'drive' && !value.vehicle_entity_id) return null;
+  return clone(value);
+}
+
 export function cleanWorldEntity(value) {
   if (!record(value) || !identifier(value.entity_id) || !['ped', 'vehicle', 'object'].includes(value.kind)
     || !integer(value.model, 0, 0xffffffff) || !integer(value.revision, 1) || !integer(value.generation, 1)
@@ -51,6 +81,7 @@ export function cleanWorldEntity(value) {
   if (Object.hasOwn(value, 'last_input_seq') && !integer(value.last_input_seq, -1)) return null;
   if (Object.hasOwn(value, 'task_revision') && !integer(value.task_revision)) return null;
   if (Object.hasOwn(value, 'ownership') && !['offered', 'active', 'unowned'].includes(value.ownership)) return null;
+  if (Object.hasOwn(value, 'ai_task') && value.ai_task !== null && !cleanWorldAiTask(value.ai_task, value)) return null;
   if (value.law_response) {
     const r = value.law_response;
     if (!record(r) || !identifier(r.response_id) || !identifier(r.target_player_id) || !identifier(r.target_entity_id)
@@ -101,15 +132,15 @@ export function cleanWorldTombstone(value) {
 // 世界逻辑基线与渲染资源是否加载分离。只在 snapshot_end 后替换有效基线。
 export function createWorldState() {
   let worldEpoch = null, worldRevision = 0, worldTick = 0, streamSequence = 0, ready = false, pending = null;
-  let environment = null, environmentReceivedAt = 0, environmentReceivedAtEpoch = 0, environmentServerTick = 0, law = null;
+  let environment = null, environmentReceivedAt = 0, environmentReceivedAtEpoch = 0, environmentServerTick = 0, law = null, sessionPolicy = null;
   const entities = new Map(), tombstones = new Map(), retiredEpochs = new Set();
   const reset = () => { worldEpoch = null; worldRevision = worldTick = streamSequence = 0; ready = false;
-    pending = null; environment = law = null; environmentReceivedAt = environmentReceivedAtEpoch = environmentServerTick = 0; entities.clear(); tombstones.clear(); retiredEpochs.clear(); };
+    pending = null; environment = law = sessionPolicy = null; environmentReceivedAt = environmentReceivedAtEpoch = environmentServerTick = 0; entities.clear(); tombstones.clear(); retiredEpochs.clear(); };
   const state = () => ({ schema_version: 2, world_epoch: worldEpoch, world_revision: worldRevision,
     world_tick: worldTick, stream_seq: streamSequence, ready, entities: clone([...entities.values()]),
     tombstones: clone([...tombstones.values()]), environment: environment && clone(environment),
     environment_received_at: environmentReceivedAt, environment_received_at_epoch: environmentReceivedAtEpoch,
-    environment_server_tick: environmentServerTick, law: law && clone(law) });
+    environment_server_tick: environmentServerTick, law: law && clone(law), session_policy: sessionPolicy && clone(sessionPolicy) });
   function receiveEnvironment(value, tick) {
     if (!value || (environment && value.revision <= environment.revision)) return false;
     environment = value; environmentReceivedAt = globalThis.performance?.now?.() ?? Date.now(); environmentServerTick = tick;
@@ -129,7 +160,7 @@ export function createWorldState() {
           && (value.task_revision ?? 0) > (old.task_revision ?? 0)) {
         // 控制任务使用独立版本；不能借元数据更新回滚已确认姿态、血量或归属。
         targets.set(value.entity_id, { ...old, task_revision: value.task_revision, law_response: value.law_response,
-          simulation_task: value.simulation_task }); continue;
+          simulation_task: value.simulation_task, ai_task: value.ai_task }); continue;
       }
       if ((dead && (value.generation <= dead.generation || value.revision <= dead.revision))
         || (old && (value.generation < old.generation || value.revision <= old.revision))) continue;
@@ -155,9 +186,11 @@ export function createWorldState() {
       if (worldEpoch === message.world_epoch && (message.cut_revision < worldRevision || message.stream_seq < streamSequence)) return { changed: false };
       const nextEnvironment = message.environment === undefined ? null : cleanWorldEnvironment(message.environment);
       const nextLaw = message.law === undefined ? null : cleanWorldLaw(message.law, message.world_epoch);
+      const nextPolicy = message.session_policy === undefined ? null : cleanSessionPolicy(message.session_policy);
       if (message.environment !== undefined && !nextEnvironment) return { changed: false, needsSnapshot: true };
       if (message.law !== undefined && !nextLaw) return { changed: false, needsSnapshot: true };
-      pending = { ...message, environment: nextEnvironment, law: nextLaw, chunks: new Map(), queued: [] };
+      if (message.session_policy !== undefined && !nextPolicy) return { changed: false, needsSnapshot: true };
+      pending = { ...message, environment: nextEnvironment, law: nextLaw, session_policy: nextPolicy, chunks: new Map(), queued: [] };
       ready = false;
       return { changed: true };
     }
@@ -174,6 +207,7 @@ export function createWorldState() {
         || message.world_tick !== pending.world_tick || [...pending.chunks.keys()].some((index) => index >= pending.chunks.size)) return { changed: false, needsSnapshot: true };
       if (JSON.stringify(message.environment ?? null) !== JSON.stringify(pending.environment)) return { changed: false, needsSnapshot: true };
       if (JSON.stringify(message.law ?? null) !== JSON.stringify(pending.law)) return { changed: false, needsSnapshot: true };
+      if (message.session_policy !== undefined && JSON.stringify(message.session_policy) !== JSON.stringify(pending.session_policy)) return { changed: false, needsSnapshot: true };
       const next = new Map(), deleted = new Map();
       for (let index = 0; index < pending.chunks.size; index++) {
         const chunk = pending.chunks.get(index); apply(next, deleted, chunk.entities, chunk.tombstones);
@@ -184,6 +218,7 @@ export function createWorldState() {
       if (changedEpoch) { environment = law = null; environmentReceivedAt = environmentReceivedAtEpoch = environmentServerTick = 0; }
       receiveEnvironment(pending.environment, pending.world_tick);
       if (pending.law && (!law || pending.law.revision >= law.revision)) law = pending.law;
+      if (pending.session_policy && (!sessionPolicy || pending.session_policy.revision >= sessionPolicy.revision)) sessionPolicy = pending.session_policy;
       streamSequence = pending.stream_seq; entities.clear(); tombstones.clear();
       for (const [id, value] of next) entities.set(id, value);
       for (const [id, value] of deleted) tombstones.set(id, value);
@@ -198,9 +233,11 @@ export function createWorldState() {
       const next = values(message);
       const nextEnvironment = message.environment === undefined ? null : cleanWorldEnvironment(message.environment);
       const nextLaw = message.law === undefined ? null : cleanWorldLaw(message.law, message.world_epoch);
+      const nextPolicy = message.session_policy === undefined ? null : cleanSessionPolicy(message.session_policy);
       if (!integer(message.world_revision) || !integer(message.world_tick) || !integer(message.stream_seq, 1) || !next) return { changed: false, needsSnapshot: true };
       if (message.environment !== undefined && !nextEnvironment) return { changed: false, needsSnapshot: true };
       if (message.law !== undefined && !nextLaw) return { changed: false, needsSnapshot: true };
+      if (message.session_policy !== undefined && !nextPolicy) return { changed: false, needsSnapshot: true };
       if (!Array.isArray(message.scope_leave) || message.scope_leave.length > 4096
         || !message.scope_leave.every(identifier)) return { changed: false, needsSnapshot: true };
       if (pending && message.world_epoch === pending.world_epoch) {
@@ -214,9 +251,11 @@ export function createWorldState() {
       const environmentChanged = receiveEnvironment(nextEnvironment, message.world_tick);
       const lawChanged = Boolean(nextLaw && (!law || nextLaw.revision > law.revision));
       if (lawChanged) law = nextLaw;
+      const policyChanged = Boolean(nextPolicy && (!sessionPolicy || nextPolicy.revision > sessionPolicy.revision));
+      if (policyChanged) sessionPolicy = nextPolicy;
       if (message.world_revision <= worldRevision) {
         if (message.world_revision === worldRevision) apply(entities, tombstones, next.entities, next.tombstones);
-        return { changed: environmentChanged || lawChanged };
+        return { changed: environmentChanged || lawChanged || policyChanged };
       }
       apply(entities, tombstones, next.entities, next.tombstones);
       for (const id of message.scope_leave) entities.delete(id);

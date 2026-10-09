@@ -11,6 +11,8 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URI;
+import java.nio.file.Path;
+import java.nio.file.Files;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
@@ -35,8 +37,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** 独立公共战局服务：鉴权恢复、权威移动校验、伤害、死亡、重生及状态分发。 */
 public final class Main {
-    private static final String VERSION = "0.3.3-world-experimental";
-    private static final List<String> CAPABILITIES = List.of("public_session", "chat", "player_state", "shoot_events", "appearance", "combat", "resume", "heartbeat", "snapshot", "actions", "combat_feedback", "weapon_rules", "world_registry", "world_v2", "entity_batch", "melee_events", "world_environment", "shared_law");
+    private static final String VERSION = "0.4.1-world-experimental";
+    private static final List<String> CAPABILITIES = List.of("public_session", "chat", "player_state", "shoot_events", "appearance", "combat", "resume", "heartbeat", "snapshot", "actions", "combat_feedback", "weapon_rules", "world_registry", "world_v2", "entity_batch", "melee_events", "world_environment", "shared_law", "server_ai", "projectiles", "action_queue", "session_policy", "physics_queries");
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final int MAX_MESSAGE_BYTES = 64 * 1024;
 
@@ -56,13 +58,14 @@ public final class Main {
         }
     }
 
-    private record Config(String host, int port, int maxClients, int idleTimeoutSeconds, int helloTimeoutSeconds) {
+    private record Config(String host, int port, int maxClients, int idleTimeoutSeconds, int helloTimeoutSeconds,Path worldData) {
         static Config parse(String[] args) {
             String host = "0.0.0.0";
             int port = 8787;
             int maxClients = 8;
             int idleTimeoutSeconds = 30;
             int helloTimeoutSeconds = 15;
+            Path worldData=defaultWorldData();
             for (int index = 0; index < args.length; index++) {
                 String argument = args[index];
                 if (argument.equals("--help") || argument.equals("-h")) {
@@ -73,6 +76,7 @@ public final class Main {
                         + "  --max-clients 人数   连接上限，默认 8（1–8）\n"
                         + "  --idle-timeout 秒    无有效消息的连接超时，默认 30（1–300）\n"
                         + "  --hello-timeout 秒   WebSocket 建立后加入期限，默认 15（1–300）\n"
+                        + "  --world-data 目录   加载提取的道路/静态碰撞，默认 JAR 同目录 world-data；none 禁用\n"
                         + "所有玩家自动进入同一个公共战局；无需房间码、准备或房主。\n"
                         + "服务端负责移动校验、枪械伤害、击杀、重生与断线恢复；客户端加载游戏资源。\n"
                         + "按 Ctrl+C 停止服务。");
@@ -89,10 +93,16 @@ public final class Main {
                     case "--max-clients" -> maxClients = boundedInteger(value, 1, 8, "连接上限");
                     case "--idle-timeout" -> idleTimeoutSeconds = boundedInteger(value, 1, 300, "空闲超时");
                     case "--hello-timeout" -> helloTimeoutSeconds = boundedInteger(value, 1, 300, "加入期限");
+                    case "--world-data" -> worldData="none".equals(value)?null:Path.of(value);
                     default -> throw new IllegalArgumentException("未知选项：" + argument);
                 }
             }
-            return new Config(host, port, maxClients, idleTimeoutSeconds, helloTimeoutSeconds);
+            return new Config(host, port, maxClients, idleTimeoutSeconds, helloTimeoutSeconds,worldData);
+        }
+        private static Path defaultWorldData(){
+            try {Path source=Path.of(Main.class.getProtectionDomain().getCodeSource().getLocation().toURI());
+                return (Files.isRegularFile(source)?source.getParent():source).resolve("world-data");}
+            catch(Exception ignored){return Path.of("world-data");}
         }
 
         private static int boundedInteger(String value, int min, int max, String name) {
@@ -137,7 +147,7 @@ public final class Main {
                 thread.setDaemon(true);
                 return thread;
             });
-            maintenance.scheduleAtFixedRate(lobby::maintain, 500, 500, TimeUnit.MILLISECONDS);
+            maintenance.scheduleAtFixedRate(lobby::maintain, 50, 50, TimeUnit.MILLISECONDS);
         }
 
         void run() throws IOException {
@@ -350,14 +360,18 @@ public final class Main {
         private final long idleTimeoutNanos;
         private final int helloTimeoutSeconds;
         private final long helloTimeoutNanos;
-        private final WorldService combat = new WorldService();
-        private final WorldService world = combat;
+        private final WorldService combat;
+        private final WorldService world;
         private long shotEventsReceived;
         private boolean closed;
         private static final long SESSION_TTL_MILLIS = 60_000;
         private static final List<String> COMBAT_EVENTS = List.of("combat_state", "damage", "death", "respawn", "correction");
 
-        Lobby(Config config) {
+        Lobby(Config config) throws IOException {
+            Path data=config.worldData();
+            StaticCollision geometry=data!=null && Files.isRegularFile(data.resolve("collision.bin"))?StaticCollision.load(data.resolve("collision.bin")):StaticCollision.empty();
+            RoadNetwork roads=data!=null && Files.isRegularFile(data.resolve("roads.bin"))?RoadNetwork.load(data.resolve("roads.bin")):RoadNetwork.empty();
+            combat=new WorldService(geometry,roads);world=combat;
             maxClients = config.maxClients();
             idleTimeoutSeconds = config.idleTimeoutSeconds();
             idleTimeoutNanos = TimeUnit.SECONDS.toNanos(idleTimeoutSeconds);
@@ -377,7 +391,7 @@ public final class Main {
             synchronized (lock) {
                 client.send(object("type", "welcome", "protocol", 1, "client_id", client.id, "capabilities", CAPABILITIES,
                     "public_session", true, "server_version", VERSION, "room", roomState().get("room"),
-                    "weapon_rules", CombatWorld.weaponRules()));
+                    "weapon_rules", CombatWorld.weaponRules(),"session_policy",world.sessionPolicy()));
             }
         }
 
@@ -394,6 +408,8 @@ public final class Main {
                     "world_epoch", view.get("world_epoch"), "world_revision", view.get("cut_revision"),
                     "world_tick",view.get("world_tick"),"environment",view.get("environment"),"environment_authoritative",true,
                     "world_entities", ((List<?>) view.get("entities")).size(), "shared_population", view.get("shared_population"),
+                    "world_policy",view.get("world_policy"),"session_policy",world.sessionPolicy(),"ai_decisions_authoritative",true,
+                    "collision",world.collisionStatus(),"navigation",view.get("navigation"),
                     "melee_requests_received",world.meleeStats().get("melee_requests_received"),
                     "melee_events_approved",world.meleeStats().get("melee_events_approved"),"melee_hits",world.meleeStats().get("melee_hits"));
             }
@@ -437,7 +453,7 @@ public final class Main {
                                 if (client.combatCapable) declared.add("combat");
                                 if (client.resumeCapable) declared.add("resume");
                                 if (client.combatFeedbackCapable) declared.add("combat_feedback");
-                                if (client.worldCapable) declared.addAll(List.of("world_v2","world_environment","shared_law"));
+                                if (client.worldCapable) declared.addAll(List.of("world_v2","world_environment","shared_law","session_policy"));
                                 if (client.meleeEventsCapable) declared.add("melee_events");
                                 hello(client, object("type", "hello", "name", client.name, "capabilities", declared));
                             } else {
@@ -467,8 +483,8 @@ public final class Main {
                             sendWorldSnapshot(client);
                         }
                         case "entity_ready" -> {requireWorld(client);world.ready(client.id,message);}
-                        case "entity_input" -> {requireWorld(client);if(!client.stateRate.take())throw problem("rate_limited","实体更新过快");world.entityInput(client.id,message);}
-                        case "entity_batch" -> {requireWorld(client);if(!client.batchRate.take())throw problem("rate_limited","实体批次更新过快");world.entityBatch(client.id,message);}
+                        case "entity_input" -> {requireWorld(client);world.entityInput(client.id,message);}
+                        case "entity_batch" -> {requireWorld(client);world.entityBatch(client.id,message);}
                         case "interaction_request" -> {
                             requireWorld(client);
                             try {for(Map<String,Object> event:world.interaction(client.id,message)) {
@@ -479,11 +495,13 @@ public final class Main {
                             }
                         }
                         case "simulation_result" -> {requireWorld(client);world.simulation(client.id,message).forEach(this::broadcast);}
+                        case "collision_result" -> {requireWorld(client);world.collisionResult(client.id,message);}
                         default -> throw problem("unknown_type", "不支持的消息类型：" + type);
                     }
                     // 收到字节、错误 JSON 或被拒绝的动作都不能延长连接寿命。
                     client.recordActivity();
                     publishWorld();
+                    publishCollisionQueries();
                 } catch (LobbyProblem problem) {
                     reportError(client, message, problem.code, problem.getMessage(), 0);
                 } catch (WorldService.Problem rejection) {
@@ -516,6 +534,8 @@ public final class Main {
                 worldCapable = values.contains("world_v2");
                 if(worldCapable && (!values.contains("world_environment") || !values.contains("shared_law")))
                     throw problem("client_world_rules_required", "此战局需要统一天气与警察规则，请更新启动器后重新加入");
+                if(worldCapable && !values.contains("session_policy"))
+                    throw problem("client_world_rules_required", "此公共战局禁止本地剧情，需要支持服务器脚本策略的客户端");
                 meleeEventsCapable = values.contains("melee_events") && worldCapable;
             }
             boolean hasId = message.containsKey("client_id");
@@ -554,6 +574,7 @@ public final class Main {
             Map<String, Object> profile = object("type", "profile", "client_id", session.id, "name", name);
             profile.putAll(combat.join(session.id));
             world.worldParticipant(session.id,worldCapable);
+            world.physicsParticipant(session.id,worldCapable && message.get("capabilities") instanceof List<?> values && values.contains("physics_queries"));
             if (resumeCapable) profile.put("resume_token", session.token);
             client.send(profile);
             broadcast(roomState());
@@ -569,6 +590,7 @@ public final class Main {
             List<Map<String,Object>> messages=world.snapshotMessages(client.id,client.scope,client.streamSequence);
             Map<String,Object> end=messages.get(messages.size()-1);
             for(Map<String,Object> message:messages)client.send(message);
+            client.send(world.projectileState());
             client.worldRevision=((Number)end.get("cut_revision")).longValue();
             client.environmentRevision=((Number)((Map<?,?>)end.get("environment")).get("revision")).longValue();
             client.lawRevision=((Number)((Map<?,?>)end.get("law")).get("revision")).longValue();
@@ -588,6 +610,12 @@ public final class Main {
                 }catch(WorldService.Problem problem){sendWorldSnapshot(client);}
             }
         }
+        private void publishCollisionQueries(){
+            for(Map<String,Object> query:world.collisionQueries()){
+                Session observer=sessions.get(query.get("observer_id"));
+                if(observer!=null && observer.connected())observer.client.send(query);
+            }
+        }
 
         private Session requireSession(Client client) throws LobbyProblem {
             Session session = client.session;
@@ -601,7 +629,6 @@ public final class Main {
             fields(message, List.of("type", "seq", "position", "heading", "model", "health", "weapon", "shooting", "appearance", "actions", "aim_target"));
             Map<String, Object> checked = new LinkedHashMap<>(message);
             if (message.containsKey("appearance")) checked.put("appearance", appearance(message.get("appearance")));
-            if (!client.stateRate.take()) throw problem("rate_limited", "角色状态更新过快，持续更新上限为每秒 30 次");
             CombatWorld.Outcome outcome = combat.updateState(session.id, checked, System.currentTimeMillis());
             if (!outcome.accepted()) {
                 if (client.combatCapable) outcome.events().forEach(client::send);
@@ -613,22 +640,27 @@ public final class Main {
         private void shotEvent(Client client, Map<String, Object> message) throws LobbyProblem, CombatWorld.Rejection {
             Session session = requireSession(client);
             fields(message, List.of("type", "seq", "origin", "target", "weapon"));
-            if (!client.shotRate.take()) throw problem("rate_limited", "射击事件过快，持续发送上限为每秒 30 次");
             List<Map<String, Object>> events = combat.shoot(session.id, message, System.currentTimeMillis());
             shotEventsReceived++;
             events.forEach(this::broadcast);
             if (client.combatFeedbackCapable) {
                 Map<String, Object> result = object("type", "shot_result", "seq", message.get("seq"),
                     "weapon", message.get("weapon"), "accepted", true, "hit", false);
+                List<Map<String,Object>> hits = new ArrayList<>();
                 for (Map<String, Object> event : events) {
+                    if (List.of("projectile_event","shot_queued","shot_geometry_pending").contains(event.get("type"))) {
+                        result.put("pending", true);
+                        if(event.containsKey("scheduled_at"))result.put("scheduled_at",event.get("scheduled_at"));
+                        if(event.containsKey("projectile_id"))result.put("projectile_id",event.get("projectile_id"));
+                    }
                     if (!"damage".equals(event.get("type"))) continue;
                     result.put("hit", true);
-                    result.put("victim_id", event.get("victim_id"));
-                    result.put("damage", event.get("damage"));
-                    result.put("health", event.get("health"));
-                    result.put("revision", event.get("revision"));
-                    break;
+                    Map<String,Object> hit=object("victim_id",event.get("victim_id"),"damage",event.get("damage"),
+                        "health",event.get("health"),"revision",event.get("revision"));
+                    if(hits.isEmpty())result.putAll(hit);
+                    hits.add(hit);
                 }
+                if(!hits.isEmpty())result.put("hits",hits);
                 // 判定回执只发射手，伤害与死亡广播仍由权威结果驱动。
                 client.send(result);
             }
@@ -749,6 +781,7 @@ public final class Main {
         }
 
         private void broadcast(Map<String, Object> message) {
+            if(List.of("shot_queued","shot_geometry_pending","shot_cancelled").contains(message.get("type")))return;
             // 只投影已由规则生成的结果，原始客户端 JSON 不能调用 Trusted 入口。
             boolean combatOnly = COMBAT_EVENTS.contains(message.get("type"));
             byte[] bytes = textFrame(message);
@@ -777,6 +810,7 @@ public final class Main {
                 if (changed) { broadcast(roomState()); broadcast(combat.combatState()); }
                 combat.maintain(now).forEach(this::broadcast);
                 publishWorld();
+                publishCollisionQueries();
                 current = new ArrayList<>(clients.values());
             }
             long now = System.nanoTime();
@@ -866,10 +900,9 @@ public final class Main {
         final ArrayBlockingQueue<Outbound> outgoing = new ArrayBlockingQueue<>(128);
         final CountDownLatch disconnected = new CountDownLatch(1);
         final Object heartbeatLock = new Object();
-        final TokenBucket messageRate = new TokenBucket(80, 160);
-        final TokenBucket stateRate = new TokenBucket(30, 60);
-        final TokenBucket batchRate = new TokenBucket(10, 20);
-        final TokenBucket shotRate = new TokenBucket(30, 30);
+        // Transport flood protection is separate from gameplay cadence. Normal input bursts
+        // are accepted; the world schedules combat actions instead of rejecting every fast click.
+        final TokenBucket messageRate = new TokenBucket(1000, 2000);
         volatile long writingSince;
         volatile long lastActivityAt = System.nanoTime();
         volatile Thread writer;

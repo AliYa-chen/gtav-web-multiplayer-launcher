@@ -210,13 +210,16 @@ class VehicleWorldTests(world_tests.WorldV2Harness):
         request = left if winner is first else right
         event, offered = self.delta(winner, car["entity_id"], lambda item: item["owner_id"] == winner.player_id and item["ownership"] == "offered")
         after = self.world()
-        self.assertEqual(after["cut_revision"], before["cut_revision"] + 1)
+        # The atomic seat transaction is followed by the server's new walking AI task.
+        self.assertGreaterEqual(after["cut_revision"], before["cut_revision"] + 1)
         self.assertEqual(event["world_revision"], after["cut_revision"])
         changed = {car["entity_id"], npc["entity_id"], winner.entity_id}
         self.assertTrue(changed.issubset({item["entity_id"] for item in event["entities"]}))
-        for entity_id in changed:
+        for entity_id in changed - {npc["entity_id"]}:
             self.assertEqual(self.entity(entity_id, after)["revision"], self.entity(entity_id, before)["revision"] + 1)
         evicted = self.entity(npc["entity_id"], after)
+        self.assertGreaterEqual(evicted["revision"], npc["revision"] + 1)
+        self.assertEqual(evicted["ai_task"]["action"], "wander")
         self.assertNotIn("attachment", evicted["components"])
         self.assertEqual(evicted["components"]["combat"], npc["components"]["combat"])
         self.assertEqual(evicted["generation"], npc["generation"])

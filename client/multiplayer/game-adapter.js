@@ -12,9 +12,13 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
   let world = null;
   let worldEvents = [], nextWorldEventId = 0;
   let worldShots = [], nextWorldShotId = 0;
+  const projectiles = new Map(), areaEffects = new Map();
+  const collisionQueries = new Map();
+  let effectEvents = [], nextEffectId = 0;
   const seenWorldEvents = new Set();
   let oldServerNotice = false;
   const combatById = new Map();
+  const confirmedHits = new Set();
   let controls = [], nextControlId = 0;
   let notices = [], nextNoticeId = 0;
   let nativeHud = false, lastNetworkNotice = '', lastGamePhase = '', lastKills = null;
@@ -51,6 +55,15 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
     peers.set(peer.player_id, peer);
   }
   function combatFeedback(data) {
+    if (data.accepted === false && ['rate_limited', 'cooldown', 'stale_seq', 'stale_input', 'stale_generation',
+      'invalid_revision', 'seat_unavailable', 'weapon_mismatch', 'not_ready', 'player_dead'].includes(data.reason)) return;
+    const victim = data.victim_id || data.target_entity_id;
+    if (data.hit === true && victim && Number.isSafeInteger(data.revision)) {
+      const key = victim + ':' + data.revision;
+      if (confirmedHits.has(key)) return;
+      confirmedHits.add(key);
+      while (confirmedHits.size > 256) confirmedHits.delete(confirmedHits.values().next().value);
+    }
     const rejected = {
       unsupported_weapon: ['当前武器暂不支持多人伤害同步，请使用普通枪械。', '目前武器暫不支援多人傷害同步，請使用一般槍械。'],
       weapon_mismatch: ['武器切换尚未同步，请稍后重新射击。', '武器切換尚未同步，請稍後重新射擊。'],
@@ -76,7 +89,7 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
   function meleeFeedback(data) {
     // 仅采用连接模块校验、服务端确认的命中事件；本地挥拳或动作播放不产生提示/伤害。
     if (data.accepted !== true || data.hit !== true || !Number.isInteger(data.damage) || data.damage <= 0
-      || data.damage > 20 || !Number.isInteger(data.health) || data.health < 0 || data.health > 200) return;
+      || data.damage > 200 || !Number.isInteger(data.health) || data.health < 0 || data.health > 200) return;
     if (data.attacker_id === session.client_id) {
       combatFeedback({ ...data, action: 'melee' });
     } else if (world.entities.some((entity) => entity.entity_id === data.target_entity_id
@@ -117,7 +130,8 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
     timer = 0;
     if (!shared || closed) return;
     const packet = { ...session, peers: [...peers.values()], shots, combat, controls, notices, world, world_events: worldEvents,
-      remote_config: remoteConfig, world_shots: worldShots };
+      remote_config: remoteConfig, world_shots: worldShots, world_projectiles: [...projectiles.values()],
+      world_areas: [...areaEffects.values()], world_effects: effectEvents, collision_queries: [...collisionQueries.values()] };
     const bytes = new TextEncoder().encode(JSON.stringify(packet));
     if (bytes.length > shared.capacity) return;
     const header = new Int32Array(shared.memory.buffer, shared.block, 4);
@@ -142,21 +156,51 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
       if (key !== lastNetworkNotice) {
         lastNetworkNotice = key;
         notify(data.connected ? '公共戰局已連線 · ' + (data.members || 1) + ' 位玩家' : '連線中斷，正在自動重新連線…');
-      } else if (data.phase === 'notice' && !/武器/.test(data.text || '')) notify('伺服器暫未接受這次操作');
+      } else if (data.phase === 'notice' && data.text && !/武器/.test(data.text)) notify(String(data.text).slice(0, 200));
       renderHud();
       return;
     } else if (data.type === 'combat_feedback') {
       combatFeedback(data);
       return;
     } else if (data.type === 'world_state_v2') {
-      if (world?.world_epoch && world.world_epoch !== data.world_epoch) { worldEvents = []; worldShots = []; seenWorldEvents.clear(); }
+      if (world?.world_epoch && world.world_epoch !== data.world_epoch) {
+        worldEvents = []; worldShots = []; seenWorldEvents.clear(); projectiles.clear(); areaEffects.clear(); effectEvents = [];
+        collisionQueries.clear();
+      }
       world = { schema_version: 2, world_epoch: data.world_epoch, world_revision: data.world_revision,
         world_tick: data.world_tick, stream_seq: data.stream_seq, ready: data.ready === true,
         environment: data.environment || null, environment_received_at: data.environment_received_at || 0,
         environment_received_at_epoch: data.environment_received_at_epoch || 0,
         environment_server_tick: data.environment_server_tick || 0,
+        session_policy: data.session_policy || null,
         law: data.law || null,
         entities: Array.isArray(data.entities) ? data.entities : [], tombstones: Array.isArray(data.tombstones) ? data.tombstones : [] };
+    } else if (data.type === 'collision_query') {
+      if (!world || data.world_epoch !== world.world_epoch || data.observer_id !== session.client_id) return;
+      collisionQueries.set(data.query_id, data);
+      while (collisionQueries.size > 32) collisionQueries.delete(collisionQueries.keys().next().value);
+    } else if (['projectile_state', 'projectile_event', 'explosion_event'].includes(data.type)) {
+      if (!world || data.world_epoch !== world.world_epoch) return;
+      const received = { received_at: performance.now(), received_at_epoch: Number.isFinite(performance.timeOrigin)
+        ? performance.timeOrigin + performance.now() : 0 };
+      if (data.type === 'projectile_state') {
+        projectiles.clear(); areaEffects.clear();
+        for (const value of data.effects) (value.type === 'area_effect' ? areaEffects : projectiles)
+          .set(value.projectile_id, { ...value, world_epoch: world.world_epoch, world_tick: value.world_tick ?? data.world_tick, ...received });
+      } else if (data.type === 'projectile_event') {
+        if (data.phase === 'expired') projectiles.delete(data.projectile_id);
+        else projectiles.set(data.projectile_id, { ...data, ...received });
+      } else {
+        projectiles.delete(data.projectile_id);
+        const key = 'effect:' + data.projectile_id + ':' + data.world_tick;
+        if (!seenWorldEvents.has(key)) {
+          seenWorldEvents.add(key); effectEvents.push({ id: ++nextEffectId, event: { ...data, ...received } });
+          if (data.effect_duration_ms) areaEffects.set(data.projectile_id, { ...data, ...received,
+            expires_at: data.world_tick + data.effect_duration_ms });
+        }
+      }
+      while (projectiles.size > 256) projectiles.delete(projectiles.keys().next().value);
+      while (areaEffects.size > 256) areaEffects.delete(areaEffects.keys().next().value);
     } else if (data.type === 'world_shot_event') {
       if (!world || data.world_epoch !== world.world_epoch || !data.event_id || seenWorldEvents.has(data.event_id)) return;
       seenWorldEvents.add(data.event_id); worldShots.push({ id: ++nextWorldShotId, event: data });
@@ -168,7 +212,10 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
       worldEvents.push({ id: ++nextWorldEventId, event: data });
       meleeFeedback(data);
     } else if (data.type === 'interaction_result') {
-      if (data.accepted === false) notify('互動尚未完成，請稍後重試');
+      if (data.accepted === false && !['rate_limited', 'cooldown', 'stale_seq', 'stale_input', 'stale_generation',
+        'stale_revision', 'stale_owner', 'invalid_revision', 'seat_unavailable', 'too_far', 'not_facing', 'player_dead', 'not_ready'].includes(data.reason)) {
+        notify('互動未完成：' + (data.reason || '伺服器未接受此操作'));
+      }
       return;
     } else if (data.type === 'session') {
       const previousId = session.client_id;
@@ -180,11 +227,13 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
         model: Number.isInteger(data.model) ? data.model >>> 0 : undefined,
         appearance_spec: data.appearance_spec || {},
         weapon_rules: Array.isArray(data.weapon_rules) ? data.weapon_rules : [],
+        session_policy: data.session_policy || null,
         world_v2: data.world_v2 === true,
         resumed: data.resumed === true,
         resume_state_ready: data.resume_state_ready === true,
         resume_state: data.resume_state || null,
         resume_position: data.resume_position || null, spawn: data.spawn || null };
+      if (!session.connected || previousId !== session.client_id) collisionQueries.clear();
       if (session.client_id && previousId && session.client_id !== previousId) { peers.clear(); combatById.clear(); }
       if (session.connected && (data.world_v2 === false || data.melee_events === false) && !oldServerNotice) {
         oldServerNotice = true;
@@ -194,13 +243,18 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
       for (const id of peers.keys()) if (!members.has(id)) peers.delete(id);
       for (const id of combatById.keys()) if (!members.has(id)) combatById.delete(id);
       for (const peer of data.peers || []) mergePeer(peer);
-      if (!session.connected) { shots = []; controls = []; world = null; worldEvents = []; worldShots = []; seenWorldEvents.clear(); }
+      if (!session.connected) { shots = []; controls = []; world = null; worldEvents = []; worldShots = []; seenWorldEvents.clear();
+        projectiles.clear(); areaEffects.clear(); effectEvents = []; }
       for (const value of data.combat || []) mergeCombat(value);
       combat = [...combatById.values()];
     } else if (data.type === 'combat_state' && Array.isArray(data.players)) {
       for (const value of data.players) mergeCombat(value);
     } else if (['damage', 'death', 'respawn', 'correction'].includes(data.type)) {
       if (!mergeControlCombat(data)) return;
+      if (data.type === 'damage' && data.attacker_id === session.client_id && Number.isSafeInteger(data.shot_seq)
+          && Number.isInteger(data.damage) && data.damage > 0 && Number.isInteger(data.health)) {
+        combatFeedback({ ...data, accepted: true, hit: true });
+      }
       controls.push({ id: ++nextControlId, event: data });
       if (controls.length > 32) controls.shift();
       if (data.type === 'respawn' && data.player_id === session.client_id) notify('已重生，正在恢復角色');
@@ -240,6 +294,8 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
       schedule();
     } else if (message.type === 'world_shot_ack' && Array.isArray(message.ids)) {
       const consumed = new Set(message.ids); worldShots = worldShots.filter(entry => !consumed.has(entry.id)); schedule();
+    } else if (message.type === 'world_effect_ack' && Array.isArray(message.ids)) {
+      const consumed = new Set(message.ids); effectEvents = effectEvents.filter(entry => !consumed.has(entry.id)); schedule();
     } else if (message.type === 'notice_ack' && Array.isArray(message.ids)) {
       const consumed = new Set(message.ids);
       notices = notices.filter((notice) => !consumed.has(notice.id));
@@ -247,6 +303,8 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
     } else if (message.type === 'native_hud') {
       nativeHud = message.available === true;
       renderHud();
+    } else if (message.type === 'collision_result') {
+      collisionQueries.delete(message.query_id); sendLocal(message); schedule();
     } else if (['local_state', 'local_shot', 'entity_ready', 'entity_input', 'interaction_request', 'simulation_result'].includes(message.type)) {
       sendLocal(message);
     } else if (message.type === 'game_status') {
@@ -287,6 +345,11 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
     } else if (message.type === 'world_entity_status') {
       reportStatus({ phase: 'world_entity', entity_id: message.entity_id,
         kind: message.kind, state: message.phase });
+    } else if (message.type === 'script_policy') {
+      reportStatus({ phase: 'script_policy', script: message.script, action: message.phase, policy: message.policy });
+    } else if (message.type === 'radar_status') {
+      reportStatus({ phase: 'radar', hidden: message.hidden, rendering: message.rendering,
+        hud_preference: message.hud_preference, radar_preference: message.radar_preference, retrying: message.retrying });
     } else if (message.type === 'melee_sample') {
       reportStatus({ phase: 'melee_sample', request_id: message.request_id,
         actor_entity_id: message.actor_entity_id, source: message.source });

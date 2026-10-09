@@ -160,7 +160,7 @@ class MultiplayerIntegrationTests(unittest.TestCase):
         cls.server_log = cls.log_path.open("w+b")
         cls.port = None
         cls.process = subprocess.Popen(
-            [JAVA_COMMAND, "-jar", str(JAR_PATH), "--host", "127.0.0.1", "--port", "0",
+            [JAVA_COMMAND, "-jar", str(JAR_PATH), "--host", "127.0.0.1", "--port", "0", "--world-data", "none",
              *getattr(cls, "SERVER_ARGUMENTS", [])],
             cwd=str(ROOT), stdout=cls.server_log, stderr=subprocess.STDOUT,
         )
@@ -265,7 +265,7 @@ class MultiplayerIntegrationTests(unittest.TestCase):
         client = WebSocketClient(self.port)
         self.clients.append(client)
         welcome = client.expect("welcome")
-        self.assertEqual(welcome["server_version"], "0.3.1-world-experimental")
+        self.assertEqual(welcome["server_version"], "0.4.1-world-experimental")
         self.assertTrue({"heartbeat", "snapshot"}.issubset(welcome["capabilities"]))
         for nonce in (0, 123456, 9007199254740991):
             client.send({"type": "ping", "nonce": nonce})
@@ -393,7 +393,9 @@ class MultiplayerIntegrationTests(unittest.TestCase):
             self.assertEqual(event["room_id"], "PUBLIC")
             self.assertIsInstance(event["time"], str)
             event = client.expect("shot_event", lambda message: message.get("player_id") == second.welcome["client_id"])
-            self.assertEqual(event["event"], {key: value for key, value in shot.items() if key != "type"})
+            self.assertEqual({key: event["event"][key] for key in shot if key != "type"},
+                             {key: value for key, value in shot.items() if key != "type"})
+            self.assertEqual(event["event"]["mode"], "hitscan")
             self.assertEqual(event["room_id"], "PUBLIC")
         fourth = self.client("后来加入")
         saved = next(item for item in fourth.initial_world["states"] if item["player_id"] == second.welcome["client_id"])

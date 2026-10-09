@@ -53,6 +53,7 @@ async function harness(options = {}) {
     welcome(features = capabilities, id = 'TEMP') {
       this.readyState = Socket.OPEN;
       this.receive({ type: 'welcome', protocol: 1, client_id: id, capabilities: features,
+        ...(Object.hasOwn(options, 'sessionPolicy') ? { session_policy: options.sessionPolicy } : {}),
         ...(Object.hasOwn(options, 'weaponRules') ? { weapon_rules: options.weaponRules } : {}) });
     }
     receive(value) { this.onmessage?.({ data: JSON.stringify(value) }); }
@@ -658,7 +659,7 @@ test('重复、非法和未协商的射击反馈被忽略，旧版普通武器�
   oldSocket.receive({ type: 'shot_result', seq: 1, weapon: 1, accepted: true, hit: false });
   assert.equal(oldPackets.filter((value) => value.type === 'combat_feedback').length, 0);
   oldSocket.receive({ type: 'error', code: 'unsupported_weapon', message: 'unsupported weapon' });
-  assert.equal(legacy.statuses.at(-1).connected, true); assert.ok(legacy.statuses.at(-1).text.includes('普通枪械'));
+  assert.equal(legacy.statuses.at(-1).connected, true); assert.ok(legacy.statuses.at(-1).text.includes('武器目录'));
   assert.equal(oldSocket.readyState, 1); legacy.api.close();
 });
 
@@ -841,7 +842,7 @@ test('不同枪械依据当前武器规则发送，旧服务器没有规则时�
 
 test('武器规则严格拒绝重复哈希、非法冷却和伤害，反馈 revision 仅接收非负安全整数', async () => {
   const valid = { weapon: 1, cooldown_ms: 100, damage: 20 };
-  for (const weaponRules of [[valid, valid], [{ ...valid, cooldown_ms: 0 }], [{ ...valid, cooldown_ms: 2001 }],
+  for (const weaponRules of [[valid, valid], [{ ...valid, cooldown_ms: 0 }], [{ ...valid, cooldown_ms: 10001 }],
     [{ ...valid, damage: 201 }], [{ ...valid, weapon: -1 }], [{ ...valid, extra: 1 }]]) {
     const page = await harness({ weaponRules }); const socket = page.sockets[0]; socket.welcome();
     assert.equal(socket.readyState, 3); assert.equal(page.statuses.at(-1).phase, 'reconnecting'); page.api.close();
@@ -1258,4 +1259,136 @@ test('共同世界协商明确声明环境与执法策略，新旧服务器能�
  page.api.close();
  const old=await harness();const oldSocket=old.enter(undefined,'LOCAL',{},[...capabilities,'world_v2']);
  assert.ok(!oldSocket.messages('hello')[0].capabilities.includes('shared_law'));old.api.close();
+});
+
+test('完整武器目录保留类型和效果规则，投射物基线可在晚挂接时恢复，黏弹引爆不带客户端伤害', async () => {
+  const weapon=0x2c3731d9;
+  const rules=[{weapon,name:'WEAPON_STICKYBOMB',mode:'projectile',damage:100,cooldown_ms:500,range:100,pellets:1,spread:0,
+    speed:15,gravity:1,fuse_ms:0,lifetime_ms:60000,detonation:'remote',blast_radius:6,effect_duration_ms:0,
+    effect_interval_ms:0,melee_damage:35,melee_range:2,asset_damage:100,asset_fire_type:'PROJECTILE',damage_type:'EXPLOSIVE',collision_model:'ped_capsules_aim_terminal'}];
+  const page=await harness({weaponRules:rules});const socket=page.enter(undefined,'LOCAL',{},[...capabilities,'world_v2']);
+  worldSnapshot(socket);await page.api.ready;
+  const event={type:'projectile_event',room_id:'PUBLIC',world_epoch:'epochA',projectile_id:'proj:1',player_id:'LOCAL',shot_seq:1,weapon,
+    phase:'flight',origin:[711,-1088,24],target:[730,-1088,24],position:[715,-1088,25],created_at:100,flight_ms:1000,
+    gravity:1,fuse_ms:0,detonation:'remote',expires_at:60100,world_tick:200};
+  socket.receive(event);const packets=[];page.api.setReceiver(value=>packets.push(copy(value)));
+  assert.deepEqual(packets.find(p=>p.type==='session').weapon_rules,rules);
+  assert.equal(packets.find(p=>p.type==='projectile_state').effects[0].projectile_id,'proj:1');
+  page.api.onWorkerMessage({type:'interaction_request',action:'detonate',request_id:'detonate:1'});
+  assert.deepEqual(Object.keys(socket.messages('interaction_request').at(-1)).sort(),['action','request_id','type','world_epoch']);
+  socket.receive({...event,projectile_id:'wrong',world_epoch:'old'});
+  assert.equal(packets.filter(p=>p.type==='projectile_event').length,0);
+  socket.receive({...event,phase:'landed'});assert.equal(packets.filter(p=>p.type==='projectile_event').length,1);
+  socket.receive({type:'explosion_event',room_id:'PUBLIC',world_epoch:'epochA',projectile_id:'proj:1',player_id:'LOCAL',shot_seq:1,weapon,
+    position:[730,-1088,24],radius:6,damage_type:'EXPLOSIVE',effect_duration_ms:0,world_tick:1200});
+  assert.equal(packets.filter(p=>p.type==='explosion_event').length,1);assert.equal(socket.readyState,1);page.api.close();
+});
+test('高频竞争拒绝不刷通知且真实协议错误仍保持可见', async () => {
+  const page=await harness();const socket=page.enter();const count=page.statuses.length;
+  for(const code of ['rate_limited','cooldown','stale_seq','stale_input','stale_generation','invalid_revision','seat_unavailable'])
+    socket.receive({type:'error',code,message:'temporary conflict'});
+  assert.equal(page.statuses.length,count);assert.equal(socket.readyState,1);
+  socket.receive({type:'error',code:'invalid_component',message:'invalid component'});
+  assert.equal(page.statuses.at(-1).text,'invalid component');page.api.close();
+});
+
+test('实际Java95条武器publicRules完整握手通过，保留2800ms电击枪与兼容来源-1', async () => {
+  const os=require('node:os'), {execFileSync}=require('node:child_process');
+  const directory=fs.mkdtempSync(path.join(os.tmpdir(),'gta-weapon-handshake-'));
+  const program=`import offline.multiplayer.WeaponCatalog;import java.util.*;
+    public class CatalogJson {static String json(Object v){if(v instanceof Map<?,?> m){var a=new ArrayList<String>();for(var e:m.entrySet())a.add(json(e.getKey())+":"+json(e.getValue()));return "{"+String.join(",",a)+"}";}
+    if(v instanceof Collection<?> c){var a=new ArrayList<String>();for(var e:c)a.add(json(e));return "["+String.join(",",a)+"]";}
+    if(v instanceof String s)return "\\\""+s+"\\\"";return String.valueOf(v);}public static void main(String[] args){System.out.print(json(WeaponCatalog.publicRules()));}}`;
+  try {
+    fs.writeFileSync(path.join(directory,'CatalogJson.java'),program);
+    execFileSync(process.env.JAVAC||'javac',['-d',directory,path.join(root,'server/src/main/java/offline/multiplayer/WeaponCatalog.java'),path.join(directory,'CatalogJson.java')]);
+    const rules=JSON.parse(execFileSync(process.env.JAVA||'java',['-cp',directory,'CatalogJson'],{encoding:'utf8'}));
+    assert.equal(rules.length,95);assert.ok(rules.some(r=>r.cooldown_ms===2800));assert.ok(rules.some(r=>r.asset_damage===-1));
+    const page=await harness({weaponRules:rules});const socket=page.enter();await page.api.ready;
+    const packets=[];page.api.setReceiver(p=>packets.push(copy(p)));
+    assert.equal(socket.readyState,1);assert.deepEqual(packets.find(p=>p.type==='session').weapon_rules,rules);page.api.close();
+  } finally {fs.rmSync(directory,{recursive:true,force:true});}
+});
+test('射击成功不清除待发送近战、实体批次和投射物基线', async () => {
+  const page=await harness();const socket=page.enter(undefined,'LOCAL',{},[...capabilities,'world_v2','melee_events','entity_batch']);
+  worldSnapshot(socket);await page.api.ready;
+  socket.receive({type:'projectile_event',room_id:'PUBLIC',world_epoch:'epochA',projectile_id:'proj:keep',player_id:'LOCAL',shot_seq:1,weapon:0x2c3731d9,
+    phase:'landed',origin:[711,-1088,24],target:[720,-1088,24],position:[720,-1088,24],created_at:100,flight_ms:500,gravity:1,fuse_ms:0,
+    detonation:'remote',expires_at:60100,world_tick:200});
+  page.api.onWorkerMessage({type:'local_state',state:playerState()});
+  page.api.onWorkerMessage({type:'local_shot',event:shotEvent(),state:playerState()});
+  page.advance(1);page.api.onWorkerMessage({type:'interaction_request',action:'melee',request_id:'retain'});
+  page.advance(1);page.api.onWorkerMessage({type:'local_shot',event:shotEvent(),state:playerState()});
+  page.advance(500);assert.equal(socket.messages('interaction_request').length,1);
+  const packets=[];page.api.setReceiver(p=>packets.push(copy(p)));
+  assert.equal(packets.find(p=>p.type==='projectile_state').effects[0].projectile_id,'proj:keep');page.api.close();
+});
+
+test('握手声明session_policy并把服务端禁用剧情策略传给共享世界', async () => {
+  const policy={revision:1,story_enabled:false,local_script_mode:'suspend_after_ready',allowed_scripts:[],mission_events:'server_only'};
+  const page=await harness({sessionPolicy:policy});const socket=page.enter(undefined,'LOCAL',{},[...capabilities,'world_v2','session_policy']);
+  assert.ok(socket.messages('hello')[0].capabilities.includes('session_policy'));
+  worldSnapshot(socket,[worldPed(),worldVehicle()],{session_policy:policy});await page.api.ready;
+  const packets=[];page.api.setReceiver(p=>packets.push(copy(p)));
+  assert.deepEqual(packets.find(p=>p.type==='session').session_policy,policy);
+  assert.deepEqual(packets.find(p=>p.type==='world_state_v2'&&p.ready).session_policy,policy);
+  page.api.close();
+});
+
+test('地图碰撞只接受分配给自己的当前世界查询，结果白名单不含客户端伤害', async () => {
+  const page=await harness();const socket=page.enter(undefined,'LOCAL',{},[...capabilities,'world_v2','physics_queries']);
+  assert.ok(socket.messages('hello')[0].capabilities.includes('physics_queries'));
+  worldSnapshot(socket);await page.api.ready;
+  const packets=[];page.api.setReceiver(p=>packets.push(copy(p)));
+  const query={type:'collision_query',schema_version:2,world_epoch:'epochA',query_id:'query:1',observer_id:'LOCAL',
+    purpose:'shot',issued_at:100,expires_at:1000,segments:[{from:[711,-1088,24],to:[730,-1088,24],radius:0.02}]};
+  socket.receive({...query,observer_id:'OTHER'});socket.receive({...query,world_epoch:'old'});
+  socket.receive(query);socket.receive(query);
+  assert.equal(packets.filter(p=>p.type==='collision_query').length,1);
+  page.api.onWorkerMessage({type:'collision_result',world_epoch:'old',query_id:query.query_id,complete:true,hits:[null]});
+  assert.equal(socket.messages('collision_result').length,0);
+  page.api.onWorkerMessage({type:'collision_result',world_epoch:'epochA',query_id:query.query_id,complete:true,hits:[null],damage:200});
+  assert.deepEqual(socket.messages('collision_result'),[{type:'collision_result',schema_version:2,world_epoch:'epochA',query_id:'query:1',complete:true,hits:[null]}]);
+  page.api.onWorkerMessage({type:'collision_result',world_epoch:'epochA',query_id:query.query_id,complete:true,hits:[null]});
+  assert.equal(socket.messages('collision_result').length,1);page.api.close();
+});
+
+test('碰撞查询超时或矢量格式无效不能制造成功结果，失败保留原因', async () => {
+  const page=await harness();const socket=page.enter(undefined,'LOCAL',{},[...capabilities,'world_v2','physics_queries']);
+  worldSnapshot(socket);await page.api.ready;page.api.setReceiver(()=>{});
+  const query={type:'collision_query',schema_version:2,world_epoch:'epochA',query_id:'query:1',observer_id:'LOCAL',
+    purpose:'projectile',issued_at:100,expires_at:1000,segments:[{from:[711,-1088,24],to:[730,-1088,24],radius:0.02}]};
+  socket.receive(query);page.advance(901);
+  page.api.onWorkerMessage({type:'collision_result',world_epoch:'epochA',query_id:'query:1',complete:true,hits:[null]});
+  assert.equal(socket.messages('collision_result').length,0);
+  socket.receive({...query,query_id:'query:2'});
+  page.api.onWorkerMessage({type:'collision_result',world_epoch:'epochA',query_id:'query:2',complete:false,hits:[],reason:'collision_not_loaded'});
+  assert.equal(socket.messages('collision_result')[0].complete,false);
+  assert.equal(socket.messages('collision_result')[0].reason,'collision_not_loaded');page.api.close();
+});
+
+test('真实弹道快照保留服务器运动段，拒绝缺失或非法速度和锚点', async () => {
+  const page=await harness();const socket=page.enter(undefined,'LOCAL',{},[...capabilities,'world_v2']);
+  worldSnapshot(socket);await page.api.ready;const packets=[];page.api.setReceiver(p=>packets.push(copy(p)));
+  const projectile={type:'projectile_event',room_id:'PUBLIC',world_epoch:'epochA',projectile_id:'proj:ballistic',player_id:'LOCAL',shot_seq:1,weapon:0x2c3731d9,
+    phase:'flight',origin:[711,-1088,24],target:[730,-1088,24],position:[715,-1088,25],created_at:100,flight_ms:1000,
+    gravity:1,fuse_ms:0,detonation:'remote',expires_at:60100,world_tick:200,physics:'ballistic',velocity:[10,0,5],motion_origin:[715,-1088,25],motion_at:200};
+  socket.receive(projectile);assert.deepEqual(packets.filter(p=>p.type==='projectile_event').at(-1).velocity,[10,0,5]);
+  const baseline=[];page.api.setReceiver(p=>baseline.push(copy(p)));
+  assert.deepEqual(baseline.find(p=>p.type==='projectile_state').effects[0].motion_origin,[715,-1088,25]);
+  socket.receive({...projectile,velocity:[0,0,Infinity]});assert.equal(socket.readyState,3);page.api.close();
+});
+
+test('过期碰撞回复保持静默，异常碰撞仅提示一次且不注销公共战局', async () => {
+  const page=await harness();const socket=page.enter();await page.api.ready;
+  const before=page.statuses.length;
+  socket.receive({type:'error',code:'stale_collision',message:'expired'});
+  socket.receive({type:'error',code:'stale_collision',message:'old observer'});
+  assert.equal(page.statuses.length,before);assert.equal(socket.readyState,1);
+  socket.receive({type:'error',code:'invalid_collision',message:'bad normal'});
+  assert.equal(page.statuses.length,before+1);assert.equal(page.statuses.at(-1).phase,'notice');
+  page.api.onWorkerMessage({type:'local_state',state:playerState()});page.advance(100);
+  socket.receive({type:'error',code:'invalid_collision',message:'bad point'});
+  assert.equal(page.statuses.length,before+1);assert.equal(socket.readyState,1);
+  assert.equal(socket.messages('hello').length,1);assert.equal(page.sockets.length,1);page.api.close();
 });

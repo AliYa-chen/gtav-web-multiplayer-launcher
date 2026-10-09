@@ -49,10 +49,12 @@ def main():
     parser.add_argument('--jar', type=Path, default=protocol.ROOT / 'server/multiplayer-world-experimental.jar')
     parser.add_argument('--seconds', type=int, default=1800)
     parser.add_argument('--players', type=int, default=8, choices=range(1, 9))
+    parser.add_argument('--world-data', type=Path, help='加载本地提取的真实道路/碰撞数据；省略为无图协议测试')
     parser.add_argument('--output', type=Path, default=protocol.ROOT / 'docs/snapshot/world-protocol-soak.json')
     args = parser.parse_args()
     if args.seconds < 1: parser.error('持续秒数必须为正数')
     protocol.JAR_PATH = args.jar.resolve()
+    if args.world_data: protocol.MultiplayerIntegrationTests.SERVER_ARGUMENTS=['--world-data',str(args.world_data.resolve())]
     protocol.MultiplayerIntegrationTests.setUpClass()
     server = protocol.MultiplayerIntegrationTests
     clients = []
@@ -87,7 +89,7 @@ def main():
             welcome = client.expect('welcome')
             assert 'world_v2' in welcome['capabilities'] and 'entity_batch' in welcome['capabilities']
             client.send({'type': 'hello', 'name': '持续验证' + str(index + 1),
-                         'capabilities': ['combat', 'resume', 'world_v2', 'world_environment', 'shared_law']})
+                         'capabilities': ['combat', 'resume', 'world_v2', 'world_environment', 'shared_law', 'session_policy']})
             client.profile = client.expect('profile'); client.pending_snapshot = None
             client.entities = {}; client.epoch = None; client.stream_seq = 0
             client.seq = 0; client.inputs = {}; client.ready = set()

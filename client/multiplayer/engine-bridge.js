@@ -4,11 +4,13 @@
 self.prepareMultiplayerBridge = function (imports) {
   const MAGIC = 0x4d505442;
   const FRONTEND_MAGIC = 0x4d505549;
+  const SCRIPT_GATE_MAGIC = 0x4d505343;
   const original = imports.env.wasm_module_int_js;
-  let tick = null, frontendTick = null;
+  let tick = null, frontendTick = null, scriptGate = null;
   imports.env.wasm_module_int_js = (pointer, value) => {
     if (value === FRONTEND_MAGIC) { if (frontendTick) frontendTick(); return 0; }
     if (value === MAGIC) { if (tick) tick(Number(pointer)); return 0; }
+    if (value === SCRIPT_GATE_MAGIC) return scriptGate?.(Number(pointer)) ? 1 : 0;
     return original(pointer, value);
   };
   return function bind(instance) {
@@ -36,6 +38,12 @@ self.prepareMultiplayerBridge = function (imports) {
     const consumedNotices = new Set();
     const authorityStates = new Map();
     const weaponRequests = new Map();
+    // 已在此版本注册目录核实的单机事件入口。核心加载/输入/暂停脚本继续运行。
+    const LOCAL_EVENT_SCRIPTS = new Set(['respawn_controller', 'randomchar_controller', 'buddydeathresponse',
+      'mission_repeat_controller', 'mission_triggerer_a', 'mission_triggerer_b', 'mission_triggerer_c', 'mission_triggerer_d',
+      'ambient_diving', 'ambient_mrsphilips', 'ambient_solomon', 'ambient_sonar', 'ambient_tonya',
+      'ambient_tonyacall', 'ambient_tonyacall2', 'ambient_tonyacall5', 'ambient_ufos', 'ambientblimp']);
+    const observedScripts = new Map();
     // 零伤害转播仍会触发原生武器物理，只允许普通枪，拒绝爆炸类武器。
     const VISUAL_WEAPONS = new Set(['weapon_pistol', 'weapon_combatpistol', 'weapon_appistol',
       'weapon_pistol50', 'weapon_microsmg', 'weapon_smg', 'weapon_assaultsmg', 'weapon_assaultrifle',
@@ -47,7 +55,8 @@ self.prepareMultiplayerBridge = function (imports) {
     let lastShot = 0, lastState = 0, initialPlacement = false, stopped = false;
     let smoothingTime = 0, lastStatus = 0;
     let owner = null, avatarTarget = 0, avatarInitialized = false, avatarChangeRequested = false;
-    let sessionId = null, avatarChanges = 0, replicaCreates = 0, replicaRemovals = 0;
+    let sessionId = null, avatarChanges = 0, replicaCreates = 0, replicaRemovals = 0, publicRulesActive = false;
+    let scriptPolicy = null, bootstrapControlsHeld = false;
     let lastLifecycleReport = '';
     let localAppearance = null, appearancePed = 0;
     let lifeOverride = null, lastAuthorityAlive = null, lastRespawnRevision = -1;
@@ -59,9 +68,11 @@ self.prepareMultiplayerBridge = function (imports) {
     let shotBuffer = 0, shotSampleAt = -Infinity, weaponSample = null, pendingShots = [];
     let worldReadinessAt = -Infinity, worldReadinessSignature = '';
     let muzzleNameBuffer = 0;
+    let radarBuffer = 0, radarKey = '', radarAttemptKey = '', radarAttemptAt = -Infinity, radarSignature = '';
     let visualReportAt = -Infinity, visualPlayed = 0, visualExpired = 0, visualSignature = '';
     const sessionUI = self.createNativeSessionUI?.({ ex, memory });
     const environmentBridge = self.createWorldEnvironmentBridge?.({ ex, memory, post: (value) => post(value) });
+    const collisionBridge = self.createWorldCollisionBridge?.({ ex, memory, post: (value) => post(value) });
     const worldEntities = self.createWorldEntityBridge?.({ ex, memory, post: (value) => post(value),
       playerReplica: (id) => replicas.get(id)?.ped || 0,
       onPlayerAnimation: (id, now, duration) => {
@@ -70,6 +81,42 @@ self.prepareMultiplayerBridge = function (imports) {
       } });
 
     const post = (value) => self.postMessage({ multiplayer: value });
+    function maintainPublicRadar(now, ped, alive) {
+      if (!packet?.connected || !packet.world_v2 || !packet.world?.ready || !initialPlacement
+          || !ped || alive === false || ex.mpPauseMenuActive?.()
+          || !ex.mpDisplayRadar || !ex.mpMinimapHideFog) return;
+      const key = sessionId + ':' + ped + ':' + lastRespawnRevision;
+      if (radarAttemptKey === key && now - radarAttemptAt < 500) return;
+      radarAttemptAt = now; radarAttemptKey = key;
+      try {
+        if (radarKey !== key) {
+          ex.mpMinimapPrologue?.(0);
+          ex.mpUnlockMinimapAngle?.(); ex.mpUnlockMinimapPosition?.();
+        }
+        if (ex.mpMinimapBackgroundInfo) {
+          if (!radarBuffer) radarBuffer = Number(ex.mpAlloc(64n));
+          if (!Number.isSafeInteger(radarBuffer) || radarBuffer <= 0 || radarBuffer + 64 > memory.buffer.byteLength)
+            throw new Error('invalid minimap buffer');
+          // Verified wrapper reads only Info+16 -> arguments[0]. Never write HUD globals directly.
+          new Uint8Array(memory.buffer, radarBuffer, 64).fill(0);
+          view().setBigUint64(radarBuffer + 16, BigInt(radarBuffer + 32), true);
+          ex.mpMinimapBackgroundInfo(BigInt(radarBuffer));
+        }
+        // Public world maps must not depend on a single-player save's exploration progress.
+        ex.mpMinimapHideFog(1);
+        ex.mpDisplayHud?.(1); ex.mpDisplayRadar(1);
+        radarKey = key;
+        const status = { type: 'radar_status', hidden: Boolean(ex.mpIsRadarHidden?.()),
+          rendering: Boolean(ex.mpIsMinimapRendering?.()),
+          hud_preference: ex.mpHudPreference ? Boolean(ex.mpHudPreference()) : null,
+          radar_preference: ex.mpRadarPreference ? Boolean(ex.mpRadarPreference()) : null };
+        const signature = JSON.stringify(status);
+        if (signature !== radarSignature) { radarSignature = signature; post(status); }
+      } catch {
+        // Retry after loading/recovery without throwing into the native script cleanup path.
+        if (radarSignature !== 'retrying') { radarSignature = 'retrying'; post({ type: 'radar_status', retrying: true }); }
+      }
+    }
     const validPosition = (position) => Array.isArray(position) && position.length === 3 &&
       position.every((value) => Number.isFinite(value) && Math.abs(value) <= 16000);
     // GTA 人形角色保留约 100 点内部生命基线；战局血量为 0～200。
@@ -183,8 +230,8 @@ self.prepareMultiplayerBridge = function (imports) {
     }
     function shotInterval(weapon) {
       const rule = (packet?.weapon_rules || []).find((entry) => entry.weapon === weapon);
-      return Number.isInteger(rule?.cooldown_ms) && rule.cooldown_ms >= 1 && rule.cooldown_ms <= 2000
-        ? Math.max(50, rule.cooldown_ms + 15) : 50;
+      return Number.isInteger(rule?.cooldown_ms) && rule.cooldown_ms >= 1 && rule.cooldown_ms <= 10000
+        ? Math.max(10, rule.cooldown_ms + 15) : 50;
     }
     // 每个有效 owner 回调只读取本地武器脉冲；较重的实体更新仍每 40ms 执行。
     function sampleShots(now) {
@@ -196,31 +243,39 @@ self.prepareMultiplayerBridge = function (imports) {
         weaponSample = null; pendingShots = []; return;
       }
       const { hash: weapon, ready } = actualWeapon(ped);
+      const rule = (packet.weapon_rules || []).find(value => value.weapon === weapon);
+      if (ex.mpControlJustPressed?.(0, 47)) {
+        post({ type: 'interaction_request', request_id: 'detonate:' + Math.floor(now), action: 'detonate' });
+      }
       const shooting = Boolean(ex.mpIsShooting(ped));
       const reloading = Boolean(ex.mpIsReloading?.(ped));
-      if (!weapon || !ready || reloading) { weaponSample = null; return; }
+      if (!weapon || !ready || reloading || rule?.mode === 'melee' || rule?.mode === 'environment') { weaponSample = null; return; }
       let clip = null;
       if (ex.mpGetAmmoInClip && ex.mpGetAmmoInClip(ped, weapon | 0, BigInt(scratch + 116))) clip = view().getInt32(scratch + 116, true);
+      const ammo = rule?.mode === 'projectile' && ex.mpGetAmmo ? ex.mpGetAmmo(ped, weapon | 0) : null;
       const same = weaponSample?.ped === ped && weaponSample.weapon === weapon;
-      const decreased = same && clip !== null && weaponSample.clip !== null && clip < weaponSample.clip;
+      const clipDecreased = same && clip !== null && weaponSample.clip !== null && clip < weaponSample.clip;
+      const ammoDecreased = same && ammo !== null && weaponSample.ammo !== null && ammo < weaponSample.ammo;
+      const decreased = clipDecreased || ammoDecreased;
       const rising = shooting && (!same || !weaponSample.shooting);
       const priorFiredAt = same ? weaponSample.firedAt : -Infinity;
       let pendingDecrease = same ? weaponSample.pendingDecrease : null;
       if (pendingDecrease && now - pendingDecrease.at > 300) pendingDecrease = null;
       // 射击位可能比扣弹提前；记住尚未扣弹的已发送脉冲，匹配后续计数而非再算一发。
-      const delayedDecrease = decreased && pendingDecrease && clip === pendingDecrease.clip - 1;
+      const delayedDecrease = decreased && pendingDecrease && ((clipDecreased && clip === pendingDecrease.clip - 1)
+        || (ammoDecreased && ammo === pendingDecrease.ammo - 1));
       if (delayedDecrease) pendingDecrease = null;
       // 持续无限弹时用慢速脉冲兜底，仍由服务器武器射速校验。
       const interval = shotInterval(weapon);
       const fallback = shooting && !decreased && now - priorFiredAt >= Math.max(150, interval);
       const firedAt = same ? weaponSample.firedAt : -Infinity;
-      weaponSample = { ped, weapon, shooting, clip, firedAt, pendingDecrease };
+      weaponSample = { ped, weapon, shooting, clip, ammo, firedAt, pendingDecrease };
       if ((!decreased || delayedDecrease) && !rising && !fallback) return;
       if (now - firedAt < interval) return;
       weaponSample.firedAt = now;
-      if (!decreased && clip !== null) weaponSample.pendingDecrease = { clip, at: now };
+      if (!decreased && (clip !== null || ammo !== null)) weaponSample.pendingDecrease = { clip, ammo, at: now };
       const ray = cameraRay();
-      if (ex.mpLastWeaponImpact) {
+      if (ex.mpLastWeaponImpact && rule?.mode !== 'projectile' && rule?.mode !== 'utility') {
         if (!shotBuffer) shotBuffer = Number(ex.mpAlloc(16n));
         if (shotBuffer && ex.mpLastWeaponImpact(ped, BigInt(shotBuffer))) {
           // 此 native 使用紧凑 rage::Vector3，而不是 0/8/16 的 scrVector。
@@ -247,6 +302,37 @@ self.prepareMultiplayerBridge = function (imports) {
       // 浏览器 TextDecoder 不接受 SharedArrayBuffer 视图，先复制到普通缓冲区。
       return decoder.decode(bytes.slice(0, end < 0 ? 32 : end)).replace(/[^\w.-]/g, '').slice(0, 32);
     }
+    scriptGate = (thread) => {
+      const name = contextName(thread);
+      const candidates = [packet?.world?.session_policy, packet?.session_policy].filter(Boolean);
+      const nextPolicy = candidates.sort((a, b) => b.revision - a.revision)[0];
+      if (nextPolicy && !publicRulesActive && packet?.connected) {
+        // 启动VM完成模型/地图加载前，玩家输入不能进入单机任务触发区。
+        ex.mpSetPlayerControl?.(ex.mpPlayerId(), 0, 0); bootstrapControlsHeld = true;
+      }
+      if (sessionId && initialPlacement && packet?.world_v2 && (!nextPolicy || packet?.world?.ready)) publicRulesActive = true;
+      const online = publicRulesActive;
+      if (online && nextPolicy?.story_enabled === false && nextPolicy.local_script_mode === 'suspend_after_ready'
+          && nextPolicy.mission_events === 'server_only' && Number.isSafeInteger(nextPolicy.revision)
+          && nextPolicy.revision >= 1 && Array.isArray(nextPolicy.allowed_scripts)
+          && (!scriptPolicy || nextPolicy.revision > scriptPolicy.revision)) {
+        scriptPolicy = { revision: nextPolicy.revision, allowed: new Set(nextPolicy.allowed_scripts) };
+      }
+      if (online && bootstrapControlsHeld) {
+        ex.mpSetPlayerControl?.(ex.mpPlayerId(), 1, 0); bootstrapControlsHeld = false;
+      }
+      const blocked = online && (scriptPolicy ? !scriptPolicy.allowed.has(name)
+        : (LOCAL_EVENT_SCRIPTS.has(name) || /^re_[a-z_]+$/.test(name)));
+      if (name && observedScripts.get(name) !== blocked) {
+        observedScripts.set(name, blocked);
+        post({ type: 'script_policy', script: name, phase: blocked ? 'suspended' : 'retained',
+          policy: scriptPolicy ? 'server_allowlist' : 'public_server_rules',
+          policy_revision: scriptPolicy?.revision || 0,
+          reason: scriptPolicy ? (blocked ? 'server_suspended_local_vm' : 'server_allowed_script')
+            : blocked ? 'local_event_authority' : 'engine_lifecycle_or_unreviewed' });
+      }
+      return blocked;
+    };
     function useOwner(thread, handler, now) {
       if (owner) {
         if (owner.thread === thread && owner.handler === handler) { owner.seen = now; return true; }
@@ -659,8 +745,10 @@ self.prepareMultiplayerBridge = function (imports) {
       for (const [id, pending] of visualShots) {
         const shot = pending.shot, weapon = shot.event?.weapon >>> 0;
         const replica = replicas.get(shot.player_id);
+        const rule = (packet.weapon_rules || []).find(value => value.weapon === weapon);
+        const visualBullet = rule ? ['hitscan', 'shotgun'].includes(rule.mode) : VISUAL_WEAPONS.has(weapon);
         if (!members.has(shot.player_id) || !validPosition(shot.event?.origin) || !validPosition(shot.event?.target)
-            || !VISUAL_WEAPONS.has(weapon) || !ex.mpShootBullet || !ex.mpHasWeaponAsset || replica?.dead) {
+            || !visualBullet || !ex.mpShootBullet || !ex.mpHasWeaponAsset || replica?.dead) {
           finishShot(id); continue;
         }
         if (now - pending.receivedAt > 2000) { visualExpired++; finishShot(id); continue; }
@@ -710,8 +798,12 @@ self.prepareMultiplayerBridge = function (imports) {
         worldEntities?.suppressPopulation(packet);
         environmentBridge?.suppressLocalDispatch(packet);
         if (!useOwner(thread, handler, now)) return;
+        worldEntities?.renderEffects?.(packet, now);
         sampleShots(now);
         const meleePed = ex.mpGetPlayerPed(-1);
+        collisionBridge?.tick(packet, now, meleePed, {
+          localReady: initialPlacement && avatarInitialized && !avatarChangeRequested && !modelRestore,
+        });
         worldEntities?.sampleMelee(packet, now, meleePed, {
           localReady: initialPlacement && avatarInitialized && !avatarChangeRequested && !modelRestore
             && Boolean(meleePed && (ex.mpGetModel(meleePed) >>> 0) === avatarTarget),
@@ -943,6 +1035,7 @@ self.prepareMultiplayerBridge = function (imports) {
           initialPlacement = true;
           post({ type: 'game_status', connected: true, peer_count: replicas.size, spawned: true });
         }
+        maintainPublicRadar(now, localPed, authority?.alive);
         const model = ex.mpGetModel(localPed) >>> 0;
         const heading = ((ex.mpHeading(localPed) % 360) + 360) % 360;
         const health = Math.max(0, Math.min(1000, ex.mpGetHealth(localPed)));

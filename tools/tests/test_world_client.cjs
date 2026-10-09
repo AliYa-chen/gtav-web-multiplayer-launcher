@@ -29,6 +29,18 @@ const delta = (changes = {}) => ({ type: 'world_delta', schema_version: 2, world
   world_tick: 110, stream_seq: 1, entities: [], tombstones: [], scope_leave: [], ...changes });
 const baseline = (world, entities = [ped(), vehicle()]) => { world.receive(begin()); world.receive(chunk(entities)); return world.receive(end()); };
 
+test('道路不可达AI使用原有idle任务结构，世界快照无需升级schema', async () => {
+  const {cleanWorldEntity,createWorldState}=await modulePromise;
+  const actor=ped({player_id:null,simulation_task:'wander'});
+  actor.ai_task={revision:1,entity_id:actor.entity_id,generation:actor.generation,owner_epoch:actor.owner_epoch,
+    action:'idle',reason:'road_unavailable',target_entity_id:null,target_generation:null,target_position:null,
+    destination:null,speed:0,vehicle_entity_id:null,expires_at_tick:0};
+  assert.deepEqual(cleanWorldEntity(actor).ai_task,actor.ai_task);
+  const world=createWorldState();baseline(world,[actor]);assert.equal(world.state().ready,true);
+  assert.equal(world.entity(actor.entity_id).ai_task.reason,'road_unavailable');
+  assert.equal(world.state().schema_version,2);
+});
+
 test('分块快照仅在同 epoch、snapshot、cut 的 end 到达后原子生效，旧基线始终不会出现半块实体', async () => {
   const { createWorldState } = await modulePromise;
   const world = createWorldState();
@@ -240,4 +252,32 @@ test('执法规则独立版本更新NPC任务，不允许回滚实体姿态与�
  assert.equal(world.receive(delta({world_revision:5,law:{...law,revision:2},entities:[updated]})).changed,true);
  assert.equal(world.entity(officer.entity_id).task_revision,2);assert.equal(world.entity(officer.entity_id).components.transform.position[0],711.5);
  assert.equal(world.entity(officer.entity_id).law_response.target_position[0],713);
+});
+
+test('AI命令验证对象代际和owner epoch，空目标双null且禁止未知命令字段', async () => {
+  const {cleanWorldEntity}=await modulePromise;
+  const entity=ped({player_id:null});
+  const task={revision:1,entity_id:entity.entity_id,generation:1,owner_epoch:1,action:'wander',reason:'ambient',
+    target_entity_id:null,target_generation:null,target_position:null,destination:null,speed:1,vehicle_entity_id:null,expires_at_tick:0};
+  assert.ok(cleanWorldEntity({...entity,ai_task:task}));
+  for(const change of [{owner_epoch:2},{generation:2},{target_generation:0},{action:'run_script'},{speed:81},{extra:'native'}]){
+    assert.equal(cleanWorldEntity({...entity,ai_task:{...task,...change}}),null);
+  }
+  assert.equal(cleanWorldEntity({...entity,ai_task:{...task,action:'combat'}}),null);
+  assert.equal(cleanWorldEntity({...entity,ai_task:{...task,action:'drive'}}),null);
+  assert.ok(cleanWorldEntity({...entity,ai_task:{...task,action:'combat',target_entity_id:'target',target_generation:2}}));
+});
+
+test('战局脚本策略严格白名单且随快照原子安装，旧版本不能恢复剧情VM', async () => {
+  const {cleanSessionPolicy,createWorldState}=await modulePromise;
+  const policy={revision:1,story_enabled:false,local_script_mode:'suspend_after_ready',allowed_scripts:[],mission_events:'server_only'};
+  assert.deepEqual(cleanSessionPolicy(policy),policy);
+  for(const change of [{story_enabled:true},{local_script_mode:'local'},{allowed_scripts:['bad script']},
+    {allowed_scripts:['same','same']},{mission_events:'client'},{extra:1}])assert.equal(cleanSessionPolicy({...policy,...change}),null);
+  const world=createWorldState();world.receive(begin({session_policy:policy}));world.receive(chunk([ped()]));
+  assert.equal(world.state().session_policy,null);world.receive(end({session_policy:policy}));assert.deepEqual(world.state().session_policy,policy);
+  world.receive(delta({session_policy:{...policy,revision:2,allowed_scripts:['server_loader']}}));
+  assert.equal(world.state().session_policy.revision,2);
+  world.receive(delta({stream_seq:2,world_revision:7,session_policy:policy}));
+  assert.equal(world.state().session_policy.revision,2);
 });

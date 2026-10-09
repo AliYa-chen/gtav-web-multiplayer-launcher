@@ -10,7 +10,7 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
   let localGeneration = null;
   let animationBuffer = 0, animationRequestedAt = -Infinity;
   let lastMeleeSampleAt = -Infinity, lastMeleeSentAt = -Infinity, lastMeleeInput = false;
-  let pendingMelee = null, lastMeleePhase = null;
+  let pendingMelee = [], lastMeleePhase = null;
   const consumedWorldEvents = new Set(), animationEvents = new Map();
   const meleeDict = 'melee@unarmed@streamed_core';
   const meleeClips = ['heavy_punch_a', 'heavy_punch_b', 'heavy_punch_c'];
@@ -31,7 +31,7 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
   function clear() {
     for (const replica of replicas.values()) erase(replica);
     replicas.clear(); requestedModels.clear(); epoch = null; pendingLife = null; lastMelee = false; localGeneration = null;
-    pendingMelee = null; lastMeleeInput = false; lastMeleePhase = null;
+    pendingMelee = []; lastMeleeInput = false; lastMeleePhase = null;
     consumedWorldEvents.clear(); animationEvents.clear();
   }
   function transform(handle) {
@@ -80,11 +80,98 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
       ex.mpRequestAnimDict?.(pointers.dict); animationRequestedAt = now;
     }
   }
+  function applyAiTask(entity, replica, entities, packet, now, localPed) {
+    const task = entity.ai_task, active = entity.owner_id === packet.client_id && entity.ownership === 'active';
+    const valid = task && task.entity_id === entity.entity_id && task.generation === entity.generation
+      && task.owner_epoch === entity.owner_epoch
+      && (task.expires_at_tick === 0 || task.expires_at_tick >= packet.world.world_tick);
+    const action = active && entity.components.combat?.alive !== false && valid ? task.action : 'idle';
+    const key = active + ':' + entity.owner_epoch + ':' + (valid ? task.revision : 0) + ':' + action;
+    const target = task?.target_entity_id ? entities.get(task.target_entity_id) : null;
+    const targetHandle = target?.player_id === packet.client_id ? localPed : target?.player_id
+      ? playerReplica(target.player_id) : replicas.get(task?.target_entity_id)?.handle;
+    const targetReady = target && target.generation === task?.target_generation && target.components.combat?.alive !== false
+      && targetHandle && ex.mpExists(targetHandle);
+    const vehicle = replicas.get(task?.vehicle_entity_id)?.handle;
+    if (replica.aiKey !== key) {
+      ex.mpClearTasksImmediately?.(replica.handle);
+      replica.aiKey = null;
+      if (action === 'wander' && !entity.components.attachment) ex.mpTaskWander?.(replica.handle, 10, 0);
+      else if (action === 'drive') {
+        const attachment = entity.components.attachment;
+        if (!vehicle || attachment?.entity_id !== task.vehicle_entity_id || attachment.seat !== 'driver'
+            || ex.mpGetVehiclePedIsIn?.(replica.handle, 0) !== vehicle) return;
+        if (validPosition(task.destination) && ex.mpDriveToCoord) ex.mpDriveToCoord(replica.handle, vehicle, vector(0, task.destination), task.speed, 786603, 4);
+        else if (!task.destination) ex.mpDriveWander?.(replica.handle, vehicle, task.speed, 786603);
+      } else if (['flee', 'pursue'].includes(action) && !entity.components.attachment && validPosition(task.destination)) {
+        const heading = Math.atan2(task.destination[1] - entity.components.transform.position[1],
+          task.destination[0] - entity.components.transform.position[0]) * 180 / Math.PI - 90;
+        ex.mpTaskGoStraight?.(replica.handle, vector(0, task.destination), task.speed, 3000, heading, .5);
+      } else if (action === 'combat' && !entity.components.attachment) {
+        if (!targetReady) return; // 等目标模型出现后再应用同一个任务版本。
+        ex.mpTaskCombatPed?.(replica.handle, targetHandle, 0, 16);
+      } else ex.mpTaskStandStill?.(replica.handle, -1);
+      replica.aiKey = key; replica.task = action;
+      post({ type: 'world_entity_status', entity_id: entity.entity_id, kind: 'ped', phase: 'ai_' + action,
+        task_revision: valid ? task.revision : 0 });
+    }
+    if (action === 'combat' && targetReady && ex.mpIsShooting(replica.handle)
+        && now - (replica.lawShotAt ?? -Infinity) >= 1500) {
+      replica.lawShotAt = now;
+      post({ type: 'simulation_result', kind: 'npc_shot', entity_id: entity.entity_id, owner_epoch: entity.owner_epoch,
+        generation: entity.generation, target_entity_id: target.entity_id, target_generation: target.generation });
+    }
+  }
+  function renderEffects(packet, now) {
+    if (!packet?.connected || !packet.world?.ready) return;
+    if (!buffer) buffer = Number(ex.mpAlloc(128n));
+    if (!buffer) return;
+    const tickFor = value => (value.world_tick || 0) + Math.max(0, value.received_at_epoch
+      && Number.isFinite(globalThis.performance?.timeOrigin)
+      ? globalThis.performance.timeOrigin + now - value.received_at_epoch : now - (value.received_at ?? now));
+    for (const item of packet.world_projectiles || []) {
+      if (item.world_epoch !== packet.world.world_epoch || !validPosition(item.position)) continue;
+      const tick = tickFor(item);
+      if (tick >= item.expires_at || item.phase === 'expired') continue;
+      let position = item.position;
+      if (item.phase !== 'landed' && item.physics === 'ballistic') {
+        if (!validPosition(item.motion_origin) || !validPosition(item.velocity) || !Number.isSafeInteger(item.motion_at)
+          || item.motion_at < 0 || !Number.isFinite(item.gravity) || item.gravity < 0 || item.gravity > 100) continue;
+        const seconds = Math.max(0, tick - item.motion_at) / 1000;
+        position = item.motion_origin.map((value, index) => value + item.velocity[index] * seconds
+          - (index === 2 ? .5 * 9.81 * item.gravity * seconds ** 2 : 0));
+      } else if (item.phase !== 'landed' && validPosition(item.origin) && validPosition(item.target) && item.flight_ms > 0) {
+        const t = Math.max(0, Math.min(1, (tick - item.created_at) / item.flight_ms));
+        const arc = item.gravity * 9.81 * (item.flight_ms / 1000) ** 2 / 8;
+        position = item.origin.map((value, index) => value + (item.target[index] - value) * t + (index === 2 ? 4 * arc * t * (1 - t) : 0));
+      }
+      // 纯渲染标记不创建武器实体，不产生本地碰撞、伤害或另一套投射物计时器。
+      if (validPosition(position)) ex.mpDrawSphere?.(vector(0, position), .09, 245, 180, 70, .85);
+    }
+    for (const item of packet.world_areas || []) {
+      if (item.world_epoch !== packet.world.world_epoch || !validPosition(item.position) || tickFor(item) >= item.expires_at) continue;
+      const fire = item.damage_type === 'FIRE';
+      ex.mpDrawSphere?.(vector(0, item.position), Math.min(8, Math.max(.2, item.radius)), fire ? 230 : 135, fire ? 100 : 145, fire ? 30 : 150, .18);
+    }
+    const acknowledge = [];
+    for (const item of packet.world_effects || []) {
+      const event = item.event, key = 'effect:' + item.id;
+      if (!consumedWorldEvents.has(key) && event?.world_epoch === packet.world.world_epoch && validPosition(event.position)) {
+        if (event.damage_type === 'EXPLOSIVE') {
+          // CommandAddExplosion的最后一个bool是noDamage；禁止省略或改成0。
+          ex.mpVisualExplosion?.(vector(0, event.position), 0, 0, 1, 0, 0, 1);
+        }
+        consumedWorldEvents.add(key);
+      }
+      acknowledge.push(item.id);
+    }
+    if (acknowledge.length) post({ type: 'world_effect_ack', ids: acknowledge });
+  }
   function sampleMelee(packet, now, localPed, { localReady = true } = {}) {
     if (now - lastMeleeSampleAt < 5 || !packet?.connected || !packet.world?.ready || !localReady || !localPed) return;
     lastMeleeSampleAt = now;
     const actor = packet.world.entities.find((entity) => entity.player_id === packet.client_id);
-    if (!actor || !actor.components.combat?.alive || actor.components.attachment || ex.mpIsDead(localPed, 0)) { pendingMelee = null; return; }
+    if (!actor || !actor.components.combat?.alive || actor.components.attachment || ex.mpIsDead(localPed, 0)) { pendingMelee = []; return; }
     if (!buffer) buffer = Number(ex.mpAlloc(128n));
     if (!buffer) return;
     const melee = Boolean(ex.mpMeleeAction?.(localPed));
@@ -102,13 +189,17 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     const edge = (input && !lastMeleeInput) || (melee && !lastMelee) || newAnimation;
     // 缓存输入捕获重复按键；动画相位补充连招，任务状态只作为兜底，不能把目标0当成已命中。
     if (edge || (input && melee && !phase && now - lastMeleeSentAt >= 900)) {
-      pendingMelee = { at: now, actor: actor.entity_id, generation: actor.generation, world: packet.world.world_epoch };
+      pendingMelee.push({ at: now, actor: actor.entity_id, generation: actor.generation, world: packet.world.world_epoch });
+      if (pendingMelee.length > 8) pendingMelee.splice(7, 1);
     }
     lastMelee = melee; lastMeleeInput = input; lastMeleePhase = phase;
-    if (!pendingMelee) return;
-    if (pendingMelee.actor !== actor.entity_id || pendingMelee.generation !== actor.generation
-        || pendingMelee.world !== packet.world.world_epoch || now - pendingMelee.at > 350) { pendingMelee = null; return; }
-    if (now - lastMeleeSentAt < 715) return;
+    if (!pendingMelee.length) return;
+    const intent = pendingMelee[0];
+    if (intent.actor !== actor.entity_id || intent.generation !== actor.generation
+        || intent.world !== packet.world.world_epoch || now - intent.at > 2000) { pendingMelee = []; return; }
+    const weapon = ex.mpSelectedWeapon(localPed) >>> 0;
+    // 战斗冷却由服务器有界队列裁决；客户端仅合并抖动，不丢弃连续按键。
+    if (now - lastMeleeSentAt < 50) return;
     const requestId = 'engine:' + (++requestNumber);
     post({ type: 'melee_sample', request_id: requestId, actor_entity_id: actor.entity_id,
       source: newAnimation ? 'animation' : input ? 'input' : 'task' });
@@ -117,11 +208,11 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     const position = readVector(0);
     const heading = ((ex.mpHeading(localPed) % 360) + 360) % 360;
     const state = { position, heading, model: ex.mpGetModel(localPed) >>> 0, health: Math.max(0, Math.min(1000, ex.mpGetHealth(localPed))),
-      weapon: ex.mpSelectedWeapon(localPed) >>> 0, shooting: false,
+      weapon, shooting: false,
       actions: { aiming: false, reloading: false, jumping: false, ducking: Boolean(ex.mpIsDucking?.(localPed)), sprinting: false },
       ...(actor.components.appearance ? { appearance: actor.components.appearance } : {}) };
     post({ type: 'interaction_request', request_id: requestId, action: 'melee', actor_generation: actor.generation, state });
-    lastMeleeSentAt = now; pendingMelee = null;
+    lastMeleeSentAt = now; pendingMelee.shift();
   }
   function playWorldEvents(packet, entities, now) {
     const acknowledge = [];
@@ -268,9 +359,11 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
         const health = state.combat?.health ?? 200;
         const nativeHealth = health > 0 ? 100 + Math.max(1, Math.round(health / 2)) : 0;
         if (health === 0) ex.mpFreeze(replica.handle, 0);
-        ex.mpBlockEvents(replica.handle, active ? 0 : 1);
+        ex.mpBlockEvents(replica.handle, 1);
         ex.mpSetCanRagdoll?.(replica.handle, active || health === 0 ? 1 : 0);
         ex.mpSetInvincible(replica.handle, active || health === 0 ? 0 : 1);
+        // 枪械、火焰、爆炸与近战只消费服务端血量；撞击/摔落/溺水仍可上报环境候选。
+        ex.mpSetProofs?.(replica.handle, 1, 1, 1, 0, 1, 0, 0, 0);
         if (!active || !replica.active || replica.serverHealth !== health) {
           if (health > 0 && ex.mpIsDead(replica.handle, 0)) { ex.mpResurrect?.(replica.handle); ex.mpRevive?.(replica.handle); }
           if (ex.mpGetHealth(replica.handle) !== nativeHealth) ex.mpSetHealth(replica.handle, nativeHealth, 0);
@@ -285,32 +378,14 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
               owner_epoch: entity.owner_epoch, health: observed });
           }
         }
-        const response = entity.law_response;
-        if (response && health > 0) {
-          ex.mpSetPedAsCop?.(replica.handle, 1);
-          const weapon = state.ped?.weapon;
-          if (weapon && ex.mpHasWeaponAsset?.(weapon | 0) && replica.lawWeapon !== weapon) {
-            ex.mpGiveWeapon?.(replica.handle, weapon | 0, 999, 0, 1); ex.mpSetCurrentWeapon?.(replica.handle, weapon | 0, 1); replica.lawWeapon = weapon;
-          } else if (weapon && !ex.mpHasWeaponAsset?.(weapon | 0)) ex.mpRequestWeaponAsset?.(weapon | 0, 31, 0);
-          const target = entities.get(response.target_entity_id);
-          const targetHandle = target?.player_id === packet.client_id ? localPed : target?.player_id ? playerReplica(target.player_id) : replicas.get(response.target_entity_id)?.handle;
-          if (active && response.phase === 'active' && target?.generation === response.target_generation
-              && target.components.combat?.alive !== false && targetHandle && ex.mpExists(targetHandle) && !state.attachment) {
-            if (replica.lawTarget !== targetHandle || now - (replica.lawTaskAt ?? -Infinity) >= 3000) {
-              ex.mpTaskCombatPed?.(replica.handle, targetHandle, 0, 16); replica.lawTarget = targetHandle; replica.lawTaskAt = now;
-            }
-            if (ex.mpIsShooting(replica.handle) && now - (replica.lawShotAt ?? -Infinity) >= 1500) {
-              replica.lawShotAt = now;
-              post({ type: 'simulation_result', kind: 'npc_shot', entity_id: entity.entity_id, owner_epoch: entity.owner_epoch,
-                generation: entity.generation, target_entity_id: target.entity_id, target_generation: target.generation });
-            }
-            replica.task = 'police_pursuit';
-          } else if ((!active || response.phase !== 'active') && replica.task !== 'law_frozen') {
-            replica.lawTarget = null; ex.mpClearTasksImmediately?.(replica.handle); replica.task = 'law_frozen';
-          }
-        } else if (active && health > 0 && !state.attachment && (!replica.active || replica.task !== 'wander')) {
-          ex.mpTaskWander?.(replica.handle, 10, 0); replica.task = 'wander'; replica.driveStarted = false;
-        }
+        // 服务器发布任务；owner只执行引擎寻路/动画，不自行选择目标或决定战斗。
+        const weapon = state.ped?.weapon;
+        if (weapon && ex.mpHasWeaponAsset?.(weapon | 0) && replica.lawWeapon !== weapon) {
+          ex.mpGiveWeapon?.(replica.handle, weapon | 0, 999, 0, 1);
+          ex.mpSetCurrentWeapon?.(replica.handle, weapon | 0, 1); replica.lawWeapon = weapon;
+        } else if (weapon && !ex.mpHasWeaponAsset?.(weapon | 0)) ex.mpRequestWeaponAsset?.(weapon | 0, 31, 0);
+        if (entity.law_response) ex.mpSetPedAsCop?.(replica.handle, 1);
+
       }
       replica.active = active; replica.revision = entity.revision;
       if (active && !state.attachment && state.combat?.alive !== false && now - replica.submittedAt >= 100) {
@@ -347,11 +422,9 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
       }
       if (entity.player_id === packet.client_id) lastSeat = attachment && (current === vehicle || lastSeat === attachment.entity_id)
         ? attachment.entity_id : null;
-      if (!entity.player_id && attachment && entity.simulation_task === 'driver') {
+      if (!entity.player_id) {
         const replica = replicas.get(entity.entity_id);
-        if (replica?.active && !replica.driveStarted && vehicle) {
-          ex.mpDriveWander?.(handle, vehicle, 10, 786603); replica.driveStarted = true; replica.task = 'driver';
-        } else if (replica && !replica.active) replica.driveStarted = false;
+        if (replica) applyAiTask(entity, replica, entities, packet, now, localPed);
       }
     }
     playWorldEvents(packet, entities, now);
@@ -395,6 +468,7 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     if (!fadesPaused) {
       ex.mpFadeAfterDeath?.(0); ex.mpFadeAfterArrest?.(0); ex.mpFadeAfterRestart?.(1); fadesPaused = true;
     }
+    ex.mpSetProofs?.(localPed, 1, 1, 1, 0, 1, 0, 0, 0);
     const life = local.components.combat, actualHealth = ex.mpGetHealth(localPed);
     const dead = Boolean(ex.mpIsDead(localPed, 0)) || actualHealth <= 100;
     const expectedHealth = life ? 100 + Math.max(1, Math.round(life.health / 2)) : 200;
@@ -424,5 +498,5 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     ex.mpPedDensity?.(0); ex.mpScenarioDensity?.(0, 0);
     ex.mpVehicleDensity?.(0); ex.mpRandomVehicleDensity?.(0); ex.mpParkedVehicleDensity?.(0);
   }
-  return { update, sampleMelee, suppressPopulation, clear, entityHandle: (id) => replicas.get(id)?.handle || 0 };
+  return { update, sampleMelee, renderEffects, suppressPopulation, clear, entityHandle: (id) => replicas.get(id)?.handle || 0 };
 };

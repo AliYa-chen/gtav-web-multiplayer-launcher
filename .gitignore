@@ -9,6 +9,7 @@
 # 编译、部署包与本地校验产物。
 /server/VERSION.json
 /server/SHA256SUMS.txt
+/server/world-data/
 *.jar
 *.class
 *.zip
