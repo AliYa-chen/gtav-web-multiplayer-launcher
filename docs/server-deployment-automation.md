@@ -18,6 +18,8 @@ Store credentials in GitHub Actions **Secrets**, never in source, release notes,
 
 Optional Actions **Variables**: `GTA_SERVER_BASE` defaults to `/opt/gta5data-server`; `GTA_CN_PUBLIC_DOMAIN` and `GTA_US_PUBLIC_DOMAIN` default to `gtaserver-cn.2t.hk` and `gtaserver-us.2t.hk`. The existing units are `gta5data-server.service` and `gta5data-world-experimental.service`, listening locally on `17485`/`17486`, with certificate-valid public HTTPS/WSS on `47485`/`47486` and `/<port>/health`, `/<port>/ws`.
 
+Secrets are managed under **Settings → Secrets and variables → Actions → Repository secrets**. The workflow reads them only in the SSH deployment or diagnostic step. To check runner connectivity separately, dispatch the existing workflow on `main` with `check_ssh=true`: it authenticates both pinned hosts and closes the connections, reports only region and a fixed error category, and skips all builds, publication and deployment. Secret values cannot be read back through the GitHub API; update them from verified maintenance credentials when needed.
+
 The runner requires Python 3.12, Java 17, Node 24, and pinned Paramiko 4.0.0. Existing hosts require Python 3.9+, systemd, Java, and their already configured TLS proxy. Actual JAR changes additionally require root access, `iptables`, `systemd-run`, and Nginx workers running as a non-root account. Deployment creates no new game services, certificates, accounts, or world data.
 
 ## Rollout and recovery
@@ -44,6 +46,8 @@ Player resource inputs, extracted world data, certificates, proxy configuration,
 在 GitHub Actions **Secrets** 中配置两地的 `GTA_CN_SSH_HOST/PORT/USER/PASSWORD`、`GTA_US_SSH_HOST/PORT/USER/PASSWORD`，以及包含两地主机已确认指纹的 `GTA_SSH_KNOWN_HOSTS`。非标准 SSH 端口使用 `[host]:port` 格式。通过已有可信连接确认指纹，禁止自动接受陌生主机密钥。账号须具备备份、替换 JAR 和重启既有服务的权限。凭据不写入源码、更新说明、命令参数或日志。
 
 可选 Actions **Variables**：`GTA_SERVER_BASE` 默认为 `/opt/gta5data-server`，`GTA_CN_PUBLIC_DOMAIN` / `GTA_US_PUBLIC_DOMAIN` 默认为两地现有域名。沿用 `gta5data-server.service` / `gta5data-world-experimental.service`，本机端口 `17485` / `17486`，公网 HTTPS/WSS 端口 `47485` / `47486`，路径为 `/<port>/health` 和 `/<port>/ws`。
+
+Secrets 位于 **Settings → Secrets and variables → Actions → Repository secrets**，仅注入 SSH 部署或诊断步骤。单独检查 GitHub 运行器连通性时，在 `main` 上手动运行既有工作流并设 `check_ssh=true`：两地主机均按已确认指纹认证后关闭连接，只记录地区与固定错误类别，跳过全部构建、发布及部署。GitHub API 不允许读取已保存的 Secret 明文；需更新时从已验证的维护凭据重新写入。
 
 运行器使用 Python 3.12、Java 17、Node 24 与固定版本 Paramiko 4.0.0；既有服务器需要 Python 3.9+、systemd、Java 和已配置的 TLS 代理。真正更换 JAR 时还要求 root 权限、`iptables`、`systemd-run` 和以非 root 身份运行的 Nginx 工作进程。自动部署不创建新的游戏服务、证书、账号或世界数据。
 

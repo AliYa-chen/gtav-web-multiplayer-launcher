@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      check_ssh:
+        description: 'Only verify encrypted SSH credentials / 仅检查加密 SSH 凭据'
+        type: boolean
+        default: false
+        required: false
 
 # Release tags are immutable. Queue merges instead of interrupting uploads.
 concurrency:
@@ -36,7 +42,24 @@ jobs:
           python-version: '3.12'
       - name: Check repository content boundaries / 检查仓库提交边界
         run: python -B tools/check_git_contents.py
+      - name: Install pinned SSH transport for diagnosis / 为诊断安装固定版本 SSH 通信库
+        if: github.event_name == 'workflow_dispatch' && inputs.check_ssh == true
+        run: python -m pip install 'paramiko==4.0.0'
+      - name: Verify encrypted SSH credentials / 仅校验加密 SSH 凭据
+        if: github.event_name == 'workflow_dispatch' && inputs.check_ssh == true
+        env:
+          GTA_CN_SSH_HOST: ${{ secrets.GTA_CN_SSH_HOST }}
+          GTA_CN_SSH_PORT: ${{ secrets.GTA_CN_SSH_PORT }}
+          GTA_CN_SSH_USER: ${{ secrets.GTA_CN_SSH_USER }}
+          GTA_CN_SSH_PASSWORD: ${{ secrets.GTA_CN_SSH_PASSWORD }}
+          GTA_US_SSH_HOST: ${{ secrets.GTA_US_SSH_HOST }}
+          GTA_US_SSH_PORT: ${{ secrets.GTA_US_SSH_PORT }}
+          GTA_US_SSH_USER: ${{ secrets.GTA_US_SSH_USER }}
+          GTA_US_SSH_PASSWORD: ${{ secrets.GTA_US_SSH_PASSWORD }}
+          GTA_SSH_KNOWN_HOSTS: ${{ secrets.GTA_SSH_KNOWN_HOSTS }}
+        run: python -B tools/deploy_server.py --check-ssh
       - name: Select components from versions and update MD / 根据版本与更新 MD 选择待发布组件
+        if: inputs.check_ssh != true
         id: plan
         env:
           GH_TOKEN: ${{ github.token }}
@@ -45,6 +68,7 @@ jobs:
           --output archive/release-plan/release-plan.json
           --github-output "$GITHUB_OUTPUT"
       - name: Save verified artifact / 保存核验后的附件
+        if: inputs.check_ssh != true
         uses: actions/upload-artifact@v4
         with:
           name: release-plan

@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shlex
+import socket
 import subprocess
 import sys
 import time
@@ -111,7 +112,26 @@ def settings():
     return regions, host_keys, base
 
 
-def connect(config, host_keys):
+def ssh_error_category(error, paramiko):
+    """Return fixed diagnostic categories without exposing exception contents."""
+    if isinstance(error, paramiko.BadHostKeyException):
+        return 'host_key_mismatch'
+    if isinstance(error, paramiko.AuthenticationException):
+        return 'authentication_failed'
+    if isinstance(error, paramiko.ssh_exception.NoValidConnectionsError):
+        return 'connection_unavailable'
+    if isinstance(error, (socket.timeout, TimeoutError)):
+        return 'connection_or_auth_timeout'
+    if isinstance(error, paramiko.ssh_exception.IncompatiblePeer):
+        return 'algorithm_negotiation_failed'
+    if isinstance(error, paramiko.SSHException):
+        return 'ssh_protocol_error'
+    if isinstance(error, OSError):
+        return 'network_io_error'
+    return 'unexpected_ssh_error'
+
+
+def connect(config, host_keys, region=None):
     import paramiko
     client = paramiko.SSHClient()
     client._host_keys = host_keys
@@ -121,10 +141,38 @@ def connect(config, host_keys):
                        password=config['PASSWORD'], look_for_keys=False, allow_agent=False,
                        timeout=15, auth_timeout=15, banner_timeout=15,
                        disabled_algorithms={'kex': ['curve25519-sha256', 'curve25519-sha256@libssh.org']})
-    except Exception:
+    except Exception as error:
         client.close()
-        raise DeploymentError('SSH connection/authentication/host-key verification failed') from None
+        category = ssh_error_category(error, paramiko)
+        label = region.upper() if region in ('us', 'cn') else 'unspecified'
+        raise DeploymentError(f'{label} SSH failed: {category}') from None
     return client
+
+
+def check_ssh():
+    """Authenticate both pinned hosts and close; no remote commands or writes."""
+    try:
+        regions, host_keys, _ = settings()
+    except Exception:
+        print(json.dumps({'region': 'all', 'status': 'failed', 'error': 'ssh_configuration_invalid'}), flush=True)
+        return 1
+    failed = False
+    for region in ('us', 'cn'):
+        client = None
+        try:
+            client = connect(regions[region], host_keys, region)
+            row = {'region': region, 'status': 'connected'}
+        except DeploymentError as error:
+            failed = True
+            row = {'region': region, 'status': 'failed', 'error': str(error)}
+        except Exception:
+            failed = True
+            row = {'region': region, 'status': 'failed', 'error': 'unexpected_ssh_error'}
+        finally:
+            if client is not None:
+                client.close()
+        print(json.dumps(row), flush=True)
+    return 1 if failed else 0
 
 
 def remote(client, code, *args, timeout=60):
@@ -459,11 +507,16 @@ def rollout(client, config, lane, candidate, expected, base, stamp, timeout, row
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--plan', type=Path, required=True)
-    parser.add_argument('--assets-directory', type=Path, required=True)
+    parser.add_argument('--check-ssh', action='store_true', help='Only check both pinned SSH connections; no remote commands or changes')
+    parser.add_argument('--plan', type=Path)
+    parser.add_argument('--assets-directory', type=Path)
     parser.add_argument('--report', type=Path, default=ROOT / 'archive/deployment/server-deployment.json')
     parser.add_argument('--idle-timeout', type=int, default=120)
     args = parser.parse_args()
+    if args.check_ssh:
+        return check_ssh()
+    if args.plan is None or args.assets_directory is None:
+        parser.error('--plan and --assets-directory are required unless --check-ssh is used')
     if not 0 <= args.idle_timeout <= 120:
         parser.error('--idle-timeout must be between 0 and 120 seconds')
     sources = (args.plan, *[p for p in args.assets_directory.glob('*') if p.is_file()])
@@ -481,7 +534,7 @@ def main():
                      candidate_sha256=hashlib.sha256(candidate.read_bytes()).hexdigest())
         stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + plan['commit'][:12]
         for region in ('us', 'cn'):
-            clients[region] = connect(regions[region], host_keys)
+            clients[region] = connect(regions[region], host_keys, region)
             for lane in ('experimental', 'main'):
                 unit = 'gta5data-world-experimental.service' if lane == 'experimental' else 'gta5data-server.service'
                 value = remote(clients[region], INSPECT, unit, base, 17486 if lane == 'experimental' else 17485)
