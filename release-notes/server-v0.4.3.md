@@ -11,6 +11,12 @@ Standalone authoritative shared-world server. GitHub Actions builds and checks t
 - Passenger exits preserve a driver's pending vehicle-control offer.
 - Optional independently supplied collision/road/pedestrian data; game-derived world data is **not included** in this release.
 
+### Release automation
+
+- Draft creation uses the returned Release ID; asset uploads and publication use that ID, avoiding delayed draft visibility through tag/list queries.
+- Public deployment checks validate snapshot chunks, heartbeat and the server's explicit `room: null` leave acknowledgement.
+- Existing identical server code is checked without restarting, including the verified legacy 0.4.3 build across Java compiler versions.
+
 Run with Java 17 or newer:
 
 ```sh
@@ -39,6 +45,12 @@ The generated provenance manifest records the exact source commit and artifact d
 - 服务端裁决战斗、重生、座位、AI 目标、时间/天气及执法规则。
 - 乘客离车保留司机尚未确认的车辆控制邀请。
 - 可加载独立提供的碰撞、道路及步行导航数据；本 Release **不包含游戏派生世界数据**。
+
+### 发布自动化
+
+- 创建草稿后直接使用返回的 Release ID 上传和公开，避免标签或列表接口的草稿可见性延迟。
+- 公网部署检查核对快照分块、心跳，以及服务端明确返回的 `room: null` 离开确认。
+- 已有相同服务端代码只检查、不重启，包含不同 Java 编译器生成的已核验旧 0.4.3 构建。
 
 使用 Java 17 或更新版本启动：
 

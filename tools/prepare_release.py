@@ -14,8 +14,10 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 from pathlib import Path
+from urllib.parse import quote
 
 from readonly_game_outputs import atomic_write_text, validate_output
 
@@ -114,13 +116,26 @@ def release_notes(tag):
     return path, hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
-def github_json(endpoint, *, missing=False):
-    result = subprocess.run(["gh", "api", endpoint], cwd=ROOT, capture_output=True, text=True)
+def github_json(endpoint, *, missing=False, method="GET", body=None, asset=None, retries=0):
+    arguments = ["gh", "api", endpoint, "--method", method]
+    if body is not None:
+        arguments.extend(["--input", "-"])
+    if asset is not None:
+        arguments.extend(["--input", str(asset), "-H", "Content-Type: application/octet-stream"])
+    for attempt in range(retries + 1):
+        result = subprocess.run(arguments, cwd=ROOT, capture_output=True, text=True,
+                                input=json.dumps(body, ensure_ascii=False) if body is not None else None)
+        if not result.returncode:
+            return json.loads(result.stdout)
+        transient = any(f"(HTTP {status})" in result.stderr for status in (404, 429, 500, 502, 503, 504))
+        if attempt < retries and transient:
+            time.sleep(min(2 ** attempt, 8))
+            continue
+        break
     if result.returncode:
         if missing and "(HTTP 404)" in result.stderr:
             return None
         raise ValueError("GitHub API request failed; check token permissions and connectivity")
-    return json.loads(result.stdout)
 
 
 def github_release(repository, tag):
@@ -149,7 +164,7 @@ releases is required both before a retry and immediately after draft creation.
     release_id = matches[0].get("id")
     if not isinstance(release_id, int) or release_id <= 0:
         raise ValueError("GitHub release has an invalid numeric ID")
-    release = github_json(f"repos/{repository}/releases/{release_id}")
+    release = github_json(f"repos/{repository}/releases/{release_id}", retries=4)
     if release.get("tag_name") != tag:
         raise ValueError("Release ID does not match its expected tag")
     return release
@@ -279,11 +294,15 @@ def publish(plan, component, assets_directory):
         existing_tag = github_tag_commit(repository, tag)
         if existing_tag not in (None, commit):
             raise ValueError("Refuse to publish artifacts under a tag from another commit")
-        command(["gh", "release", "create", tag, "--repo", repository, "--target", commit,
-                 "--title", title, "--notes-file", str(notes), "--draft", "--prerelease", "--latest=false"])
-        release = github_release(repository, tag)
-        if release is None:
-            raise ValueError("Created draft could not be found by authenticated release listing")
+        # The POST response carries the new draft's ID even before list/tag reads
+        # become consistent. Never discover a just-created draft by its tag.
+        release = github_json(f"repos/{repository}/releases", method="POST", body={
+            "tag_name": tag, "target_commitish": commit, "name": title,
+            "body": notes.read_text(encoding="utf-8"), "draft": True,
+            "prerelease": True, "make_latest": "false"})
+    release_id = release.get("id")
+    if not isinstance(release_id, int) or release_id <= 0 or release.get("tag_name") != tag:
+        raise ValueError("GitHub draft response has an invalid release ID or tag")
     tag_commit = github_tag_commit(repository, tag)
     if (tag_commit not in (None, commit) or (tag_commit is None and not release["draft"])
             or (release["draft"] and release.get("target_commitish") != commit)):
@@ -300,10 +319,15 @@ def publish(plan, component, assets_directory):
             raise ValueError("Published release is incomplete; do not modify it automatically")
         print(f"Already published and verified: {tag}")
         return
-    missing = [str(path) for name, path in expected.items() if name not in existing]
-    if missing:
-        command(["gh", "release", "upload", tag, *missing, "--repo", repository])
-    release = github_json(f"repos/{repository}/releases/{release['id']}")
+    for name, path in expected.items():
+        if name in existing:
+            continue
+        asset = github_json(
+            f"https://uploads.github.com/repos/{repository}/releases/{release_id}/assets?name={quote(name, safe='')}",
+            method="POST", asset=path)
+        if asset.get("name") != name or not remote_asset_matches(repository, release, asset, path):
+            raise ValueError(f"GitHub upload response SHA-256 verification failed: {name}")
+    release = github_json(f"repos/{repository}/releases/{release_id}", retries=4)
     if release.get("tag_name") != tag:
         raise ValueError("Uploaded release ID no longer matches its expected tag")
     uploaded = {row["name"]: row for row in release.get("assets", [])}
@@ -312,9 +336,19 @@ def publish(plan, component, assets_directory):
     for name, asset in uploaded.items():
         if not remote_asset_matches(repository, release, asset, expected[name]):
             raise ValueError(f"GitHub asset SHA-256 verification failed: {name}")
-    command(["gh", "release", "edit", tag, "--repo", repository, "--draft=false",
-             "--prerelease", "--latest=false", "--title", title, "--notes-file", str(notes)])
-    if github_tag_commit(repository, tag) != commit:
+    published = github_json(f"repos/{repository}/releases/{release_id}", method="PATCH", body={
+        "draft": False, "prerelease": True, "make_latest": "false", "name": title,
+        "body": notes.read_text(encoding="utf-8")})
+    if published.get("draft") is not False or published.get("tag_name") != tag:
+        raise ValueError("GitHub did not confirm publication of the expected release")
+    tag_commit = None
+    for attempt in range(5):
+        tag_commit = github_tag_commit(repository, tag)
+        if tag_commit is not None:
+            break
+        if attempt < 4:
+            time.sleep(min(2 ** attempt, 8))
+    if tag_commit != commit:
         raise ValueError("Published release tag does not match its recorded build commit")
     print(f"Published {tag}: all assets verified before making the release public")
 

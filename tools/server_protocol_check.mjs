@@ -30,7 +30,7 @@ if (mode === 'full') {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'leave_room' }));
+      if (socket.readyState === WebSocket.OPEN && !state.leaveSent) socket.send(JSON.stringify({ type: 'leave_room' }));
       socket.close();
       if (error) reject(error); else resolve({ welcome: state.welcome, profile: state.profile,
         snapshot: state.snapshot, snapshot_chunks: state.chunks, snapshot_entities: state.entities.size,
@@ -93,13 +93,13 @@ if (mode === 'full') {
           assert.equal(value.nonce, 4242);
           assert.equal(state.welcome && state.profile && state.snapshot, true);
           state.heartbeat = true;
+          state.leaveSent = true;
           socket.send(JSON.stringify({ type: 'leave_room' }));
-        } else if (value.type === 'room_state' && state.heartbeat) {
-          assert.ok(Array.isArray(value.room?.members));
-          if (!value.room.members.some(member => member.id === state.playerId)) {
-            state.left = true;
-            finish();
-          }
+        } else if (value.type === 'room_state' && state.leaveSent && value.room === null) {
+          // Main acknowledges leave_room to this socket with room:null. Ordinary
+          // room membership broadcasts cannot acknowledge our leave request.
+          state.left = true;
+          finish();
         }
       } catch (error) { finish(error); }
     });
