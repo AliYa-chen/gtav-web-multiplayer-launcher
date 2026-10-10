@@ -77,6 +77,19 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     return Boolean(vehicle && ex.mpGetVehiclePedIsIn?.(handle, 0) === vehicle
       && (!ex.mpGetPedInSeat || ex.mpGetPedInSeat(vehicle, seatNumber(seat), 0) === handle));
   }
+  function attachmentKey(entity) {
+    const attachment = entity.components.attachment;
+    return attachment ? entity.generation + ':' + attachment.entity_id + ':' + attachment.seat : null;
+  }
+  function outsideVehicleSeats(handle, vehicle) {
+    if (!ex.mpGetPedInSeat) return false;
+    // During a native exit the ped can still refer to this vehicle after its
+    // seat has become empty. A real seat shuffle still finds the ped elsewhere.
+    for (let seat = -1; seat <= 15; seat++) {
+      if (ex.mpGetPedInSeat(vehicle, seat, 0) === handle) return false;
+    }
+    return true;
+  }
   function requestedSeat(vehicle, nativeSeat, localEntityId, entities) {
     const seats = vehicle?.components?.vehicle?.seats;
     if (!seats || !Number.isInteger(nativeSeat) || nativeSeat < -1 || nativeSeat > 15) return null;
@@ -512,6 +525,25 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     }
     const handles = new Set(occupants.map(({ handle }) => handle));
     for (const handle of seatConfig.keys()) if (!handles.has(handle)) protectSeat(handle, false);
+    // Observe a confirmed local seat being vacated BEFORE correcting native
+    // seats. GetVehiclePedIsIn can retain the old car throughout the exit
+    // animation; treating that transition as a shuffle cancels the exit and
+    // warps the player back without ever sending their leave request.
+    const departing = new Set();
+    for (const { entity, handle } of occupants) {
+      if (entity.player_id !== packet.client_id) continue;
+      const attachment = entity.components.attachment, key = attachmentKey(entity);
+      if (!attachment || lastSeat !== key) { leavePendingAt = -Infinity; continue; }
+      const vehicle = replicas.get(attachment.entity_id)?.handle;
+      const current = ex.mpGetVehiclePedIsIn?.(handle, 0) || 0;
+      const exiting = !current || (vehicle && current === vehicle
+        && !seatedAt(handle, vehicle, attachment.seat) && outsideVehicleSeats(handle, vehicle));
+      if (!exiting) continue;
+      departing.add(handle);
+      if (now - leavePendingAt >= 1000) {
+        leavePendingAt = now; request('leave_vehicle', entity);
+      }
+    }
     // Two replicated occupants can cross seats while their server attachments
     // remain valid. Release only the mismatched native occupants first; this
     // makes both target seats available for the following attach pass.
@@ -520,7 +552,7 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
       const vehicle = attachment ? replicas.get(attachment.entity_id)?.handle : 0;
       const current = ex.mpGetVehiclePedIsIn?.(handle, 0) || 0;
       const managed = current && [...replicas.values()].some((entry) => entry.kind === 'vehicle' && entry.handle === current);
-      if (attachment && vehicle && managed
+      if (attachment && vehicle && managed && !departing.has(handle)
           && !seatedAt(handle, vehicle, attachment.seat)) {
         if (entity.player_id === packet.client_id) { lastSeat = null; leavePendingAt = -Infinity; }
         ex.mpLeaveVehicle?.(handle, current, 16);
@@ -530,15 +562,9 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     for (const { entity, handle } of occupants) {
       const attachment = entity.components.attachment;
       const vehicle = attachment ? replicas.get(attachment.entity_id)?.handle : 0;
-      const current = ex.mpGetVehiclePedIsIn?.(handle, 0) || 0;
-      const seatKey = attachment ? entity.generation + ':' + attachment.entity_id + ':' + attachment.seat : null;
-      if (entity.player_id === packet.client_id && attachment && lastSeat === seatKey && !current
-          && now - leavePendingAt >= 1000) {
-        leavePendingAt = now; request('leave_vehicle', entity);
-      }
-      const leaving = entity.player_id === packet.client_id && now - leavePendingAt < 1500 && !current;
+      const seatKey = attachmentKey(entity);
       const correctSeat = attachment && seatedAt(handle, vehicle, attachment.seat);
-      if (vehicle && !correctSeat && !leaving) ex.mpSetPedIntoVehicle?.(handle, vehicle, seatNumber(attachment.seat));
+      if (vehicle && !correctSeat && !departing.has(handle)) ex.mpSetPedIntoVehicle?.(handle, vehicle, seatNumber(attachment.seat));
       if (entity.player_id === packet.client_id) {
         if (!attachment) lastSeat = null;
         else if (seatedAt(handle, vehicle, attachment.seat)) lastSeat = seatKey;

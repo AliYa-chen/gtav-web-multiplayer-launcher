@@ -37,8 +37,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** 独立公共战局服务：鉴权恢复、权威移动校验、伤害、死亡、重生及状态分发。 */
 public final class Main {
-    private static final String VERSION = "0.4.4-world-experimental";
-    private static final List<String> CAPABILITIES = List.of("public_session", "chat", "player_state", "shoot_events", "appearance", "combat", "resume", "heartbeat", "snapshot", "actions", "combat_feedback", "weapon_rules", "world_registry", "world_v2", "entity_batch", "melee_events", "world_environment", "shared_law", "server_ai", "projectiles", "action_queue", "session_policy", "physics_queries");
+    private static final String VERSION = "0.4.5-world-experimental";
+    private static final List<String> CAPABILITIES = List.of("public_session", "chat", "player_state", "shoot_events", "appearance", "combat", "resume", "heartbeat", "snapshot", "actions", "combat_feedback", "weapon_rules", "world_registry", "world_v2", "entity_batch", "melee_events", "world_environment", "shared_law", "server_ai", "projectiles", "action_queue", "session_policy", "physics_queries", "entry_readiness");
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final int MAX_MESSAGE_BYTES = 64 * 1024;
 
@@ -365,6 +365,7 @@ public final class Main {
         private long shotEventsReceived;
         private boolean closed;
         private static final long SESSION_TTL_MILLIS = 60_000;
+        private static final long ENTRY_TIMEOUT_MILLIS = 600_000;
         private static final List<String> COMBAT_EVENTS = List.of("combat_state", "damage", "death", "respawn", "correction");
 
         Lobby(Config config) throws IOException {
@@ -457,6 +458,7 @@ public final class Main {
                                 if (client.combatFeedbackCapable) declared.add("combat_feedback");
                                 if (client.worldCapable) declared.addAll(List.of("world_v2","world_environment","shared_law","session_policy"));
                                 if (client.meleeEventsCapable) declared.add("melee_events");
+                                if (client.entryReadinessCapable) declared.add("entry_readiness");
                                 hello(client, object("type", "hello", "name", client.name, "capabilities", declared));
                             } else {
                                 requireSession(client);
@@ -484,11 +486,12 @@ public final class Main {
                             requireWorld(client);WorldService.fields(message,"type","world_epoch","after_revision");
                             sendWorldSnapshot(client);
                         }
-                        case "entity_ready" -> {requireWorld(client);world.ready(client.id,message);}
-                        case "entity_input" -> {requireWorld(client);world.entityInput(client.id,message);}
-                        case "entity_batch" -> {requireWorld(client);world.entityBatch(client.id,message);}
+                        case "entry_ready" -> entryReady(client, message);
+                        case "entity_ready" -> {requireActiveWorld(client);world.ready(client.id,message);}
+                        case "entity_input" -> {requireActiveWorld(client);world.entityInput(client.id,message);}
+                        case "entity_batch" -> {requireActiveWorld(client);world.entityBatch(client.id,message);}
                         case "interaction_request" -> {
-                            requireWorld(client);
+                            requireActiveWorld(client);
                             try {for(Map<String,Object> event:world.interaction(client.id,message)) {
                                 if("interaction_result".equals(event.get("type")))client.send(event);else broadcast(event);
                             }}catch(WorldService.Problem|WorldRegistry.Rejection rejection){
@@ -496,7 +499,7 @@ public final class Main {
                                 client.send(object("type","interaction_result","request_id",message.get("request_id"),"accepted",false,"reason",code));throw rejection;
                             }
                         }
-                        case "simulation_result" -> {requireWorld(client);world.simulation(client.id,message).forEach(this::broadcast);}
+                        case "simulation_result" -> {requireActiveWorld(client);world.simulation(client.id,message).forEach(this::broadcast);}
                         case "collision_result" -> {requireWorld(client);world.collisionResult(client.id,message);}
                         default -> throw problem("unknown_type", "不支持的消息类型：" + type);
                     }
@@ -526,6 +529,7 @@ public final class Main {
             boolean combatFeedbackCapable = false;
             boolean worldCapable = false;
             boolean meleeEventsCapable = false;
+            boolean entryReadinessCapable = false;
             if (message.containsKey("capabilities")) {
                 if (!(message.get("capabilities") instanceof List<?> values) || values.size() > 32
                         || values.stream().anyMatch(value -> !(value instanceof String text) || text.length() > 40))
@@ -539,12 +543,16 @@ public final class Main {
                 if(worldCapable && !values.contains("session_policy"))
                     throw problem("client_world_rules_required", "此公共战局禁止本地剧情，需要支持服务器脚本策略的客户端");
                 meleeEventsCapable = values.contains("melee_events") && worldCapable;
+                entryReadinessCapable = values.contains("entry_readiness") && worldCapable;
             }
             boolean hasId = message.containsKey("client_id");
             boolean hasToken = message.containsKey("resume_token");
             if (hasId != hasToken) throw problem("resume_denied", "恢复连接需要完整的玩家身份和恢复凭据");
+            boolean firstHello = client.session == null;
             Session session;
             if (client.session != null) {
+                if (entryReadinessCapable != client.entryReadinessCapable)
+                    throw problem("invalid_message", "此连接不能更改入局确认能力");
                 if (hasId) throw problem("invalid_message", "此连接已加入战局，请勿重复恢复身份");
                 session = requireSession(client);
             } else if (hasId) {
@@ -573,16 +581,55 @@ public final class Main {
             client.combatFeedbackCapable = combatFeedbackCapable;
             client.worldCapable = worldCapable;
             client.meleeEventsCapable = meleeEventsCapable;
+            client.entryReadinessCapable = entryReadinessCapable;
+            client.physicsCapable = worldCapable && message.get("capabilities") instanceof List<?> values && values.contains("physics_queries");
             Map<String, Object> profile = object("type", "profile", "client_id", session.id, "name", name);
             profile.putAll(combat.join(session.id));
-            world.worldParticipant(session.id,worldCapable);
-            world.physicsParticipant(session.id,worldCapable && message.get("capabilities") instanceof List<?> values && values.contains("physics_queries"));
+            if (firstHello) {
+                client.entryReady = !entryReadinessCapable;
+                if (!client.entryReady && session.entryStartedAt == 0) session.entryStartedAt = System.currentTimeMillis();
+                if (client.entryReady) session.entryStartedAt = 0;
+                world.entryReadiness(session.id, client.entryReady);
+            }
+            world.worldParticipant(session.id,worldCapable && client.entryReady);
+            world.physicsParticipant(session.id,client.physicsCapable && client.entryReady);
+            profile.put("entry_ready", client.entryReady);
+            profile.put("entity_generation", world.player(session.id).generation());
             if (resumeCapable) profile.put("resume_token", session.token);
             client.send(profile);
             broadcast(roomState());
             client.send(combat.worldState());
             broadcast(combat.combatState());
             if(client.worldCapable)sendWorldSnapshot(client);
+        }
+
+        private void entryReady(Client client, Map<String, Object> message) throws LobbyProblem {
+            requireWorld(client);
+            if (!client.entryReadinessCapable) throw problem("capability_required", "需要声明入局确认能力");
+            fields(message, List.of("type", "world_epoch", "entity_id", "generation"));
+            var entity = world.player(client.id);
+            long generation = safeInteger(message.get("generation"), "角色生命周期");
+            if (!world.epoch().equals(message.get("world_epoch"))) throw problem("wrong_world", "入局确认属于另一世界");
+            if (entity == null || !entity.entityId().equals(message.get("entity_id")) || entity.generation() != generation)
+                throw problem("stale_generation", "入局确认的角色或生命周期已失效");
+            if (!client.entryReady) {
+                if (System.currentTimeMillis() - client.session.entryStartedAt >= ENTRY_TIMEOUT_MILLIS)
+                    throw problem("entry_timeout", "加载战局超时，请重新加入");
+                world.entryReadiness(client.id, true);
+                client.entryReady = true;
+                client.session.entryStartedAt = 0;
+                world.worldParticipant(client.id, true);
+                world.physicsParticipant(client.id, client.physicsCapable);
+            }
+            client.send(object("type", "entry_status", "world_epoch", world.epoch(), "entity_id", entity.entityId(),
+                "generation", entity.generation(), "ready", true));
+        }
+        private void requireEntryReady(Client client) throws LobbyProblem {
+            requireSession(client);
+            if (!client.entryReady) throw problem("entry_not_ready", "角色和场景加载完成后才能参与战局");
+        }
+        private void requireActiveWorld(Client client) throws LobbyProblem {
+            requireWorld(client); requireEntryReady(client);
         }
 
         private void requireWorld(Client client) throws LobbyProblem {
@@ -628,6 +675,7 @@ public final class Main {
 
         private void playerState(Client client, Map<String, Object> message) throws LobbyProblem, CombatWorld.Rejection {
             Session session = requireSession(client);
+            requireEntryReady(client);
             fields(message, List.of("type", "seq", "position", "heading", "model", "health", "weapon", "shooting", "appearance", "actions", "aim_target"));
             Map<String, Object> checked = new LinkedHashMap<>(message);
             if (message.containsKey("appearance")) checked.put("appearance", appearance(message.get("appearance")));
@@ -641,6 +689,7 @@ public final class Main {
 
         private void shotEvent(Client client, Map<String, Object> message) throws LobbyProblem, CombatWorld.Rejection {
             Session session = requireSession(client);
+            requireEntryReady(client);
             fields(message, List.of("type", "seq", "origin", "target", "weapon"));
             List<Map<String, Object>> events = combat.shoot(session.id, message, System.currentTimeMillis());
             shotEventsReceived++;
@@ -803,7 +852,14 @@ public final class Main {
                 var iterator = sessions.values().iterator();
                 while (iterator.hasNext()) {
                     Session session = iterator.next();
-                    if (session.client == null && now - session.disconnectedAt >= SESSION_TTL_MILLIS) {
+                    if (session.entryStartedAt != 0 && now - session.entryStartedAt >= ENTRY_TIMEOUT_MILLIS) {
+                        Client expired = session.client;
+                        if (expired != null) {
+                            expired.send(object("type", "error", "code", "entry_timeout", "message", "加载战局超时，请重新加入"));
+                            expired.disconnect(); clients.remove(expired.connectionId); expired.session = null;
+                        }
+                        iterator.remove(); combat.remove(session.id); changed = true;
+                    } else if (session.client == null && now - session.disconnectedAt >= SESSION_TTL_MILLIS) {
                         iterator.remove();
                         combat.remove(session.id);
                         changed = true;
@@ -870,7 +926,7 @@ public final class Main {
         final boolean resumable;
         String name;
         Client client;
-        long disconnectedAt;
+        long disconnectedAt, entryStartedAt;
         Session(String id, String name, boolean resumable) {
             this.id = id;
             this.name = name;
@@ -896,6 +952,7 @@ public final class Main {
         boolean resumeCapable;
         boolean combatFeedbackCapable;
         boolean worldCapable,worldInitialized,meleeEventsCapable;
+        boolean entryReadinessCapable, entryReady, physicsCapable;
         final java.util.Set<String> scope=new java.util.LinkedHashSet<>();
         long worldRevision,environmentRevision,lawRevision,streamSequence;
         final AtomicBoolean closed = new AtomicBoolean();

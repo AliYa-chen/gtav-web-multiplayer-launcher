@@ -52,7 +52,7 @@ public final class CombatWorld {
     private static final class Player {
         final String id;
         final List<Double> spawn;
-        boolean connected = true;
+        boolean connected = true, entryReady = true;
         long stateSequence = -1;
         long shotSequence = -1;
         long stateAt;
@@ -139,6 +139,23 @@ public final class CombatWorld {
         if (player != null) { player.connected = connected; if(!connected)player.pendingShots.clear(); }
     }
 
+    public synchronized boolean isEntryReady(String id) {
+        Player player = players.get(id);
+        return player != null && player.connected && player.entryReady;
+    }
+
+    public synchronized void setEntryReady(String id, boolean ready) {
+        Player player = players.get(id);
+        if (player == null) return;
+        player.entryReady = ready;
+        if (!ready) {
+            player.pendingShots.clear();
+            pendingDamage.removeIf(pending -> id.equals(pending.actor()));
+            projectiles.values().removeIf(projectile -> id.equals(projectile.attackerId));
+            hazards.removeIf(hazard -> id.equals(hazard.source.attackerId));
+        }
+    }
+
     public synchronized void remove(String id) {
         players.remove(id);
     }
@@ -180,6 +197,7 @@ public final class CombatWorld {
     /** 接收已限制外观长度的状态；生命值始终由服务端覆盖。 */
     public synchronized Outcome updateState(String id, Map<String, Object> input, long now) throws Rejection {
         Player player = require(id);
+        if (!isEntryReady(id)) throw reject("entry_not_ready", "入局确认后才能提交角色状态");
         long sequence = integer(input.get("seq"), 0, MAX_SAFE_INTEGER, "状态序号");
         if (sequence <= player.stateSequence) throw reject("stale_seq", "角色状态序号必须严格递增");
         List<Double> position = coordinates(input.get("position"), "角色坐标");
@@ -230,7 +248,7 @@ public final class CombatWorld {
         List<Double> origin = coordinates(input.get("origin"), "射击起点");
         List<Double> target = coordinates(input.get("target"), "射击目标点");
         long weapon = integer(input.get("weapon"), 0, MAX_UNSIGNED_INT, "射击武器");
-        if (!shooter.connected || !shootingEntity.components().combat().alive() || !shooter.hasState || now - shooter.stateAt > 2_000)
+        if (!shooter.connected || !shooter.entryReady || !shootingEntity.components().combat().alive() || !shooter.hasState || now - shooter.stateAt > 2_000)
             throw reject("invalid_shot", "射击需要存活角色及最近两秒内的有效位置");
         if (weapon != shootingEntity.components().ped().weapon())
             throw reject("invalid_shot", "射击武器与角色当前武器不一致");
@@ -362,7 +380,7 @@ public final class CombatWorld {
             WorldRegistry.Entity entity=world.playerEntity(player.id);
             while(!player.pendingShots.isEmpty()) {
                 QueuedShot shot=player.pendingShots.peekFirst();
-                if(!player.connected || entity==null || !entity.components().combat().alive() || entity.generation()!=shot.generation ||
+                if(!player.connected || !player.entryReady || entity==null || !entity.components().combat().alive() || entity.generation()!=shot.generation ||
                     entity.components().ped().weapon()!=shot.rule.hash() || now-player.stateAt>2000) {
                     cancelShots(player,"shooter_changed",events);break;
                 }
@@ -386,7 +404,7 @@ public final class CombatWorld {
     /** 只引爆本玩家已获批创建的黏弹；没有客户端爆点、目标或伤害字段。 */
     public synchronized List<Map<String,Object>> detonate(String id,long now)throws Rejection {
         Player player=require(id);WorldRegistry.Entity entity=world.playerEntity(id);
-        if(!player.connected || !entity.components().combat().alive())throw reject("invalid_shot","引爆需要存活的公共战局玩家");
+        if(!player.connected || !player.entryReady || !entity.components().combat().alive())throw reject("invalid_shot","引爆需要存活的公共战局玩家");
         List<Map<String,Object>> events=new ArrayList<>();
         for(Projectile p:new ArrayList<>(projectiles.values()))if(p.attackerId.equals(id) && "remote".equals(p.rule.detonation())) {
             advance(p,now,events); if(!projectiles.containsKey(p.id))continue;
@@ -555,7 +573,7 @@ public final class CombatWorld {
     private boolean damageable(WorldRegistry.Entity candidate) {
         if(candidate.kind()!=WorldRegistry.Kind.PED || candidate.components().combat()==null || !candidate.components().combat().alive())return false;
         if(candidate.playerId()==null)return candidate.ownerId()!=null;
-        Player player=players.get(candidate.playerId());return player!=null && player.connected && player.hasState;
+        Player player=players.get(candidate.playerId());return player!=null && player.connected && player.entryReady && player.hasState;
     }
     private WorldRegistry.Entity nearest(List<Double> origin,double[] direction,double range,String exclude) {
         WorldRegistry.Entity victim=null;double closest=range+1;
@@ -568,7 +586,7 @@ public final class CombatWorld {
     }
     private List<Map<String,Object>> applyDamage(String attackerEntity,long generation,String attackerId,long shotSequence,
                                                 long weapon,Map<String,Integer> hits,long now)throws Rejection {
-        if(hits.isEmpty())return List.of();
+        if(hits.isEmpty() || (players.containsKey(attackerId) && !players.get(attackerId).entryReady))return List.of();
         Map<String,WorldRegistry.Combat> changes=new LinkedHashMap<>();
         Map<String,Integer> amounts=new LinkedHashMap<>();int kills=0;
         WorldRegistry.Entity attacker=world.entity(attackerEntity);

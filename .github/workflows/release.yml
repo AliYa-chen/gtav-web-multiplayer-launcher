@@ -300,7 +300,7 @@ jobs:
     needs: [plan, publish-server]
     if: >-
       ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.plan.result == 'success' &&
-      inputs.check_ssh != true &&
+      inputs.check_ssh != true && vars.GTA_SERVER_DEPLOY_FROM_LOCAL != 'true' &&
       ((needs.plan.outputs.server == 'true' && needs.publish-server.result == 'success') ||
       (github.event_name == 'workflow_dispatch' && inputs.retry_server_run_id != '')) }}
     runs-on: ubuntu-latest

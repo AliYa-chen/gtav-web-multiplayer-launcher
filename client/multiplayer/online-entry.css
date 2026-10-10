@@ -1,0 +1,26 @@
+/* Original game loading artwork and native sky cameras remain underneath. */
+.online-entry { position: fixed; inset: 0; z-index: 24; overflow: hidden; outline: none; background: transparent; color: #fff; font: 12px/1.5 Chalet, 'Microsoft YaHei', 'PingFang SC', 'Noto Sans CJK SC', sans-serif; }
+.online-entry[hidden], .online-entry [hidden] { display: none; }
+.online-entry__panel { position: absolute; right: max(24px, env(safe-area-inset-right)); bottom: max(28px, env(safe-area-inset-bottom)); display: flex; align-items: center; gap: 12px; max-width: min(440px, calc(100vw - 48px)); box-sizing: border-box; }
+.online-entry__copy { min-width: 0; text-align: right; }
+.online-entry__version { margin: 0 10px 9px 0; color: #f2f2f2; font: inherit; font-size: 13px; line-height: 1.2; letter-spacing: .07em; word-spacing: .25em; text-shadow: 0 1px 2px #000, 1px 1px 1px rgba(0, 0, 0, .6); }
+.online-entry__activity { display: flex; align-items: center; justify-content: flex-end; gap: 10px; min-width: 0; padding: 8px 12px; background: rgba(0, 0, 0, .7); }
+.online-entry__status { margin: 0; font: inherit; font-size: 14px; line-height: 1.4; text-shadow: .85px .85px 1px rgba(0, 0, 0, .65); }
+.online-entry__spinner { flex: none; display: block; width: 24px; height: 24px; color: #fff; animation: online-entry-spin 2s steps(60) infinite; }
+.online-entry__spinner img { display: block; width: 100%; height: 100%; }
+.online-entry[data-indicator="joining"] .online-entry__spinner { color: #f9ce21; }
+.online-entry[data-indicator="joining"] .online-entry__spinner img { filter: brightness(0) saturate(100%) invert(83%) sepia(97%) saturate(1072%) hue-rotate(341deg) brightness(105%) contrast(95%); }
+.online-entry__spinner[data-fallback="true"]::after { content: ''; display: block; width: 18px; height: 18px; box-sizing: border-box; margin: 3px; border: 3px solid currentColor; border-top-color: transparent; border-radius: 50%; }
+.online-entry__hint { margin: 7px 0 0; color: #ddd; }
+.online-entry__error { margin: 6px 0 0; max-height: 25vh; overflow-y: auto; overflow-wrap: anywhere; color: #fff; }
+.online-entry__actions { order: -1; display: flex; flex: none; justify-content: flex-end; gap: 8px; }
+.online-entry button { min-height: 44px; min-width: 48px; padding: 4px 8px; border: 0; border-radius: 2px; background: transparent; color: #ddd; font: inherit; cursor: pointer; }
+.online-entry button:hover, .online-entry button:focus-visible { background: #fff; color: #000; }
+.online-entry button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.online-entry[data-stage="failed"] .online-entry__panel { display: block; padding: 10px 12px 6px; background: rgba(0, 0, 0, .78); }
+.online-entry[data-stage="failed"] .online-entry__activity { justify-content: flex-start; padding: 0; background: transparent; }
+.online-entry[data-stage="failed"] .online-entry__actions { margin-top: 4px; }
+.online-entry[data-reduced-motion="true"] .online-entry__spinner { animation: none; }
+@keyframes online-entry-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .online-entry__spinner { animation: none; } }
+@media (max-width: 540px) { .online-entry__panel { right: max(16px, env(safe-area-inset-right)); bottom: max(16px, env(safe-area-inset-bottom)); max-width: calc(100vw - 32px); gap: 8px; } .online-entry__status { font-size: 13px; } }

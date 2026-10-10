@@ -146,6 +146,39 @@ ENTITY_EXPORTS = {
     "mpPauseDeathRestart": (52750, "misc_commands::CommandPauseDeathArrestRestart(bool)", ["i32"], []),
     "mpScreenFadeIn": (49036, "camera_commands::CommandDoScreenFadeIn(int)", ["i32"], []),
     "mpIsScreenFadedOut": (49034, "camera_commands::CommandIsScreenFadedOut()", [], ["i32"]),
+    "mpScreenFadeOut": (49037, "camera_commands::CommandDoScreenFadeOut(int)", ["i32"], []),
+    "mpIsScreenFadedIn": (49035, "camera_commands::CommandIsScreenFadedIn()", [], ["i32"]),
+    # 入局镜头只拥有 CreateCam 返回的相机；创建/操作/释放限于同一有效脚本 handler。
+    # CreateCam 的类型名为 NUL 结尾 UTF-8；创建失败返回 -1，0 仍是合法候选句柄。
+    # DestroyCam 的第二参数必须为 false，true 会跨 handler 全局移除脚本资源。
+    "mpCreateCam": (48924, "camera_commands::CommandCreateCam(char const*, bool)", ["i64", "i32"], ["i32"]),
+    "mpDestroyCam": (48928, "camera_commands::CommandDestroyCam(int, bool)", ["i32", "i32"], []),
+    "mpDoesCamExist": (48930, "camera_commands::CommandDoesCamExist(int)", ["i32"], ["i32"]),
+    "mpSetCamActive": (48931, "camera_commands::CommandSetCamActive(int, bool)", ["i32", "i32"], []),
+    "mpIsCamActive": (48932, "camera_commands::CommandIsCamActive(int)", ["i32"], ["i32"]),
+    "mpIsCamRendering": (48933, "camera_commands::CommandIsCamRendering(int)", ["i32"], ["i32"]),
+    "mpGetRenderingCam": (48934, "camera_commands::CommandGetRenderingCam()", [], ["i32"]),
+    # Coord/Rot 的 scrVector 输入及 mpCamCoords/mpCamRot 输出均为 f32 @0/8/16。
+    # 旋转单位为度，order 必须与 mpCamRot 读取时相同；setter 会取消该相机的原生插值。
+    "mpSetCamCoord": (48944, "camera_commands::CommandSetCamCoord(int, rage::scrVector const&)", ["i32", "i64"], []),
+    "mpSetCamRot": (48945, "camera_commands::CommandSetCamRotation(int, rage::scrVector const&, int)", ["i32", "i64", "i32"], []),
+    "mpSetCamFov": (48946, "camera_commands::CommandSetCamFov(int, float)", ["i32", "f32"], []),
+    "mpCamFov": (49042, "camera_commands::CommandGetGameplayCamFov()", [], ["f32"]),
+    # 第五参数控制 ForceStopRendering，入局流程固定 false，并先核对当前渲染相机。
+    # 不导出 DestroyAllCams、StartPlayerSwitch 或全局流式场景接管。
+    "mpRenderScriptCams": (48922, "camera_commands::CommandRenderScriptCams(bool, bool, int, bool, bool, int)", ["i32", "i32", "i32", "i32", "i32", "i32"], []),
+    # 原云帽是全局 script override，不属于相机或 handler。仅公共原脚本 VM 已全部隔离、
+    # 只读确认 manager scriptIndex==-1 后可临时加载；释放前必须再次核对 manager/index。
+    # Unload(name) 只确认名称存在，并非当前 override==name；它清除 override 并恢复天气云帽。
+    # 已审计布局：u64 manager* @28411080；+40 u64 items、+48 u16 count、
+    # +1856 i32 weatherIndex、+1860 i32 scriptIndex；item stride512，+64为内联C字符串[64]。
+    # 不直接写这些字段，不导出 UnloadAll、SetAlpha 或缺少成对取消接口的 Preload。
+    "mpLoadCloudHat": (52831, "misc_commands::CommandLoadCloudHat(char const*, float)", ["i64", "f32"], []),
+    "mpUnloadCloudHat": (52832, "misc_commands::CommandUnloadCloudHat(char const*, float)", ["i64", "f32"], []),
+    "mpGetCloudHatAlpha": (52835, "misc_commands::CommandGetCloudHatAlpha()", [], ["f32"]),
+    # 原角色长距离切换的下降 Hit_2 音效；指针指向 u32 hash，team=0 使用原默认音效集。
+    # 原函数仅提交有限 batched cue；不启动天空循环、不分配持久 sound ID。
+    "mpPlayLongSwitchSound": (22863, "audFrontendAudioEntity::TriggerLongSwitchSound(rage::atNonFinalHashString, eArcadeTeam)", ["i64", "i32"], []),
     "mpSetPlayerControl": (58654, "player_commands::CommandSetPlayerControl(int, bool, int)", ["i32", "i32", "i32"], []),
     "mpTaskStandStill": (60564, "task_commands::CommandTaskStandStill(int, int)", ["i32", "i32"], []),
     "mpTaskGoStraight": (60577, "task_commands::CommandTaskGoStraightToCoord(int, rage::scrVector const&, float, int, float, float)", ["i32", "i64", "f32", "i32", "f32", "f32"], []),

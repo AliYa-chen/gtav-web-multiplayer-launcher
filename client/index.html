@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>GTA V</title>
 <link rel="stylesheet" href="/multiplayer/join-modal.css">
+<link rel="stylesheet" href="/multiplayer/online-entry.css">
 <style>
 	html, body { margin: 0; height: 100%; background: #000; color: #ccc; font: 12px Consolas, "Microsoft YaHei", "PingFang SC", monospace; overflow: hidden; }
 	#canvas { display: block; position: absolute; left: 0; top: 0; width: 100vw; height: 100vh; background: #000; }
@@ -50,12 +51,13 @@
 <body>
 <canvas id="canvas" width="800" height="600" tabindex="-1"></canvas>
 <div id="hud"></div>
-<div id="loading"><div id="ls-stage"><div id="ls-screens"></div><img id="ls-logo" src="/b/8b0b5899ed/title/logo.png" alt=""></div><div id="ls-bars"><div id="modes" class="ls-bar"><button data-act="back"></button><button data-act="map5"></button><button data-act="map6"></button><button data-act="sandbox"></button><button data-act="story"></button><button data-act="online"></button></div><div class="ls-bar" role="status" aria-live="polite"><span id="label">正在启动…</span><span id="pct">0%</span><i class="ls-spin" aria-hidden="true"></i></div></div><div id="ls-log"><div id="data"></div><div id="console"></div></div><div id="bar"><div id="fill"></div></div></div>
+<div id="loading"><div id="ls-stage"><div id="ls-screens"></div><img id="ls-logo" src="/b/8b0b5899ed/title/logo.png" alt=""></div><div id="ls-bars"><div id="modes" class="ls-bar"><button data-act="back"></button><button data-act="map5"></button><button data-act="map6"></button><button data-act="sandbox"></button><button data-act="story"></button><button data-act="online"></button></div><div class="ls-bar" role="status" aria-live="polite"><span id="label">加载中…</span><span id="pct">0%</span><i class="ls-spin" aria-hidden="true"></i></div></div><div id="ls-log"><div id="data"></div><div id="console"></div></div><div id="bar"><div id="fill"></div></div></div>
 <div id="fps"></div>
 <div id="language-notice" role="status" aria-live="polite" hidden></div>
 <script type="module">
 import { t, getLanguage, initLanguage, onLanguageChange, translateText } from '/i18n.js';
 import { installGameAdapter } from '/multiplayer/game-adapter.js';
+import { createOnlineEntry } from '/multiplayer/online-entry.js';
 import { watchOnlineConfiguration } from '/multiplayer/remote-config.js';
 import { installJoinModal, readPublicPreferences, consumePublicEntryIntent, launcherPublicEntry, savePublicEntry } from '/multiplayer/join-modal.js';
 import { startPublicSession } from '/multiplayer/public-session.js';
@@ -70,7 +72,7 @@ function setUiText(element, source) {
 	localizedElements.set(element, source);
 	element.textContent = typeof source === 'function' ? source() : translateText(source);
 }
-setUiText(document.getElementById('label'), () => t('page.starting'));
+setUiText(document.getElementById('label'), () => t('page.loading'));
 const ROOM_GAME = location.pathname === '/play/';
 const q = new URLSearchParams(ROOM_GAME ? 'mode=sandbox' : location.search);
 const LAUNCHER_ENTRY = new URLSearchParams(location.search).get('launcher') === '1';
@@ -94,8 +96,52 @@ const ONLINE_LOADING = ONLINE_RECONNECT ? '恢复战局中' : '加入战局中';
 // 浏览器从页面快照恢复时，旧连接和工作线程已在 pagehide 关闭，需要重新初始化。
 if (ROOM_GAME) addEventListener('pageshow', (event) => { if (event.persisted) location.reload(); });
 let onlineConnectionReady = !ROOM_GAME;
+let multiplayerAdapter = null, engineWorldReady = false, publicSession = null;
+let onlineEntry = null, entryAttempt = 0, lastEntryStage = '', entryFailed = false, entryConnected = false;
+function entryHoldsInput() { return ROOM_GAME && onlineEntry?.getState().stage !== 'active'; }
+function entryError(message) {
+  if (onlineEntry && entryAttempt) onlineEntry.update(entryAttempt, { error: String(message).slice(0, 500) });
+}
+function updateOnlineEntry(patch) {
+  if (!onlineEntry || (patch.attemptId !== undefined && patch.attemptId !== entryAttempt)) return;
+  if (entryConnected && patch.connected === false && !entryFailed) {
+    entryConnected = false;
+    entryAttempt = onlineEntry.start({ engineReady: engineWorldReady,
+      reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches });
+    multiplayerAdapter?.setEntryAttempt(entryAttempt, { reducedMotion: true });
+    return;
+  }
+  if (typeof patch.connected === 'boolean') entryConnected = patch.connected;
+  onlineEntry.update(entryAttempt, patch);
+}
+
 const joinModal = installJoinModal({ onJoin: () => location.assign('/play/') });
 if (launcherEntryError) joinModal.setMessage(launcherEntryError);
+if (ROOM_GAME && onlinePreferences && !launcherEntryError) {
+  onlineEntry = createOnlineEntry({ getLanguage, budgets: { engine_loading: 540000 },
+    onCancel() { multiplayerAdapter?.cancelEntry(); publicSession?.close(); location.assign('/'); },
+    onRetry() { multiplayerAdapter?.cancelEntry(); publicSession?.close(); location.reload(); },
+    onChange(state) {
+      const title = document.getElementById('loading');
+      // Only original game title resources or the original engine camera are
+      // behind these functional controls. No substitute cloud renderer.
+      if (title) title.style.visibility = state.cameraActive || state.stage === 'active' || state.stage === 'admitting' ? 'hidden' : '';
+      document.getElementById('ls-bars')?.style.setProperty('visibility', 'hidden');
+      if (state.stage !== lastEntryStage) {
+        lastEntryStage = state.stage;
+        dispatchEvent(new CustomEvent('online-entry-input-hold', { detail: { held: state.stage !== 'active' } }));
+        if (state.stage !== 'active' && document.pointerLockElement) document.exitPointerLock?.();
+      }
+      if (state.stage === 'active') stopTitle();
+      if (state.stage === 'failed' && !entryFailed) {
+        entryFailed = true; multiplayerAdapter?.cancelEntry(); publicSession?.close();
+      }
+    },
+  });
+  entryAttempt = onlineEntry.start({ reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches });
+  addEventListener('pagehide', () => { multiplayerAdapter?.cancelEntry(); onlineEntry?.destroy(); }, { once: true });
+}
+
 const editingInput = (event) => joinModal.isOpen || Boolean(event.target?.closest?.('input,textarea,select,[contenteditable="true"]'));
 // 在线入口在页面捕获阶段拦截调试按键，避免将它们写入引擎的共享输入区。
 function stopOnlineDebugKey(e) {
@@ -120,6 +166,7 @@ const postLog = (text) => { if (remoteLog) fetch('/log', { method: 'POST', body:
 	let posted = 0;
 	new BroadcastChannel('game-crash').onmessage = (ev) => {
 		const m = ev.data;
+		entryError(getLanguage() === 'en' ? 'The game engine stopped. Please retry.' : '游戏引擎已停止，请重试。');
 		const memory = /memory|OOM|Aborted\(|RangeError|grow/i.test(m.text);
 		const dev = ' deviceMemory ' + (navigator.deviceMemory || '?') + ' GB, cores ' + navigator.hardwareConcurrency;
 		if (remoteLog && posted++ < 3) fetch('/log', { method: 'POST', body: '[page] CRASH (' + m.kind + ', ' + m.thread + ' thread, wasm heap ' + m.heap + ' MB,' + dev + ', ' + location.search + '): ' + m.text + '\n' + m.tail.join('\n') + '\n' }).catch(() => {});
@@ -310,7 +357,7 @@ onLanguageChange(() => {
 	}
 	showModes();
 });
-let multiplayerAdapter = null, engineWorldReady = false;
+
 // ---- 加载进度：引擎（prejs.js、loader.js）和 GPU 工作线程通过 BroadcastChannel 发布 {pct, label} ------------------
 {
 	const loading = document.getElementById('loading'), fill = document.getElementById('fill'), label = document.getElementById('label'), pct = document.getElementById('pct');
@@ -321,7 +368,7 @@ let multiplayerAdapter = null, engineWorldReady = false;
 	const consoleEl = document.getElementById('console');
 	const bc = new BroadcastChannel('game-progress');
 	let lastActivity = performance.now(), stallLogged = 0, lastLabel = '', lastTranslations = null;
-	const progressText = () => lastTranslations?.[getLanguage()] || translateUiText(lastLabel);
+	const progressText = () => t('page.loading');
 	bc.onmessage = (ev) => {
 		const m = ev.data;
 		lastActivity = performance.now();
@@ -336,13 +383,13 @@ let multiplayerAdapter = null, engineWorldReady = false;
 			dirty = true;
 			return;
 		}
-		if (m.gpuLost) { setUiText(hud, () => t('page.gpuLost', { reason: m.gpuLost })); hud.style.color = '#f66'; return; }
-		if (m.error) { setUiText(label, () => t('page.loadFailed', { reason: m.errorTranslations?.[getLanguage()] || translateUiText(m.error) })); label.style.color = '#e66'; return; }
+		if (m.gpuLost) { entryError(getLanguage() === 'en' ? 'Graphics device lost. Please retry.' : '图形设备已断开，请重试。'); setUiText(hud, () => t('page.gpuLost', { reason: m.gpuLost })); hud.style.color = '#f66'; return; }
+		if (m.error) { entryError(m.errorTranslations?.[getLanguage()] || translateUiText(m.error)); setUiText(label, () => t('page.loadFailed', { reason: m.errorTranslations?.[getLanguage()] || translateUiText(m.error) })); label.style.color = '#e66'; return; }
 		if (m.pct > target) { target = m.pct; if (m.label) { lastLabel = m.label; lastTranslations = m.labelTranslations || null; if (!waitingChoice) setUiText(label, progressText); } if (m.pct >= 72 && worldBase < 0) worldBase = dataBytes; }
 		if (m.choice && !startMode) { waitingChoice = true; modesEl.classList.add('ask'); showModes(); }		// 引擎正在等待选择，showModes 在状态文字中显示选择提示。
 		if (m.commit) { startCommitted = true; pickingMap = false; if (m.mode) startMode = m.mode; showModes(); }		// 引擎已接收选择结果。
 		if (m.compiling !== undefined && !waitingChoice) { lastLabel = 'Preparing shaders'; lastTranslations = null; setUiText(label, progressText); target = Math.max(target, 99); }		// 游戏世界已就绪；GPU 工作线程等待渲染管线编译完毕后再显示画面。
-		if (m.world === true) { engineWorldReady = true; multiplayerAdapter?.setEngineReady(); ready = true; setUiText(hud, ROOM_GAME ? '点击游戏画面以锁定鼠标（Esc 释放鼠标）' : '点击游戏画面以锁定鼠标（Esc 释放鼠标，Shift+P 切换键盘模式，= 显示帧率）'); setTimeout(() => { setUiText(hud, ''); }, 15000); }
+		if (m.world === true) { engineWorldReady = true; multiplayerAdapter?.setEngineReady(); updateOnlineEntry({ engineReady: true }); ready = true; setUiText(hud, ROOM_GAME ? '点击游戏画面以锁定鼠标（Esc 释放鼠标）' : '点击游戏画面以锁定鼠标（Esc 释放鼠标，Shift+P 切换键盘模式，= 显示帧率）'); setTimeout(() => { setUiText(hud, ''); }, 15000); }
 	};
 	// 两次报告之间，进度条缓慢前移，最多超过上次报告 6 个百分点，避免长时间加载阶段看起来像卡住。
 	const dataEl = document.getElementById('data');
@@ -376,7 +423,8 @@ let multiplayerAdapter = null, engineWorldReady = false;
 		}
 		fill.style.width = shown.toFixed(1) + '%';
 		pct.textContent = Math.round(shown) + '%';
-		if (ready && shown > 99.5) { loading.classList.add('done'); setTimeout(() => { loading.remove(); stopTitle(); }, 1000); loadingGone = true; clearInterval(progressTimer); }		// 仅执行一次：游玩期间页面不再处理加载画面。
+		if (ROOM_GAME && ready) { clearInterval(progressTimer); return; }
+		if (!ROOM_GAME && ready && shown > 99.5) { loading.classList.add('done'); setTimeout(() => { loading.remove(); stopTitle(); }, 1000); loadingGone = true; clearInterval(progressTimer); }		// 仅执行一次：游玩期间页面不再处理加载画面。
 	}, 50);
 }
 const hud = document.getElementById('hud');
@@ -424,27 +472,30 @@ async function dropOldCache() {
 }
 let lowMemory = false;		// 在下方赋值（模块作用域，后面的 ?mem 内存监测也会使用）。
 let startSize = [1280, 720], wantSize = null;		// 在下方赋值（模块作用域，installInput 会使用这些变量）。
-let publicSession = null;
+
 if (ROOM_GAME && onlinePreferences) {
 	try {
 		publicSession = await startPublicSession(onlinePreferences, ({ phase, text }) => {
+      if (phase === 'joined') updateOnlineEntry({ connected: true });
 			const label = document.getElementById('label');
 			if (label && !onlineConnectionReady) setUiText(label, phase === 'joined' ? ONLINE_LOADING : text);
 			// 游戏开始后的连接提示由适配器交给原生通知，入口只负责加载前提示。
 		}, { reconnect: ONLINE_RECONNECT });
-		await publicSession.ready;
-		onlineConnectionReady = true;
+        if (entryFailed || onlineEntry?.getState().stage === 'cancelled') { publicSession.close(); throw new Error('Entry cancelled'); }
+        await publicSession.ready;
+        onlineConnectionReady = !entryFailed;
+        updateOnlineEntry({ connected: true });
 	} catch (error) {
 		publicSession?.close();
-		joinModal.setMessage(error.message);
-		joinModal.open();
-		setUiText(document.getElementById('label'), '连接未完成，请确认战局服务器地址');
+        if (onlineEntry) entryError(error.message);
+        else { joinModal.setMessage(error.message); joinModal.open(); }
+        setUiText(document.getElementById('label'), '连接未完成，请确认战局服务器地址');
 	}
 } else if (ROOM_GAME) {
 	setUiText(document.getElementById('label'), '请输入昵称与服务器地址以加入战局');
 	joinModal.open();
 }
-if (!crossOriginIsolated) { setUiText(document.getElementById('label'), '页面未启用跨域隔离：请通过 HTTPS 或 localhost 打开，并确认服务器发送了 COOP/COEP 响应头。'); document.getElementById('label').style.color = '#e66'; }
+if (!crossOriginIsolated) { entryError(getLanguage() === 'en' ? 'Open this game through the launcher HTTPS address.' : '请通过启动器提供的 HTTPS 地址打开游戏。'); setUiText(document.getElementById('label'), '页面未启用跨域隔离：请通过 HTTPS 或 localhost 打开，并确认服务器发送了 COOP/COEP 响应头。'); document.getElementById('label').style.color = '#e66'; }
 else if (onlineConnectionReady) {
 	const offscreen = canvas.transferControlToOffscreen();
 	await dropOldCache();
@@ -497,7 +548,9 @@ const worker = new Worker(BASE + '/loader.js');
 		languageNoticeTimer = setTimeout(() => { notice.hidden = true; }, 8000);
 	});
 	addEventListener('pagehide', stopWorkerLanguage, { once: true });
-	multiplayerAdapter = ROOM_GAME ? installGameAdapter(worker, publicSession, { watchOnlineConfiguration }) : null;
+	multiplayerAdapter = ROOM_GAME ? installGameAdapter(worker, publicSession, { watchOnlineConfiguration,
+      onEntryState: updateOnlineEntry, entryAttempt,
+      reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches }) : null;
 	if (engineWorldReady) multiplayerAdapter?.setEngineReady();
 	worker.onmessage = (ev) => {
 		multiplayerAdapter?.onWorkerMessage(ev.data);
@@ -505,7 +558,7 @@ const worker = new Worker(BASE + '/loader.js');
 		if (ev.data.input) installInput(ev.data.input.memory, ev.data.input.block);
 		if (ev.data.audio) { audioPending = ev.data.audio; tryStartAudio(); }
 	};
-	worker.onerror = (e) => { setUiText(hud, () => t('page.workerError', { reason: translateUiText(e.message) })); };
+	worker.onerror = (e) => { entryError(getLanguage() === 'en' ? 'The game worker stopped. Please retry.' : '游戏线程已停止，请重试。'); setUiText(hud, () => t('page.workerError', { reason: translateUiText(e.message) })); };
 	worker.postMessage({
 		multiplayer: ROOM_GAME,
 		language: getLanguage(),
@@ -644,7 +697,7 @@ function installInput(memory, block) {
 	const held = new Set();
 	const syncFlyAlias = () => { for (const [src, target] of Object.entries(FLY_ALIAS)) Atomics.store(keys, VK[target], held.has(src) || held.has(target) ? 0x80 : 0); };
 addEventListener('keydown', (e) => {
-		if (editingInput(e)) return;
+		if (editingInput(e) || entryHoldsInput()) return;
 		if (stopOnlineDebugKey(e)) return;
 		if (passThrough(e)) return;
 		e.preventDefault();
@@ -661,7 +714,7 @@ addEventListener('keydown', (e) => {
 		}
 	});
 addEventListener('keyup', (e) => {
-		if (editingInput(e)) return;
+		if (editingInput(e) || entryHoldsInput()) return;
 		if (stopOnlineDebugKey(e)) return;
 		if (passThrough(e)) return;
 		e.preventDefault();
@@ -671,11 +724,13 @@ addEventListener('keyup', (e) => {
 	});
 	const releaseAll = () => { held.clear(); for (let i = 0; i < 256; i++) Atomics.store(keys, i, 0); Atomics.store(w, BTN, 0); };
 	addEventListener('online-modal-open', releaseAll);
+	addEventListener('online-entry-input-hold', (event) => { if (event.detail?.held) releaseAll(); });
 	addEventListener('focus', () => { trace('window focus'); Atomics.store(w, FOCUS, 1); });
 	addEventListener('blur', () => { trace('window blur (all keys released)'); Atomics.store(w, FOCUS, 0); releaseAll(); });
 
 	const locked = () => document.pointerLockElement === canvas;
 	canvas.addEventListener('mousedown', (e) => {
+		if (entryHoldsInput()) return;
 		if (!locked()) { canvas.requestPointerLock({ unadjustedMovement: true }).catch(() => canvas.requestPointerLock()); }
 		Atomics.or(w, BTN, 1 << [0, 2, 1, 3, 4][e.button]);
 		e.preventDefault();
@@ -684,6 +739,7 @@ addEventListener('keyup', (e) => {
 	addEventListener('contextmenu', (e) => { if (!editingInput(e)) e.preventDefault(); });
 	document.addEventListener('pointerlockchange', () => { trace('pointer lock ' + (locked() ? 'on' : 'off')); Atomics.store(w, LOCKED, locked() ? 1 : 0); });
 	addEventListener('mousemove', (e) => {
+		if (entryHoldsInput()) return;
 		const r = canvas.getBoundingClientRect();
 		if (locked()) {
 			Atomics.add(w, DX, e.movementX);
@@ -705,7 +761,7 @@ addEventListener('keyup', (e) => {
 	// 小数会累积。引擎每帧消耗一个刻度（browser_input_wasm.cpp），因此较长的滚动会持续数帧。
 	let wheelAccum = 0;
 	addEventListener('wheel', (e) => {
-		if (editingInput(e)) return;
+		if (editingInput(e) || entryHoldsInput()) return;
 		e.preventDefault();
 		wheelAccum += -e.deltaY / (e.deltaMode === 0 ? 100 : e.deltaMode === 1 ? 3 : 1);
 		const n = Math.trunc(wheelAccum);

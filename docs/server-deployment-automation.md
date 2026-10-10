@@ -24,6 +24,8 @@ The runner requires Python 3.12, Java 17, Node 24, and pinned Paramiko 4.0.0. Ex
 
 ## Rollout and recovery
 
+For an explicitly authorized rollout from the maintainer machine, set repository variable `GTA_SERVER_DEPLOY_FROM_LOCAL=true` before pushing the release commit. This skips only the automatic `deploy-server` job, including deployment retries; builds, releases and launcher/configuration deployment continue. Verify that no older deployment is running, use the original verified release artifacts locally, and restore the variable's previous value only after the workflow has skipped server deployment and the local rollout is complete. Remove the variable if it did not previously exist; the default remains automatic US deployment.
+
 1. Verify the release plan against the checkout, all artifact sizes/SHA-256 values and source provenance, and the JAR's actual runtime version. Validate the selected regions' secrets and trusted SSH keys before any remote change. GitHub passes `--regions us`; a separately authorized local run can use `--regions cn`.
 2. Inspect both existing services in every selected region. Compare uncompressed JAR entry digests so build timestamps do not cause unnecessary restarts. Identical code at the expected running version receives health/protocol checks only; occupied unchanged services receive HTTPS checks without adding a player. The first automated deployment also recognizes the recorded 0.4.3 JAR digest and exact Java-source digest from commit `4f9e66c97655d8e6904e2a0bde573f614226f651`; both are pinned in the tool, so compiler differences alone cannot restart that known build. Changed code with the same version is refused; bump the server version and its release-notes MD. Downgrades are refused.
 3. Update every selected region's experimental lane before its main lane. Wait up to 120 seconds per lane for player and connection counts to reach zero. Briefly gate new non-root loopback TCP connections with a tagged firewall rule while preserving existing connections; root-only health checks remain available. Wait for player/connection/socket counts to reach zero again and recheck the gate before activation. If connections remain occupied, fail without interrupting that lane. Remove the rule on every exit; a transient systemd watchdog also removes it after 25 minutes if the runner disappears.
@@ -52,6 +54,8 @@ Secrets 位于 **Settings → Secrets and variables → Actions → Repository s
 运行器使用 Python 3.12、Java 17、Node 24 与固定版本 Paramiko 4.0.0；既有服务器需要 Python 3.9+、systemd、Java 和已配置的 TLS 代理。真正更换 JAR 时还要求 root 权限、`iptables`、`systemd-run` 和以非 root 身份运行的 Nginx 工作进程。自动部署不创建新的游戏服务、证书、账号或世界数据。
 
 ## 顺序与恢复
+
+用户明确要求从维护者本机部署时，在推送发布提交前设置仓库变量 `GTA_SERVER_DEPLOY_FROM_LOCAL=true`。它只跳过自动 `deploy-server`（含部署重试），不影响构建、Release 或启动器/配置部署。先确认没有旧部署仍在运行，本机使用原始已核验的发布附件；等工作流明确跳过服务端部署且本机部署完成后，再恢复变量原值。原先不存在则删除该变量，默认仍由 GitHub 自动部署美国线路。
 
 先核对计划、源码提交、产物大小与 SHA-256、真实 JAR 版本和所选地区 SSH 指纹，再预检所选地区的正式与实验线路。GitHub 使用 `--regions us`；另行获授权的本机部署可使用 `--regions cn`。比较解压后的 JAR 条目内容，避免 ZIP 时间戳变化触发重启；运行版本一致且代码相同仅检查服务，有在线玩家时只检查 HTTPS。首轮自动部署另以工具中固定的已部署 0.4.3 JAR 摘要和提交 `4f9e66c97655d8e6904e2a0bde573f614226f651` 对应 Java 源码摘要识别已知版本，避免编译器差异导致重启。代码不同却未升服务端版本时直接拒绝，也不允许降级。
 

@@ -171,9 +171,6 @@ h2 { font-size: 14px; font-weight: 600; line-height: 1.4; margin: 0 0 6px; }
 .server-info > span { grid-column: 1 / -1; font-size: 9px; color: #b2c5cc; }
 .server-info strong { font-size: 10px; font-weight: 500; color: var(--mint); min-width: 0; overflow-wrap: anywhere; line-height: 1.8; }
 .server-info .text-button { font-size: 9px; white-space: nowrap; padding: 0; }
-.server-routes { grid-column: 1 / -1; margin: 6px 0 0; padding: 0; list-style: none; display: grid; gap: 7px; }
-.server-routes li { display: flex; flex-direction: column; gap: 3px; font-size: 9px; color: var(--muted); }
-.server-routes code { font-size: 10px; color: #e3eee8; overflow-wrap: anywhere; }
 .version-chip { padding: 4px 6px; font-size: 8px; color: #c9ddd5; border: 1px solid var(--line); border-radius: 5px; background: rgba(224, 242, 238, .05); }
 .update-state { font-size: 12px; line-height: 1.5; margin: 10px 0 0; color: #d4e1de; }
 .update-available { color: var(--mint); }

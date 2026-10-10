@@ -8,6 +8,15 @@ A desktop launcher, browser client bridge, and experimental Java shared-world se
 
 The repository contains project source and documentation. **It does not provide the game, the original browser engine, RPF archives, maps, textures, fonts, or other proprietary game assets.** A regular PC GTA V installation is not a replacement for the supported browser-engine resource layout.
 
+## Demo videos
+
+Click a video preview to watch on YouTube.
+
+| Demo 1 | Demo 2 |
+| :---: | :---: |
+| [![Demo 1 video preview](https://img.youtube.com/vi/bWeYgRIqQ_g/hqdefault.jpg)](https://youtu.be/bWeYgRIqQ_g) | [![Demo 2 video preview](https://img.youtube.com/vi/kbVeSa5wDj8/hqdefault.jpg)](https://youtu.be/kbVeSa5wDj8) |
+| [▶ Watch on YouTube](https://youtu.be/bWeYgRIqQ_g) | [▶ Watch on YouTube](https://youtu.be/kbVeSa5wDj8) |
+
 ## Current scope
 
 - Tauri 2 launcher for Windows x64 and macOS Apple Silicon; game rendering runs in the default browser.
@@ -16,7 +25,7 @@ The repository contains project source and documentation. **It does not provide 
 - Public-session endpoints, names, announcements, and download metadata come from the [configuration API](https://oss.2t.hk/gtav/). Public server addresses are not compiled into the client.
 - A standalone Java 17+ server owns player/entity identity, seats, ownership leases, combat decisions, respawning, population, weather, and law rules. Authorized client engines execute assigned native movement and vehicle simulation.
 
-**Launcher 0.2.16; server source 0.4.4-world-experimental.** This server update adds confirmed NPC line of sight, last-known-position pursuit, and shared police sightings. It uses the existing 0.2.16 client and does not rebuild the launcher or modify game resources. The workflow publishes and deploys the US routes; China remains a separately requested local deployment. Check the Actions audit for the actual running version. See [NPC perception](docs/npc-perception.md) and [automated releases](docs/releases.md).
+**Component versions: launcher 0.2.17; server 0.4.5-world-experimental.** This release adds original-engine cloud/camera entry with server readiness acknowledgement, fixes shared-vehicle exits, and provides a local development runner. See [native cloud entry](docs/native-cloud-entry.md), [NPC perception](docs/npc-perception.md) and [automated releases](docs/releases.md).
 
 Multiplayer remains experimental. Static collision and pedestrian navigation cover roughly **600 × 600 metres around the test spawn**, not the whole map. There is no complete server-side RAGE physics runtime or migration of every single-player script, tool, mission, or vehicle weapon. This uses a custom protocol and does not implement native GTA Online or FiveM compatibility. Protocol tests do not establish complete gameplay synchronization; `game_sync` and `native_clone_transport` remain false.
 
@@ -30,10 +39,10 @@ Multiplayer remains experimental. Static collision and pedestrian navigation cov
 | Foundation | ✅ | Basic player-versus-player gun, melee, and projectile damage, death, and respawning. |
 | Foundation | ✅ | Shared time, weather, and basic wanted/police rules. |
 | Foundation | ✅ | Local pedestrian population, AI movement, static collision, and navigation around the spawn area (about 600 × 600 m). |
-| Foundation | ✅ | Shared vehicle seats and passenger/ownership reconciliation in client 0.2.15. |
+| Foundation | ✅ | Shared vehicle seats and passenger/ownership reconciliation; 0.2.17 fixes exit-animation reattachment for drivers and passengers. |
 | Foundation | ✅ | Windows/macOS release packages, public source, MIT License, and bilingual development/integration guides. |
 | P0 — urgent stability | ✅ | Remove the identified fullscreen-glow crash path for synchronized rockets/grenades in 0.2.16; use bounded ordinary model markers and avoid native explosion replay. [Fix details](docs/explosive-rendering.md). |
-| P0 — entry experience | ❌ | Cloud-style loading, verified camera descent, real snapshot/avatar/scene readiness, retry/cancel and control restoration. |
+| P0 — entry experience | ✅ | Original-game cloud/camera entry with a random 5–10 second sky hold, snapshot/avatar/collision gates, server ACK, retry/cancel and input recovery; automated checks passed. [Scope](docs/native-cloud-entry.md). |
 | Research foundation | ✅ | REA/static inventory and 22 YSC structures verified; script behavior/runtime compatibility remains unproven. [Evidence](docs/rea-online-feasibility.md). |
 | P1 — AI and world coverage | ✅ | Gate NPC combat on confirmed line of sight, pursue remembered positions, and share sightings within the same police response; shared sightings do not authorize shooting. [Scope and limits](docs/npc-perception.md). |
 | P1 — AI and world coverage | ❌ | Complete NPC weapon behavior, field of view, cover selection, and tactical coordination. |
@@ -55,7 +64,6 @@ Multiplayer remains experimental. Static collision and pedestrian navigation cov
 | P5 — settlement | ❌ | PostgreSQL transaction ledger, unique reward entitlement, atomic inventory/balance changes and replay-safe outbox. |
 | Operations and capacity | ❌ | Container deployment, Redis presence/matching, backup recovery, independent sessions and measured scaling. |
 | Release maintenance | ✅ | Provide a locally built, ad hoc signed macOS development package. |
-| Release maintenance | ❌ | Add macOS Developer ID signing and notarization. |
 
 Implementation order: **stability → cloud-style entry and world readiness → AI/physics plus minimal persistent identity → equipment/vehicles → cooperative activities → persistent progression and multiple sessions**. The P0–P5 labels remain feature groups; the minimum P5 identity and durable settlement work starts before rewards and purchases. Signing can proceed separately. See the [detailed online-mode roadmap](docs/online-mode-roadmap.md) and [feature maintenance guide](docs/multiplayer-development.md).
 
@@ -160,6 +168,21 @@ python3 -B serve_local.py --game-dir "/path/to/browser-game" --host 127.0.0.1 \
 ```
 
 Stop a separately running server before using `--start-room-server`. Development endpoints are explicit arguments; normal players use the API-provided public lines.
+
+### Rebuild and restart the local server and launcher
+
+On macOS/Linux, install Python 3.11+, JDK 17+, Node.js 22.12+ with npm, stable Rust/Cargo, and the platform's [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) (Xcode Command Line Tools on macOS). From the repository root:
+
+```sh
+./start-local.sh                # Build both components and start fresh processes
+./start-local.sh --status       # Show this checkout's local processes
+./start-local.sh --stop         # Stop this checkout's local server and launcher
+./start-local.sh --port 18788   # Rebuild and restart on another local server port
+```
+
+The script first force-stops this checkout's recognized local launcher and Java server, then builds both components and starts the new processes. If either build fails, both remain stopped; check the build logs for details. The standalone debug launcher embeds its web pages and uses a local-only configuration. The server listens on `127.0.0.1:18787` by default. The script does not force-stop unrelated processes; a port occupied by another program causes an error.
+
+No persistent Vite process is needed. You can close the terminal after startup; run the script again to rebuild and restart. Build and runtime logs are under `archive/local-dev/runs/`. Select supported game resources in the launcher; original resources remain read-only, and existing `server/world-data/` is reused without being overwritten. This command produces development executables, not release installers.
 
 ## Build the desktop client
 

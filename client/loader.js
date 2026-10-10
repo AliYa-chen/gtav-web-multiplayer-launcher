@@ -14,7 +14,7 @@ self.onmessage = (ev) => {
 	const progress = (channel, values, zh, en, error = false) => channel.postMessage({ ...values,
 		[error ? 'error' : 'label']: language === 'en' ? en : zh,
 		[error ? 'errorTranslations' : 'labelTranslations']: { 'zh-CN': zh, en } });
-	if (m.multiplayer) importScripts('/multiplayer/world-environment.js', '/multiplayer/native-session-ui.js', '/multiplayer/world-collision.js', '/multiplayer/world-engine-bridge.js', '/multiplayer/engine-bridge.js');
+	if (m.multiplayer) importScripts('/multiplayer/world-environment.js', '/multiplayer/native-session-ui.js', '/multiplayer/world-collision.js', '/multiplayer/world-engine-bridge.js', '/multiplayer/online-entry-camera.js', '/multiplayer/engine-bridge.js');
 	// ?cores=N (debug): pretend to be a machine with N logical cores; the engine sizes its worker pools from it
 	if (m.cores) Object.defineProperty(navigator, 'hardwareConcurrency', { value: m.cores });
 	// The GPU worker must be up before the engine blocks this thread: Chrome fetches the script of a worker nested in a worker through
@@ -28,7 +28,7 @@ self.onmessage = (ev) => {
 	if (m.shotRt) gq.set('shotrt', '1');		// ?shotrt=1 (with ?shot=N): every render target of one frame after the world is shown goes to the dev server (diagnosis)
 	if (m.gpuLimits) gq.set('limits', m.gpuLimits);		// ?limits=name:value,...: a smaller device (diagnosis of weaker GPUs)
 	const B = m.base || '';		// the page's URL prefix for everything it loads (index.html BASE): /b/<build> on the PHP host, empty otherwise
-	const engineUrl = m.multiplayer ? '/engine/online/game.wasm?v=public-radar-12' : '/engine/offline/game.wasm';
+	const engineUrl = m.multiplayer ? '/engine/online/game.wasm?v=online-entry-13' : '/engine/offline/game.wasm';
 	const gpu = new Worker(B + '/wgpu_worker.js' + (gq.toString() ? '?' + gq : ''));
 	const io = new Worker(B + '/io_worker.js');
 	io.postMessage({ init: true, base: self.location.origin + '/data/', noStore: !!m.noStore, record: !!m.record, trace: !!m.trace, log: !!m.remoteLog, noHints: !!m.noHints, bootset: m.lowMemory ? 'bootset_low.json' : 'bootset.json' });		// starts the prefetch of the boot read set at once		// HTTP reads of all engine threads (platform/file/httpfs_wasm.cpp); same reason to create it up front

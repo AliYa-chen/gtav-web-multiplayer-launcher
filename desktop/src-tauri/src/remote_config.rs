@@ -107,12 +107,17 @@ pub struct ConfigSnapshot {
     pub fetched_at: Option<u64>,
     pub checked_at: u64,
     pub error: Option<String>,
+    /// Never present in release builds; identifies the explicit local debug fixture.
+    #[cfg(debug_assertions)]
+    #[serde(default)]
+    pub debug_local: bool,
 }
 
 impl Default for ConfigSnapshot {
     fn default() -> Self {
         Self { config: RemoteConfig::default(), source: ConfigSource::Unavailable, stale: true,
-            fetched_at: None, checked_at: now(), error: None }
+            fetched_at: None, checked_at: now(), error: None,
+            #[cfg(debug_assertions)] debug_local: false }
     }
 }
 
@@ -197,6 +202,15 @@ pub fn websocket_url(value: &str) -> Result<String, String> {
 
 fn health_url(value: &str) -> Result<String, String> {
     if value.contains('\\') { return Err("远程健康检查地址无效。".into()); }
+    #[cfg(debug_assertions)]
+    if std::env::var_os("GTA_DEV_CONFIG_PATH").is_some() {
+        let url = Url::parse(value).map_err(|_| "本机开发健康检查地址无效。".to_string())?;
+        if url.scheme() == "http" && matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
+            && value.len() <= 2048 && !value.chars().any(|c| c.is_control() || c.is_whitespace())
+            && url.username().is_empty() && url.password().is_none() && url.fragment().is_none() && url.port() != Some(0) {
+            return Ok(url.into());
+        }
+    }
     let value = https_url(value)?;
     let url = Url::parse(&value).map_err(|_| "远程健康检查地址无效。".to_string())?;
     if url.port() == Some(0) || url.fragment().is_some() {
@@ -428,6 +442,8 @@ fn client() -> Result<Client, String> {
 }
 
 fn fetch() -> Result<RemoteConfig, String> {
+    #[cfg(debug_assertions)]
+    if let Some(path) = std::env::var_os("GTA_DEV_CONFIG_PATH") { return read_development_config(std::path::Path::new(&path)); }
     let response = client()?.get(CONFIG_URL).send().map_err(|error| {
         if error.is_timeout() { "远程配置请求超时。".to_string() }
         else { "无法连接远程配置服务。".to_string() }
@@ -439,19 +455,49 @@ fn fetch() -> Result<RemoteConfig, String> {
     parse_config(&read_bounded(response)?)
 }
 
+/// An explicit debug-only fixture never falls back to the public endpoint and
+/// never offers a launcher update. The selected file and every ancestor must
+/// be ordinary filesystem entries; it is opened read-only and bounded.
+#[cfg(debug_assertions)]
+fn read_development_config(path: &std::path::Path) -> Result<RemoteConfig, String> {
+    if !path.is_absolute() || path.components().any(|part| matches!(part, std::path::Component::ParentDir)) {
+        return Err("本机开发配置必须使用不含父目录跳转的绝对路径。".into());
+    }
+    for ancestor in path.ancestors() {
+        let metadata = std::fs::symlink_metadata(ancestor).map_err(|_| "本机开发配置路径无法读取。".to_string())?;
+        if metadata.file_type().is_symlink() || (ancestor == path && !metadata.is_file())
+            || (ancestor != path && !metadata.is_dir()) {
+            return Err("本机开发配置不能包含符号链接或特殊文件。".into());
+        }
+        if ancestor == path && metadata.len() > MAX_CONFIG_BYTES as u64 {
+            return Err("本机开发配置超过 256 KiB 限制。".into());
+        }
+    }
+    let file = std::fs::File::open(path).map_err(|_| "本机开发配置无法只读打开。".to_string())?;
+    let mut config = parse_config(&read_bounded(file)?)?;
+    config.latest_version = None;
+    config.downloads.clear();
+    Ok(config)
+}
+
 fn snapshot(result: Result<RemoteConfig, String>, checked_at: u64) -> ConfigSnapshot {
     match result {
         Ok(config) => ConfigSnapshot { config, source: ConfigSource::Remote, stale: false,
-            fetched_at: Some(checked_at), checked_at, error: None },
+            fetched_at: Some(checked_at), checked_at, error: None,
+            #[cfg(debug_assertions)] debug_local: std::env::var_os("GTA_DEV_CONFIG_PATH").is_some() },
         Err(error) => ConfigSnapshot { config: RemoteConfig::default(), source: ConfigSource::Unavailable, stale: true,
-            fetched_at: None, checked_at, error: Some(error) },
+            fetched_at: None, checked_at, error: Some(error),
+            #[cfg(debug_assertions)] debug_local: std::env::var_os("GTA_DEV_CONFIG_PATH").is_some() },
     }
 }
 
 /// Blocking, at most eight seconds of networking. Call from a background worker.
 /// Every call requests fresh remote data. No metadata is loaded from or saved to disk.
 pub fn load() -> ConfigSnapshot {
-    snapshot(fetch(), now())
+    let result = fetch();
+    #[cfg(debug_assertions)]
+    let result = result.map(|mut config| { config.latest_version = None; config.downloads.clear(); config });
+    snapshot(result, now())
 }
 
 pub fn has_update(current: &str, latest: Option<&str>) -> bool {

@@ -20,7 +20,7 @@ static CLIENT: Dir<'_> = include_dir!("$OUT_DIR/embedded-client");
 #[derive(Default, Deserialize, Serialize)]
 struct Preferences { selected_directory: Option<String>, #[serde(default)] lan_settings: Option<lan::Settings>, #[serde(default)] language: Option<String>, #[serde(default)] launch: Option<launch::LaunchPreferences> }
 struct Prepared { resources: resources::ResourceInfo, runtime: PathBuf, fonts: HashMap<String, PathBuf> }
-struct GameClient { id: u64, number: u64, primary: bool, launch: launch::LaunchPreferences, seed: u32, guide: lan_bootstrap::BootstrapHandle, server: http_server::ServerHandle }
+struct GameClient { id: u64, number: u64, primary: bool, launch: launch::LaunchPreferences, seed: u32, guide: Option<lan_bootstrap::BootstrapHandle>, server: http_server::ServerHandle }
 struct ClientIdentity { id: u64, primary: bool }
 #[derive(Default)]
 struct Inner { selected: Option<String>, prepared: Option<Prepared>, clients: Vec<GameClient>,
@@ -58,12 +58,17 @@ fn platform_key() -> &'static str {
     }
 }
 fn reconcile_update_requirement(required: &AtomicBool, value: &serde_json::Value) -> bool {
+    #[cfg(debug_assertions)]
+    { let _ = value; required.store(false, Ordering::Release); return false; }
+    #[cfg(not(debug_assertions))]
+    {
     let previous = required.load(Ordering::Acquire);
     let next = serde_json::from_value::<remote_config::ConfigSnapshot>(value.clone()).ok()
         .map(|snapshot| remote_config::update_requirement(previous, &snapshot, env!("CARGO_PKG_VERSION")))
         .unwrap_or(previous);
     required.store(next, Ordering::Release);
     next
+    }
 }
 
 fn publish_remote_snapshot(remote: &RwLock<serde_json::Value>, required: &AtomicBool,
@@ -103,7 +108,7 @@ fn snapshot(inner: &Inner, state: &LauncherState) -> LauncherStatus {
         running_urls: inner.clients.iter().map(client_running_url).collect(),
         invitation_urls: inner.clients.iter().map(client_invitation_url).collect(), version: env!("CARGO_PKG_VERSION"), platform: platform_key(),
         update_required, remote_configuration, launch_preferences: inner.launch.clone(), language: language::snapshot(&state.language), lan: LanStatus { settings: inner.lan_settings.clone(), addresses: lan::addresses(),
-            running_url: primary_client(inner).map(client_running_url), guide_url: primary_client(inner).map(|client| launch::guide_url(&client.guide.url(),&shared_entry(client)).unwrap_or_else(|_|client.guide.url())),
+            running_url: primary_client(inner).map(client_running_url), guide_url: primary_client(inner).map(client_invitation_url),
             host_address: inner.lan_address.clone(), ca_fingerprint: inner.lan_fingerprint.clone().or_else(|| ca_trust::fingerprint().ok()) } }
 }
 fn preferences_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -210,7 +215,7 @@ fn start_client_with_identity(prepared: &Prepared, lan: lan::PreparedLan, identi
     })?;
     // 引导端口不可用时回滚 HTTPS，只有两者都成功才发布客户端。
     let guide = lan_bootstrap::start_with_language(ip, lan.settings.http_port, server.port(), lan.ca_certificate, lan.fingerprint,language)?;
-    Ok(GameClient { id: identity.id, number: identity.id, primary: identity.primary, launch: launch::LaunchPreferences::default(), seed: 0, guide, server })
+    Ok(GameClient { id: identity.id, number: identity.id, primary: identity.primary, launch: launch::LaunchPreferences::default(), seed: 0, guide: Some(guide), server })
 }
 
 fn client_running_url(client: &GameClient) -> String {
@@ -218,7 +223,11 @@ fn client_running_url(client: &GameClient) -> String {
     launch::game_url(&client.server.url(),&entry).unwrap_or_else(|_|client.server.url())
 }
 fn client_invitation_url(client: &GameClient) -> String {
-    launch::guide_url(&client.guide.url(),&shared_entry(client)).unwrap_or_else(|_|client.guide.url())
+    client_entry_url(client, &shared_entry(client), false).unwrap_or_else(|_|client.server.url())
+}
+fn client_entry_url(client: &GameClient, entry: &str, trusted: bool) -> Result<String, String> {
+    if !trusted { if let Some(guide) = &client.guide { return launch::guide_url(&guide.url(), entry); } }
+    launch::game_url(&client.server.url(), entry)
 }
 fn shared_entry(_client: &GameClient) -> String { "/".into() }
 
@@ -247,6 +256,34 @@ async fn start_game(app: tauri::AppHandle, state: State<'_, LauncherState>, addi
             .ok_or("请选择远程配置提供的服务器线路。")?;
         let endpoint=launch::server_endpoint(&selected)?;
         requested.server=endpoint;
+    }
+    // Explicit local debugging needs neither a LAN interface nor certificate
+    // provisioning. Release builds contain only the established LAN path.
+    #[cfg(debug_assertions)]
+    if std::env::var_os("GTA_DEV_CONFIG_PATH").is_some() {
+        let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
+        let next = requested.validate()?;
+        let previous = inner.launch.clone(); inner.launch = next.clone();
+        if let Err(error) = save_preferences(&app, &inner) { inner.launch = previous; return Err(error); }
+        if !additional { if let Some(client) = inner.clients.iter_mut().find(|client| client.primary) { client.launch = next; } }
+        let Some(identity) = next_client_identity(&inner, additional)? else { return Ok(snapshot(&inner, &state)); };
+        let prepared = inner.prepared.as_ref().ok_or("请先选择并校验游戏资源。")?;
+        if state.shutting_down.load(Ordering::Acquire) { return Err("启动器正在关闭。".into()); }
+        let id = identity.id;
+        let server = http_server::start(prepared.resources.clone(), prepared.runtime.clone(), embedded_client(), http_server::ServerConfig {
+            online_ready: true, instance_name: format!("玩家{id}"),
+            log_file: app.path().app_log_dir().map_err(|e| e.to_string())?.join(format!("browser-{id}.log")),
+            font_overrides: prepared.fonts.clone(), remote_configuration: state.remote.clone(),
+            multiplayer_server: inner.launch.server.clone(), language: state.language.clone(),
+            preferred_port: None, lan: None, ..Default::default()
+        })?;
+        let mut client = GameClient { id, number: id, primary: identity.primary, launch: inner.launch.clone(),
+            seed: (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos() as u32) ^ id as u32,
+            guide: None, server };
+        if additional { client.launch.name = format!("{}-{id}", client.launch.name.chars().take(18).collect::<String>()); }
+        inner.last_client_id = id; inner.clients.push(client);
+        progress(&app, "ready", "本机开发游戏服务已启动，仅监听 127.0.0.1。无需安装证书。");
+        return Ok(snapshot(&inner, &state));
     }
     let (settings, address, identity) = {
         let mut inner = state.inner.lock().map_err(|e| e.to_string())?;
@@ -348,7 +385,7 @@ fn open_game(state: State<'_, LauncherState>, id: Option<u64>, index: Option<usi
     let client = find_client(&inner, id, index)?;
     // 未确认信任时先打开 HTTP 引导；引导页验证 HTTPS 后自动进入对应客户端。
     let entry=if client.primary {client.launch.entry_path(client.seed)?} else {shared_entry(client)};
-    let url = if trusted.unwrap_or(false) { launch::game_url(&client.server.url(),&entry)? } else { launch::guide_url(&client.guide.url(),&entry)? };
+    let url = client_entry_url(client, &entry, trusted.unwrap_or(false))?;
     drop(inner);
     open::that(url).map_err(|e| format!("无法打开默认浏览器，请复制客户端邀请地址手动打开：{e}"))
 }
@@ -520,6 +557,18 @@ fn apply_native_menu(app: &tauri::AppHandle,state: &LauncherState)->Result<(),ta
 }
 
 pub fn run() {
+    let mut context = tauri::generate_context!();
+    // Config overlays replace window arrays. Apply the launcher policy after
+    // merging, before native creation, so neither zoom controls nor title-bar
+    // double-clicks can turn a local-test override into a resizable window.
+    for window in &mut context.config_mut().app.windows {
+        if window.label == "main" {
+            window.resizable = false;
+            window.maximizable = false;
+            window.maximized = false;
+            window.fullscreen = false;
+        }
+    }
     tauri::Builder::default()
         .manage(LauncherState::default())
         .setup(|app| {
@@ -556,7 +605,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![launcher_status, choose_game_directory, prepare_game, start_game, stop_game, stop_game_client, open_game,
             remote_configuration, open_update_download, open_project_website, open_project_repository, open_game_resource_page,
             save_lan_settings, check_lan_ca_status, install_lan_ca, save_lan_ca_certificate, set_language])
-        .build(tauri::generate_context!()).expect("启动桌面界面失败")
+        .build(context).expect("启动桌面界面失败")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
                 shutdown_clients(&app.state::<LauncherState>());

@@ -134,7 +134,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   let wireRequestSequence = 0;
   const meleeRequests = new Map(), consumedMeleeEvents = new Set();
   const quietRejections = new Set(['rate_limited', 'cooldown', 'stale_seq', 'stale_input', 'stale_owner', 'stale_generation',
-    'stale_revision', 'invalid_revision', 'seat_unavailable', 'too_far', 'not_facing', 'player_dead', 'weapon_mismatch', 'not_ready', 'stale_collision']);
+    'stale_revision', 'invalid_revision', 'seat_unavailable', 'too_far', 'not_facing', 'player_dead', 'weapon_mismatch', 'not_ready', 'entry_not_ready', 'stale_collision']);
   let collisionNoticeShown = false;
   let pendingMelee = null, meleeTimer = 0;
   const meleeQueue = [];
@@ -143,7 +143,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   let lastWorldSyncAt = -Infinity, interactionSequence = 0;
   const weaponRuleByHash = new Map();
   let weaponRules = [];
-  let sessionPolicy = null;
+  let sessionPolicy = null, serverVersion = '';
   // 每个游戏页独占连接与桥接，避免同一来源的多个标签页混用角色和身份。
   let receiver = null, latestStatus = null;
   const pendingControls = [];
@@ -164,6 +164,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   let supportsCombat = false, supportsResume = false, supportsHeartbeat = false, supportsSnapshot = false;
   let supportsCombatFeedback = false;
   let supportsWorldV2 = false;
+  let supportsEntryReadiness = false, entryReady = false, pendingEntry = null;
   const serverFeatures = new Set();
   let supportsEntityBatch = false;
   let supportsMeleeEvents = false;
@@ -250,6 +251,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     const cleanResumeState = ownState ? cleanPlayerState(ownState) : null;
     const resumeState = cleanResumeState ? { seq: ownState.seq, ...cleanResumeState } : null;
     emit({ type: 'session', language: getLanguage(), connected, client_id: connected ? clientId : null,
+      server_version: connected ? serverVersion : '',
       members: connected ? room.members.map(({ id, name, connected }) => ({ id, name, connected: connected !== false })) : [],
       peers: connected ? [...peers.values()] : [],
       combat: connected ? [...combat.values()] : [],
@@ -261,6 +263,8 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
       weapon_rules: weaponRules.map((rule) => ({ ...rule })),
       session_policy: sessionPolicy && { ...sessionPolicy, allowed_scripts: [...sessionPolicy.allowed_scripts] },
       world_v2: supportsWorldV2,
+      entry_readiness: supportsEntryReadiness,
+      entry_ready: connected && entryReady,
       melee_events: supportsMeleeEvents,
       avatar: preferences.preset.endsWith('_female') ? 'female' : 'male', preset: preferences.preset, seed: preferences.seed,
       model: modelForPreset(preferences), appearance_spec: randomAppearance(preferences) });
@@ -333,7 +337,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   }
   function flushMelee() {
     clearTimeout(meleeTimer); meleeTimer = 0;
-    if (!pendingMelee || stopped || !profiled) return;
+    if (!pendingMelee || stopped || !profiled || !entryReady) return;
     const current = world.state(), attempt = pendingMelee, target = attempt.entity_id ? world.entity(attempt.entity_id) : null;
     const actor = current.entities.find((entity) => entity.player_id === clientId);
     if (!current.ready || current.world_epoch !== attempt.world_epoch || performance.now() - attempt.at >= 250
@@ -362,7 +366,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   function flushEntityInputs() {
     entityTimer = 0;
     const current = world.state(), now = performance.now();
-    if (!supportsEntityBatch || !supportsWorldV2 || !current.ready || stopped || !profiled) { clearEntityInputs(); return; }
+    if (!supportsEntityBatch || !supportsWorldV2 || !current.ready || stopped || !profiled || !entryReady) { clearEntityInputs(); return; }
     const candidates = [];
     for (const [id, pending] of pendingEntityInputs) {
       const entity = world.entity(id);
@@ -395,7 +399,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     scheduleEntityInputs();
   }
   function worldWorkerMessage(data) {
-    if (!supportsWorldV2 || !world.state().ready || !socket
+    if (!entryReady || !supportsWorldV2 || !world.state().ready || !socket
       || (data.type !== 'entity_input' && !(data.type === 'interaction_request' && data.action === 'melee')
         && socket.bufferedAmount > 65536)) return;
     const current = world.state();
@@ -546,6 +550,8 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   }
   function send(type, fields) {
     if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    if (!entryReady && ['player_state', 'shot_event', 'entity_ready', 'entity_input', 'entity_batch',
+      'interaction_request', 'simulation_result'].includes(type)) return false;
     try { socket.send(JSON.stringify({ type, ...fields })); return true; } catch { return false; }
   }
   function outgoingState(value) {
@@ -560,7 +566,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   function flushState(force = false) {
     clearTimeout(stateTimer);
     stateTimer = 0;
-    if (!pendingState || !room || !profiled || stopped) return false;
+    if (!pendingState || !room || !profiled || stopped || !entryReady) return false;
     const next = outgoingState(pendingState);
     // 引擎同一 tick 可能先上报状态再上报射击；已发送的同一快照不重复占状态预算。
     if (force && lastSentState && JSON.stringify(next) === JSON.stringify(lastSentState)) {
@@ -585,7 +591,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   }
   function flushShot() {
     clearTimeout(shotTimer); shotTimer = 0;
-    if (!pendingShot || !room || !profiled || stopped) return;
+    if (!pendingShot || !room || !profiled || stopped || !entryReady) return;
     const now = performance.now(), shot = pendingShot;
     if (now - shot.at >= shot.maxWait || latestLocalState?.weapon !== shot.event.weapon) {
       clearPendingShot(); return;
@@ -604,6 +610,18 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   function onWorkerMessage(data) {
     if (data?.type === 'bridge_ready') { postSession(); postWorld(); return; }
     if (!room || !profiled || stopped) return;
+    if (data?.type === 'entry_ready') {
+      if (!supportsEntryReadiness || !world.state().ready
+        || Object.keys(data).some((key) => !['type', 'world_epoch', 'entity_id', 'generation'].includes(key))) return;
+      const current = world.state(), entity = world.entity(data.entity_id);
+      if (data.world_epoch !== current.world_epoch || entity?.player_id !== clientId
+        || !Number.isSafeInteger(data.generation) || data.generation < 1 || entity.generation !== data.generation) return;
+      const request = { world_epoch: current.world_epoch, entity_id: entity.entity_id, generation: entity.generation };
+      if (entryReady) { emit({ type: 'entry_status', ...request, ready: true }); return; }
+      if (send('entry_ready', request)) pendingEntry = request;
+      return;
+    }
+    if (!entryReady) return;
     if (data?.type === 'collision_result') {
       const query = collisionQueries.get(data.query_id);
       if (!query || data.world_epoch !== query.world_epoch || data.world_epoch !== world.state().world_epoch
@@ -660,7 +678,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     supportsAppearance = supportsActions = false;
     supportsCombat = supportsResume = supportsHeartbeat = supportsSnapshot = false;
     supportsCombatFeedback = false;
-    supportsWorldV2 = false; serverFeatures.clear(); world.reset(); entityInputSequences.clear(); entityReadyEpochs.clear(); lastWorldSyncAt = -Infinity;
+    serverVersion = ''; supportsWorldV2 = false; supportsEntryReadiness = entryReady = false; pendingEntry = null; serverFeatures.clear(); world.reset(); entityInputSequences.clear(); entityReadyEpochs.clear(); lastWorldSyncAt = -Infinity;
     supportsEntityBatch = false;
     supportsMeleeEvents = false;
     peers.clear(); combat.clear(); pendingState = null;
@@ -685,6 +703,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
       ...(supportsCombatFeedback ? ['combat_feedback'] : []),
       ...(supportsActions ? ['actions'] : []),
       ...(supportsWorldV2 ? ['world_v2'] : []),
+      ...(supportsEntryReadiness ? ['entry_readiness'] : []),
       ...(supportsWorldV2 && serverFeatures.has('session_policy') ? ['session_policy'] : []),
       ...(supportsWorldV2 && serverFeatures.has('world_environment') ? ['world_environment'] : []),
       ...(supportsWorldV2 && serverFeatures.has('shared_law') ? ['shared_law'] : []),
@@ -744,6 +763,8 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
         if (welcomed || message.protocol !== 1 || typeof message.client_id !== 'string' || !Array.isArray(message.capabilities)
           || !['public_session', 'player_state', 'shoot_events'].every((feature) => message.capabilities.includes(feature))) throw new Error('服务器协议不兼容。');
         welcomed = true; clientId = message.client_id;
+        serverVersion = typeof message.server_version === 'string' && message.server_version.length <= 80
+          ? (/^(\d+\.\d+\.\d+)(?:-[A-Za-z0-9.-]+)?(?:\+[A-Za-z0-9.-]+)?$/.exec(message.server_version)?.[1] || '') : '';
         supportsAppearance = message.capabilities.includes('appearance');
         supportsActions = message.capabilities.includes('actions');
         supportsCombat = message.capabilities.includes('combat');
@@ -752,6 +773,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
         supportsSnapshot = message.capabilities.includes('snapshot');
         supportsCombatFeedback = message.capabilities.includes('combat_feedback');
         supportsWorldV2 = message.capabilities.includes('world_v2');
+        supportsEntryReadiness = supportsWorldV2 && message.capabilities.includes('entry_readiness');
         serverFeatures.clear(); for (const feature of message.capabilities) serverFeatures.add(feature);
         supportsEntityBatch = supportsWorldV2 && message.capabilities.includes('entity_batch');
         supportsMeleeEvents = supportsWorldV2 && message.capabilities.includes('melee_events');
@@ -767,6 +789,9 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
       case 'profile':
         if (typeof message.client_id !== 'string' || typeof message.name !== 'string'
           || (!supportsResume && message.client_id !== clientId)) throw new Error('服务器玩家信息无效。');
+        if (supportsEntryReadiness && typeof message.entry_ready !== 'boolean') throw new Error('服务器未提供入局确认状态。');
+        entryReady = !supportsEntryReadiness || message.entry_ready;
+        pendingEntry = null;
         resumed = attemptedResumeId !== null && message.client_id === attemptedResumeId;
         clientId = message.client_id;
         spawn = coordinates(message.spawn) ? message.spawn.slice() : null;
@@ -780,6 +805,18 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
         }
         profiled = true;
         break;
+      case 'entry_status': {
+        if (!supportsEntryReadiness || !profiled || message.ready !== true || !pendingEntry) break;
+        const current = world.state(), entity = world.entity(message.entity_id);
+        if (!current.ready || message.world_epoch !== current.world_epoch || entity?.player_id !== clientId
+          || entity.generation !== message.generation || pendingEntry.world_epoch !== message.world_epoch
+          || pendingEntry.entity_id !== message.entity_id || pendingEntry.generation !== message.generation) break;
+        entryReady = true; pendingEntry = null;
+        postSession();
+        emit({ type: 'entry_status', world_epoch: message.world_epoch, entity_id: message.entity_id,
+          generation: message.generation, ready: true });
+        break;
+      }
       case 'room_state': {
         const initial = !room;
         room = validateRoom(message.room);

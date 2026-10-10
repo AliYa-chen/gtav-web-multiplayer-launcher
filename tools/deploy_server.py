@@ -272,7 +272,11 @@ def exists():return call([iptables,'-w','5','-C',*rule],False).returncode==0
 if operation in ('preflight','on'):
  workers=[]
  for row in subprocess.check_output(['ps','-eo','uid,args'],text=True).splitlines():
-  if 'nginx: worker process' in row:workers.append(int(row.split(None,1)[0]))
+  # SSH invokes this script through a shell heredoc. Its command line contains
+  # this source text too, so a substring match can mistake that root shell for
+  # an Nginx worker and reject every otherwise safe deployment.
+  match=re.fullmatch(r'\s*(\d+)\s+nginx: worker process(?: is shutting down)?\s*',row)
+  if match:workers.append(int(match.group(1)))
  assert workers and all(uid!=0 for uid in workers), 'Nginx workers must not run as root'
  call([iptables,'-w','5','-S','OUTPUT'])
 if operation=='on':

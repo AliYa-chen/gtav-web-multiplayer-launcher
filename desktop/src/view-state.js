@@ -91,7 +91,7 @@ export function remotePresentation(snapshot, version, platform = '', language = 
   const title = typeof localized.oltitle === 'string' ? localized.oltitle : config.oltitle;
   const releaseNotes = typeof localized.release_notes === 'string' ? localized.release_notes : config.release_notes;
   const latest = typeof config.latest_version === 'string' ? config.latest_version : '';
-  const update = isNewerVersion(latest, version);
+  const update = snapshot?.debug_local !== true && import.meta.env?.DEV !== true && isNewerVersion(latest, version);
   const available = Boolean(platform && config.downloads?.[platform]?.url && config.downloads?.[platform]?.sha256);
   return {
     loaded,
@@ -105,7 +105,8 @@ export function remotePresentation(snapshot, version, platform = '', language = 
     releaseNotes: typeof releaseNotes === 'string' ? releaseNotes : '',
     latest, update, downloadAvailable: update && available,
     versionText: !latest ? '-' : update ? t('update.newVersion', { version: latest }) : t('update.installed', { version }),
-    sourceText: loaded ? t('remote.updated') : '-',
+    sourceText: snapshot?.debug_local === true
+      ? (language === 'en' ? 'Local development' : '本机开发配置') : loaded ? t('remote.updated') : '-',
   };
 }
 export function launcherActions({ selected, busy, desktop, urls, lan, updateRequired = false }, remoteBusy = false) {
@@ -151,22 +152,27 @@ export function launchPreferences(value = {}) {
     preset: ['npc_male', 'npc_female', 'freemode_male', 'freemode_female'].includes(value.preset) ? value.preset : 'npc_male',
     map: value.map === 'env_test' ? 'env_test' : 'gtav' };
 }
-export function launchServer(value) {
+export function launchServer(value, { allowLocal = false } = {}) {
   const input = String(value || '').trim();
   if (!input || input.length > 2048 || /\s/.test(input) || input.startsWith('/')) throw new Error('请输入有效的服务器 IP 或地址。');
   const explicit = input.includes('://');
   let url;
   try { url = new URL(explicit ? input : 'wss://' + input); } catch { throw new Error('服务器地址格式无效。'); }
-  if (url.protocol !== 'wss:' || !url.hostname || url.username || url.password || url.hash) throw new Error('请输入不含用户名、密码或片段的 wss:// 地址。');
+  const localDevelopment = allowLocal === true && url.protocol === 'ws:'
+    && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
+  if ((!localDevelopment && url.protocol !== 'wss:') || !url.hostname || url.username || url.password || url.hash) throw new Error('请输入不含用户名、密码或片段的 wss:// 地址。');
   if (url.pathname === '/') url.pathname = '/ws';
   return url.href;
 }
 export function launchServerOptions(snapshot, language = 'zh-CN') {
   if (snapshot?.source !== 'remote' || snapshot.stale) return [];
   const config = snapshot.config || {}, values = config.servers || config.server || [];
+  // Native Rust emits this flag only for an explicit local debug config. A
+  // standalone debug app still uses a Vite production bundle (DEV is false).
+  const allowLocal = snapshot.debug_local === true;
   return (Array.isArray(values) ? values : [values]).slice(0, 32).flatMap(item => {
     try {
-      let server = launchServer(item.websocket_url || item.ws_url || item.address);
+      let server = launchServer(item.websocket_url || item.ws_url || item.address, { allowLocal });
       if (!item.websocket_url && !item.ws_url && !String(item.address).includes('://') && item.health_url) {
         const health = new URL(item.health_url), target = new URL(server), port = url => url.port || '443';
         const pathname = health.pathname.replace(/\/+$/, '');
@@ -177,10 +183,14 @@ export function launchServerOptions(snapshot, language = 'zh-CN') {
       let healthUrl = '';
       if (typeof item.health_url === 'string') {
         const health = new URL(item.health_url), endpoint = new URL(server);
-        if (health.protocol === 'https:' && !health.username && !health.password && !health.hash && health.hostname === endpoint.hostname && (health.port || '443') === (endpoint.port || '443')) healthUrl = health.href;
+        const localDevelopment = allowLocal && health.protocol === 'http:' && endpoint.protocol === 'ws:'
+          && ['127.0.0.1', 'localhost', '[::1]'].includes(health.hostname);
+        const port = url => url.port || (url.protocol === 'http:' || url.protocol === 'ws:' ? '80' : '443');
+        if ((health.protocol === 'https:' || localDevelopment) && !health.username && !health.password && !health.hash
+          && health.hostname === endpoint.hostname && port(health) === port(endpoint)) healthUrl = health.href;
       }
       const localized = item.i18n?.[language] || {};
-      return [{ address: String(item.address), server, health_url: healthUrl, label: [translateMessage(localized.name || item.name || '', language), translateMessage(localized.role || item.role || '', language), item.address].filter(Boolean).join(' · ') }];
+      return [{ address: String(item.address), server, health_url: healthUrl, ...(allowLocal ? { debug_local: true } : {}), label: [translateMessage(localized.name || item.name || '', language), translateMessage(localized.role || item.role || '', language), item.address].filter(Boolean).join(' · ') }];
     } catch { return []; }
   });
 }

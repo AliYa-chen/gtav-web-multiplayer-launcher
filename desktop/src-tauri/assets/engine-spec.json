@@ -3,8 +3,8 @@
   "purpose": "玩家提供原引擎；启动器仅在外部缓存生成离线和公共战局运行副本。",
   "original_sha256": "11ca8d2c04c5e843d18ff4aea4899d72c86973c6b031df334e67c446b2ae83e0",
   "original_bytes": 63201802,
-  "online_sha256": "c4ff9c8fc474d666616d525358a700ed0c73fea4f3742434715a960d5fde95b9",
-  "online_bytes": 63205956,
+  "online_sha256": "ada7ab8bc34aae4746911f3de9a45eb0a592b2dc87b0bd1e70a6c5b87956ff78",
+  "online_bytes": 63206305,
   "imported_functions": 85,
   "callback_import": 11,
   "exports": [
@@ -834,6 +834,173 @@
       "results": [
         "i32"
       ]
+    },
+    {
+      "name": "mpScreenFadeOut",
+      "function_index": 49037,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpIsScreenFadedIn",
+      "function_index": 49035,
+      "parameters": [],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpCreateCam",
+      "function_index": 48924,
+      "parameters": [
+        "i64",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpDestroyCam",
+      "function_index": 48928,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpDoesCamExist",
+      "function_index": 48930,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpSetCamActive",
+      "function_index": 48931,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpIsCamActive",
+      "function_index": 48932,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpIsCamRendering",
+      "function_index": 48933,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpGetRenderingCam",
+      "function_index": 48934,
+      "parameters": [],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpSetCamCoord",
+      "function_index": 48944,
+      "parameters": [
+        "i32",
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetCamRot",
+      "function_index": 48945,
+      "parameters": [
+        "i32",
+        "i64",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetCamFov",
+      "function_index": 48946,
+      "parameters": [
+        "i32",
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpCamFov",
+      "function_index": 49042,
+      "parameters": [],
+      "results": [
+        "f32"
+      ]
+    },
+    {
+      "name": "mpRenderScriptCams",
+      "function_index": 48922,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpLoadCloudHat",
+      "function_index": 52831,
+      "parameters": [
+        "i64",
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpUnloadCloudHat",
+      "function_index": 52832,
+      "parameters": [
+        "i64",
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpGetCloudHatAlpha",
+      "function_index": 52835,
+      "parameters": [],
+      "results": [
+        "f32"
+      ]
+    },
+    {
+      "name": "mpPlayLongSwitchSound",
+      "function_index": 22863,
+      "parameters": [
+        "i64",
+        "i32"
+      ],
+      "results": []
     },
     {
       "name": "mpSetPlayerControl",

@@ -1,7 +1,7 @@
 // 游戏页直接持有公共战局连接；引擎线程通过共享内存读取最新快照，避免阻塞帧循环。
 import { getLanguage, onLanguageChange, translateText, localizeServerError } from '../i18n.js';
 
-export function installGameAdapter(worker, network = null, { watchOnlineConfiguration } = {}) {
+export function installGameAdapter(worker, network = null, { watchOnlineConfiguration, onEntryState, entryAttempt = 0, reducedMotion = false } = {}) {
   // 正常在线游戏直接连接本页网络会话，避免同一端口多个标签页串用身份和外观。
   // 广播频道仅保留给独立探针或旧测试入口。
   const channel = network ? null : new BroadcastChannel('gta5-public-bridge-v1');
@@ -26,6 +26,30 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
   let nativeHud = false, lastNetworkNotice = '', lastGamePhase = '', lastKills = null;
   let shared = null;
   let engineReady = false;
+  let entry = { attempt_id: entryAttempt, cancelled: false, reduced_motion: reducedMotion === true };
+  let nativeEntry = null, entrySentAt = -Infinity;
+  let entryTraceKey = '', entryTraceSignature = '';
+  const entryTrace = [];
+  function entryIdentity() {
+    const identity = world?.entities?.find(entity => entity.player_id === session.client_id);
+    return identity && typeof identity.entity_id === 'string' && identity.entity_id
+      && Number.isSafeInteger(identity.generation) && identity.generation >= 1 ? identity : null;
+  }
+  function entryState() {
+    if (closed || typeof onEntryState !== 'function') return;
+    const identity = entryIdentity();
+    const current = identity && nativeEntry?.attempt_id === entry.attempt_id && nativeEntry?.world_epoch === world?.world_epoch
+      && nativeEntry?.client_id === session.client_id && nativeEntry?.generation === identity.generation ? nativeEntry : null;
+    onEntryState({ attemptId: entry.attempt_id, connected: session.connected === true,
+      networkReady: session.connected === true && world?.ready === true,
+      serverVersion: session.connected ? session.server_version || '' : '',
+      engineReady, worldEpoch: world?.world_epoch || '', characterReady: current?.character_ready === true,
+      sceneReady: current?.scene_ready === true, cameraActive: current?.camera_active === true,
+      cameraPhase: current?.camera_phase === 'complete' && current.camera_done && !current.cleanup_pending ? 'finished' : current?.camera_active ? 'active' : '',
+      cameraOutcome: current?.camera_phase === 'fallback' && current.camera_done && !current.cleanup_pending ? 'skipped' : '',
+      serverReady: session.entry_readiness !== true || session.entry_ready === true,
+      ...(current?.error ? { error: current.error } : {}) });
+  }
   let timer = 0;
   let closed = false;
   // Worker status types interleave every tick. Remember each type independently
@@ -208,6 +232,7 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
   crashes.onmessage = ({ data }) => {
     if (!data || !data.text) return;
     reportStatus({ phase: 'engine_crash', thread: data.thread, text: data.text, tail: data.tail || [] });
+    onEntryState?.({ attemptId: entry.attempt_id, error: getLanguage() === 'en' ? 'The game engine stopped. Please retry.' : '游戏引擎已停止，请重试。' });
   };
 
   function publish() {
@@ -215,7 +240,7 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
     if (!shared || closed) return;
     const packet = { ...session, peers: [...peers.values()], shots, combat, controls,
       notices: notices.map(({ id, value }) => ({ id, text: localize(value, true) })),
-      language: getLanguage(), engine_ready: engineReady, world, world_events: worldEvents,
+      language: getLanguage(), engine_ready: engineReady, entry, world, world_events: worldEvents,
       remote_config: remoteConfig, world_shots: worldShots, world_projectiles: [...projectiles.values()],
       world_areas: [...areaEffects.values()], world_effects: effectEvents, collision_queries: [...collisionQueries.values()] };
     const bytes = new TextEncoder().encode(JSON.stringify(packet));
@@ -235,7 +260,12 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
 
   const receive = (data) => {
     if (!data || typeof data !== 'object') return;
-    if (data.type === 'network_status') {
+    if (data.type === 'entry_status') {
+      const identity = entryIdentity();
+      if (session.connected && world?.ready && identity && data.ready === true && data.world_epoch === world.world_epoch
+          && data.entity_id === identity.entity_id && data.generation === identity.generation) session.entry_ready = true;
+      entryState(); schedule(); return;
+    } else if (data.type === 'network_status') {
       networkMessage = data.connected ? text('服务器在线 · ' + (data.members || 1) + ' 位玩家', 'Server online · ' + (data.members || 1) + ' players')
         : (data.text || text('服务器连接中断，正在自动重连…', 'Connection lost. Reconnecting automatically…'));
       const key = data.connected ? 'online:' + (data.members || 1) : 'offline';
@@ -246,6 +276,7 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
           : text('连接中断，正在自动重新连接…', 'Connection lost. Reconnecting automatically…', '連線中斷，正在自動重新連線…'));
       } else if (data.phase === 'notice' && data.text && !/武器/.test(data.text)) notify(String(data.text).slice(0, 200));
       renderHud();
+      entryState();
       return;
     } else if (data.type === 'combat_feedback') {
       combatFeedback(data);
@@ -254,6 +285,8 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
       if (world?.world_epoch && world.world_epoch !== data.world_epoch) {
         worldEvents = []; worldShots = []; seenWorldEvents.clear(); projectiles.clear(); areaEffects.clear(); effectEvents = [];
         collisionQueries.clear();
+        nativeEntry = null; entrySentAt = -Infinity;
+        if (session.entry_readiness) session.entry_ready = false;
       }
       world = { schema_version: 2, world_epoch: data.world_epoch, world_revision: data.world_revision,
         world_tick: data.world_tick, stream_seq: data.stream_seq, ready: data.ready === true,
@@ -311,6 +344,7 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
     } else if (data.type === 'session') {
       const previousId = session.client_id;
       session = { connected: data.connected === true, client_id: data.client_id || null,
+        server_version: typeof data.server_version === 'string' && /^\d+\.\d+\.\d+$/.test(data.server_version) ? data.server_version : '',
         members: Array.isArray(data.members) ? data.members : [],
         avatar: data.avatar === 'female' ? 'female' : 'male',
         preset: data.preset || (data.avatar === 'female' ? 'freemode_female' : 'freemode_male'),
@@ -320,11 +354,12 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
         weapon_rules: Array.isArray(data.weapon_rules) ? data.weapon_rules : [],
         session_policy: data.session_policy || null,
         world_v2: data.world_v2 === true,
+        entry_readiness: data.entry_readiness === true, entry_ready: data.entry_ready === true,
         resumed: data.resumed === true,
         resume_state_ready: data.resume_state_ready === true,
         resume_state: data.resume_state || null,
         resume_position: data.resume_position || null, spawn: data.spawn || null };
-      if (!session.connected || previousId !== session.client_id) collisionQueries.clear();
+      if (!session.connected || previousId !== session.client_id) { collisionQueries.clear(); nativeEntry = null; entrySentAt = -Infinity; }
       if (session.client_id && previousId && session.client_id !== previousId) { peers.clear(); combatById.clear(); }
       if (session.connected && (data.world_v2 === false || data.melee_events === false) && !oldServerNotice) {
         oldServerNotice = true;
@@ -358,6 +393,7 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
       shots.push({ id: ++nextShotId, player_id: data.player_id, event: data.event });
       if (shots.length > 32) shots.shift();
     } else return;
+    entryState();
     schedule();
   };
   if (network) network.setReceiver(receive);
@@ -366,7 +402,39 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
   function onWorkerMessage(data) {
     const message = data?.multiplayer;
     if (!message) return;
-    if (message.type === 'memory') {
+    if (message.type === 'entry_status') {
+      const identity = entryIdentity();
+      if (!identity || !entry.attempt_id || message.attempt_id !== entry.attempt_id || message.world_epoch !== world?.world_epoch
+          || message.client_id !== session.client_id || message.generation !== identity.generation) return;
+      nativeEntry = message; entryState();
+      // The host callback may synchronously cancel, reconnect or start another
+      // attempt. Recheck its identity before asking the server for admission.
+      if (!closed && !entry.cancelled && session.connected && world?.ready && session.entry_readiness && !session.entry_ready
+          && entry.attempt_id === message.attempt_id && world.world_epoch === message.world_epoch
+          && entryIdentity() === identity
+          && message.character_ready === true && message.scene_ready === true && message.camera_done === true
+          && !message.cleanup_pending && performance.now() - entrySentAt >= 1000) {
+        entrySentAt = performance.now();
+        sendLocal({ type: 'entry_ready', world_epoch: world.world_epoch, entity_id: identity.entity_id, generation: identity.generation });
+      }
+      const traceKey = [message.attempt_id, message.client_id, message.world_epoch, message.generation].join(':');
+      if (entryTraceKey !== traceKey) { entryTraceKey = traceKey; entryTrace.length = 0; entryTraceSignature = ''; }
+      const entrySample = { camera: message.camera_phase, camera_stage: message.camera_stage,
+        camera_active: message.camera_active === true, cloud_active: message.cloud_active === true,
+        sound_cues: message.sound_cues || 0, sound_reason: message.sound_reason || null,
+        character_ready: message.character_ready, scene_ready: message.scene_ready,
+        cleanup_pending: message.cleanup_pending, reason: message.reason };
+      const entrySampleSignature = JSON.stringify(entrySample);
+      if (entrySampleSignature !== entryTraceSignature) {
+        entryTraceSignature = entrySampleSignature;
+        entryTrace.push({ at_ms: Math.round(performance.now()), ...entrySample });
+        if (entryTrace.length > 20) entryTrace.shift();
+      }
+      // Keep short transitions through HTTP log coalescing, including failed
+      // camera activation. A later admission must not erase what actually ran.
+      reportStatus({ phase: 'entry', ...entrySample, transitions: [...entryTrace] });
+      return;
+    } else if (message.type === 'memory') {
       shared = message;
       publish();
       sendLocal({ type: 'bridge_ready' });
@@ -448,6 +516,9 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
       reportStatus({ phase: 'melee_sample', request_id: message.request_id,
         actor_entity_id: message.actor_entity_id, source: message.source });
     } else if (message.type === 'bridge_error') {
+      entry = { ...entry, cancelled: true }; nativeEntry = null; publish();
+      onEntryState?.({ attemptId: entry.attempt_id, error: getLanguage() === 'en'
+        ? 'Game synchronization stopped. Please retry.' : '游戏同步已停止，请重试。' });
       nativeHud = false;
       gameMessage = text('角色同步已暂停：' + message.message, 'Character synchronization paused: '
         + String(message.message).replace('同步缓冲区分配失败', 'Could not allocate synchronization buffers'));
@@ -470,9 +541,17 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
     channel?.close();
     crashes.close();
   }, { once: true });
-  return { onWorkerMessage, setEngineReady() {
+  return { onWorkerMessage, setEntryAttempt(attemptId, options = {}) {
+    if (closed || !Number.isSafeInteger(attemptId) || attemptId <= 0) return;
+    entry = { attempt_id: attemptId, cancelled: options.cancelled === true, reduced_motion: options.reducedMotion === true };
+    if (session.entry_readiness) session.entry_ready = false;
+    nativeEntry = null; entrySentAt = -Infinity; entryState(); publish();
+  }, cancelEntry() {
+    entry = { ...entry, cancelled: true }; publish();
+  }, setEngineReady() {
     if (closed || engineReady) return;
     engineReady = true;
+    entryState();
     schedule();
   } };
 }

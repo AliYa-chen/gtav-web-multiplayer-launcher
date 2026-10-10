@@ -63,10 +63,10 @@ final class WorldService {
         catch(WorldRegistry.Rejection error){throw new IllegalStateException(error);}
     }
     void worldParticipant(String id,boolean enabled){
-        if(enabled){worldParticipants.add(id);ensurePopulation(id);assignPopulation();maintainAi();}
+        if(enabled && combat.isEntryReady(id)){worldParticipants.add(id);ensurePopulation(id);assignPopulation();maintainAi();}
         else worldParticipants.remove(id);
     }
-    void physicsParticipant(String id,boolean enabled){collision.observer(id,enabled);}
+    void physicsParticipant(String id,boolean enabled){collision.observer(id,enabled && combat.isEntryReady(id));}
     void collisionResult(String id,Map<String,Object> message)throws Problem{collision.accept(id,message,now());}
     List<Map<String,Object>> collisionQueries(){return collision.drain();}
     Map<String,Object> collisionStatus(){return collision.status();}
@@ -194,6 +194,22 @@ final class WorldService {
         profile.put("session_policy",sessionPolicy());
         return profile;
     }
+    void entryReadiness(String id, boolean ready) {
+        combat.setEntryReady(id, ready);
+        try {
+            if (!ready) {
+                worldParticipants.remove(id); collision.observer(id,false);
+                registry.disconnectOwnerTrusted(id,now());
+                offers.entrySet().removeIf(item -> id.equals(item.getValue().owner));
+                meleeQueues.remove(id);
+            } else {
+                Entity entity=registry.playerEntity(id);
+                if(entity!=null && (!id.equals(entity.ownerId()) || entity.leaseUntilTick()<=now()))
+                    registry.grantOwnerTrusted(entity.entityId(),id,entity.revision(),now()+5000,now());
+            }
+        } catch(WorldRegistry.Rejection error) { throw new IllegalStateException(error); }
+        maintainAi();
+    }
     void setConnected(String id,boolean connected){
         combat.setConnected(id,connected);
         if(!connected){
@@ -276,7 +292,7 @@ final class WorldService {
         for(String actor:new ArrayList<>(meleeQueues.keySet())){
             ArrayDeque<PendingMelee> queue=meleeQueues.get(actor);
             Entity player=registry.playerEntity(actor);
-            if(player==null || player.ownerId()==null || !player.components().combat().alive()){
+            if(player==null || !combat.isEntryReady(actor) || player.ownerId()==null || !player.components().combat().alive()){
                 meleeQueues.remove(actor);continue;
             }
             PendingMelee pending=queue.peekFirst();if(pending==null){meleeQueues.remove(actor);continue;}
@@ -431,7 +447,11 @@ final class WorldService {
         }}while(changed);
         return values;
     }
+    private void requireEntryReady(String actor)throws Problem {
+        if(!combat.isEntryReady(actor))throw new Problem("entry_not_ready","角色和场景加载完成后才能参与战局");
+    }
     void ready(String actor,Map<String,Object> input)throws Problem,WorldRegistry.Rejection{
+        requireEntryReady(actor);
         fields(input,"type","world_epoch","entity_id","owner_epoch");epoch(input);
         String id=text(input.get("entity_id"),128);long leaseEpoch=integer(input.get("owner_epoch"),0,9_007_199_254_740_991L);
         Entity entity=required(id);Offer offer=offers.get(id);
@@ -441,10 +461,12 @@ final class WorldService {
         maintainAi();
     }
     void entityInput(String actor,Map<String,Object> input)throws Problem,WorldRegistry.Rejection{
+        requireEntryReady(actor);
         fields(input,"type","world_epoch","entity_id","owner_epoch","input_seq","based_on_revision","transform","view");epoch(input);
         Proposal proposal=parseProposal(input);submitBatch(actor,List.of(proposal));
     }
     void entityBatch(String actor,Map<String,Object> input)throws Problem,WorldRegistry.Rejection{
+        requireEntryReady(actor);
         fields(input,"type","world_epoch","updates");epoch(input);
         if(!(input.get("updates")instanceof List<?> values)||values.isEmpty()||values.size()>24)
             throw new Problem("invalid_batch","更新批次必须包含1–24个实体");
@@ -481,6 +503,7 @@ final class WorldService {
             integer(input.get("based_on_revision"),0,9_007_199_254_740_991L),transform(input.get("transform")),view);
     }
     List<Map<String,Object>> interaction(String actor,Map<String,Object> input)throws Problem,WorldRegistry.Rejection{
+        requireEntryReady(actor);
         fields(input,"type","world_epoch","request_id","action","entity_id","seat","expected_revision","target_generation");epoch(input);
         String request=text(input.get("request_id"),64),action=text(input.get("action"),40);
         if(!Set.of("enter_vehicle","leave_vehicle","melee","detonate").contains(action))
@@ -531,6 +554,7 @@ final class WorldService {
             if(victim!=null){
                 if(victim.kind()!=Kind.PED || victim.entityId().equals(player.entityId()) || victim.components().combat()==null)
                     throw new Problem("invalid_target","近战目标必须是另一个角色");
+                if(victim.playerId()!=null && !combat.isEntryReady(victim.playerId()))throw new Problem("entry_not_ready","目标尚未完成入局");
                 if(!victim.components().combat().alive())throw new Problem("dead_entity","死亡角色不能参与近战");
                 String geometry=meleeGeometry(player,victim);
                 if(geometry!=null)throw new Problem(geometry,"too_far".equals(geometry)?"近战距离或高度差超出范围":"近战目标必须位于角色前方");
@@ -582,7 +606,7 @@ final class WorldService {
                 || !candidate.components().combat().alive() || meleeGeometry(player,candidate)!=null)continue;
             if(candidate.playerId()!=null){Map<String,Object> profile=profile(candidate.playerId());
                 // 断线角色已撤销所有权，不能被继续当作近战活体目标。
-                if(profile==null || candidate.ownerId()==null)continue;
+                if(profile==null || !combat.isEntryReady(candidate.playerId()) || candidate.ownerId()==null)continue;
             }else if(candidate.ownerId()==null)continue;
             double distance=position(player).distance(position(candidate));
             if(distance<nearest){nearest=distance;target=candidate;}
@@ -600,6 +624,7 @@ final class WorldService {
         return null;
     }
     List<Map<String,Object>> simulation(String actor,Map<String,Object> input)throws Problem,WorldRegistry.Rejection{
+        requireEntryReady(actor);
         fields(input,"type","world_epoch","entity_id","owner_epoch","input_seq","kind","reason","health","engine_health","body_health","target_entity_id","target_generation");epoch(input);
         Entity entity=required(text(input.get("entity_id"),128));String kind=text(input.get("kind"),32);
         long ownerEpoch=integer(input.get("owner_epoch"),0,9_007_199_254_740_991L),seq=integer(input.get("input_seq"),0,9_007_199_254_740_991L);
@@ -641,6 +666,7 @@ final class WorldService {
             if(rule==null || !Set.of("hitscan","shotgun").contains(rule.mode()))throw new Problem("invalid_target","该NPC没有服务器批准的枪械");
             Entity victim=required(text(input.get("target_entity_id"),128));
             long generation=integer(input.get("target_generation"),1,9_007_199_254_740_991L);
+            if(victim.playerId()!=null && !combat.isEntryReady(victim.playerId()))throw new Problem("entry_not_ready","目标尚未完成入局");
             if(victim.generation()!=generation || !ai.authorizesShot(entity,victim,now()))
                 throw new Problem("stale_generation","NPC任务目标已失效");
             if(position(entity).distance(position(victim))>40)throw new Problem("too_far","警员射击距离超出已确认位置范围");
@@ -655,6 +681,8 @@ final class WorldService {
         lifeReports.put(key,seq);while(lifeReports.size()>2048)lifeReports.remove(lifeReports.keySet().iterator().next());return events;
     }
     private List<Map<String,Object>> applyDamage(Entity attacker,Entity victim,int damage,long tick)throws WorldRegistry.Rejection{
+        if((attacker.playerId()!=null && !combat.isEntryReady(attacker.playerId()))
+            || (victim.playerId()!=null && !combat.isEntryReady(victim.playerId())))return List.of();
         Combat life=victim.components().combat(),a=attacker.components().combat();int amount=Math.min(damage,life.health()),health=life.health()-amount;
         Map<String,Combat> changes=new LinkedHashMap<>();changes.put(victim.entityId(),new Combat(health,life.maxHealth(),life.kills(),life.deaths()+(health==0?1:0),health==0 && victim.playerId()!=null?tick+4000:0));
         if(health==0)changes.put(attacker.entityId(),new Combat(a.health(),a.maxHealth(),a.kills()+1,a.deaths(),a.respawnAtTick()));

@@ -9,8 +9,12 @@ export function validHealth(value) {
 }
 function trustedHealthUrl(option) {
   const health = new URL(option.health_url), endpoint = new URL(option.server);
-  if (health.protocol !== 'https:' || health.username || health.password || health.hash
-    || health.hostname !== endpoint.hostname || (health.port || '443') !== (endpoint.port || '443')
+  const localDevelopment = option.debug_local === true && health.protocol === 'http:' && endpoint.protocol === 'ws:'
+    && ['127.0.0.1', 'localhost', '[::1]'].includes(health.hostname) && health.hostname === endpoint.hostname;
+  const port = (url) => url.port || (url.protocol === 'http:' || url.protocol === 'ws:' ? '80' : '443');
+  if ((!localDevelopment && (health.protocol !== 'https:' || endpoint.protocol !== 'wss:'))
+    || health.username || health.password || health.hash || endpoint.username || endpoint.password || endpoint.hash
+    || health.hostname !== endpoint.hostname || port(health) !== port(endpoint)
     || option.health_url.length > 2048) throw new Error('invalid_health_url');
   return health.href;
 }

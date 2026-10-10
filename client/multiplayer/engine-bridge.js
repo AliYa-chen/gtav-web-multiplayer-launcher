@@ -67,6 +67,65 @@ self.prepareMultiplayerBridge = function (imports) {
     let noticeBuffer = 0, lastNoticeAttempt = -Infinity, nativeHudAvailable = null;
     let shotBuffer = 0, shotSampleAt = -Infinity, weaponSample = null, pendingShots = [];
     let worldReadinessAt = -Infinity, worldReadinessSignature = '';
+    const entryCamera = self.createOnlineEntryCamera?.({ ex, memory });
+    let entryStatusAt = -Infinity, entrySignature = '', entryControlsHeld = false, entryFrozenPed = 0, entryCompletedKey = '';
+    let entryCache = { key: '', ped: 0, position: null, heading: 90, character: false, scene: false };
+    let entryCameraStatus = { done: false, cleanup_pending: false, camera_active: false, phase: 'waiting' };
+    const entryEnabled = () => Number.isSafeInteger(packet?.entry?.attempt_id) && packet.entry.attempt_id > 0;
+    const entryConnectionKey = () => packet?.entry?.attempt_id + ':' + packet?.client_id + ':' + (packet?.world?.world_epoch || '');
+    const entryFinished = () => !entryEnabled() || (!stopped && !packet?.entry?.cancelled && packet?.connected === true
+      && packet?.world?.ready === true && (packet?.entry_readiness !== true || packet?.entry_ready === true)
+      && (entryCompletedKey === entryConnectionKey() || (entryCache.character && entryCache.scene
+        && entryCameraStatus.done && !entryCameraStatus.cleanup_pending)));
+    function entryIdentity() { return packet?.world?.entities?.find(entity => entity.player_id === packet?.client_id); }
+    function releaseEntryInput() {
+      if (entryFrozenPed && ex.mpExists(entryFrozenPed)) ex.mpFreeze?.(entryFrozenPed, 0);
+      entryFrozenPed = 0;
+      if (entryControlsHeld && !bootstrapControlsHeld) ex.mpSetPlayerControl?.(ex.mpPlayerId(), 1, 0);
+      entryControlsHeld = false;
+    }
+    function holdEntryInput(ped) {
+      if (!ped || !ex.mpExists(ped)) return;
+      if (entryFrozenPed && entryFrozenPed !== ped && ex.mpExists(entryFrozenPed)) ex.mpFreeze?.(entryFrozenPed, 0);
+      entryFrozenPed = ped; ex.mpFreeze?.(ped, 1);
+      ex.mpSetPlayerControl?.(ex.mpPlayerId(), 0, 0); entryControlsHeld = true;
+      pendingShots = []; weaponSample = null;
+    }
+    function updateEntry(now, canStart = false) {
+      if (!entryEnabled()) return;
+      const identity = entryIdentity(), key = packet.entry.attempt_id + ':' + packet.client_id + ':'
+        + (packet.world?.world_epoch || '') + ':' + (identity?.generation ?? '');
+      if (entryCache.key !== key) entryCache = { key, ped: 0, position: null, heading: 90, character: false, scene: false };
+      const live = !stopped && packet.connected === true && !packet.entry.cancelled;
+      const entered = live && entryCompletedKey === entryConnectionKey();
+      if (entryCompletedKey && entryCompletedKey !== entryConnectionKey()) entryCompletedKey = '';
+      const cloudAllowed = publicRulesActive && scriptPolicy?.allowed?.size === 0;
+      // Admission latches the observed outcome. A skipped/failed native camera
+      // must never be reported as a successfully rendered transition afterward.
+      if (!entered) entryCameraStatus = entryCamera?.tick({
+        attempt_id: packet.entry.attempt_id + ':' + (identity?.generation ?? ''),
+        world_epoch: packet.world?.world_epoch, connected: live,
+        engine_ready: packet.engine_ready === true, world_ready: packet.world?.ready === true,
+        character_ready: entryCache.character, collision_ready: entryCache.scene,
+        ped: entryCache.ped, position: entryCache.position, heading: entryCache.heading, now,
+        reduced_motion: packet.entry.reduced_motion === true,
+        cloud_control_allowed: cloudAllowed,
+        can_start: canStart && entryCache.character && cloudAllowed,
+      }) || { done: true, cleanup_pending: false, camera_active: false, phase: 'fallback', reason: 'unsupported' };
+      if (!live && !entryCameraStatus.cleanup_pending) releaseEntryInput();
+      const report = { type: 'entry_status', attempt_id: packet.entry.attempt_id,
+        world_epoch: packet.world?.world_epoch || '', client_id: packet.client_id,
+        generation: identity?.generation, camera_stage: entryCameraStatus.camera_stage || null, character_ready: live && (entered || entryCache.character),
+        scene_ready: live && (entered || entryCache.scene), camera_done: entryCameraStatus.done === true,
+        camera_phase: entryCameraStatus.phase, camera_active: entryCameraStatus.camera_active === true,
+        cleanup_pending: entryCameraStatus.cleanup_pending === true, reason: entryCameraStatus.reason || null,
+        cloud_active: entryCameraStatus.cloud_active === true,
+        sound_cues: entryCameraStatus.sound_cues || 0, sound_reason: entryCameraStatus.sound_reason || null };
+      const signature = JSON.stringify(report);
+      if (signature !== entrySignature || now - entryStatusAt >= 1000) {
+        entrySignature = signature; entryStatusAt = now; post(report);
+      }
+    }
     let muzzleNameBuffer = 0;
     let radarBuffer = 0, radarKey = '', radarAttemptKey = '', radarAttemptAt = -Infinity, radarSignature = '';
     let visualReportAt = -Infinity, visualPlayed = 0, visualExpired = 0, visualSignature = '';
@@ -236,7 +295,7 @@ self.prepareMultiplayerBridge = function (imports) {
     }
     // 每个有效 owner 回调只读取本地武器脉冲；较重的实体更新仍每 40ms 执行。
     function sampleShots(now) {
-      if (now - shotSampleAt < 5 || !packet?.connected || !initialPlacement || modelRestore) return;
+      if (now - shotSampleAt < 5 || !packet?.connected || !initialPlacement || modelRestore || !entryFinished()) return;
       shotSampleAt = now;
       const authority = authorityStates.get(packet.client_id);
       const ped = ex.mpGetPlayerPed(-1);
@@ -326,7 +385,7 @@ self.prepareMultiplayerBridge = function (imports) {
           && (!scriptPolicy || nextPolicy.revision > scriptPolicy.revision)) {
         scriptPolicy = { revision: nextPolicy.revision, allowed: new Set(nextPolicy.allowed_scripts) };
       }
-      if (online && bootstrapControlsHeld) {
+      if (online && bootstrapControlsHeld && entryFinished()) {
         ex.mpSetPlayerControl?.(ex.mpPlayerId(), 1, 0); bootstrapControlsHeld = false;
       }
       const blocked = online && (scriptPolicy ? !scriptPolicy.allowed.has(name)
@@ -791,10 +850,14 @@ self.prepareMultiplayerBridge = function (imports) {
     tick = (thread) => {
       try {
         const now = performance.now();
-        if (stopped) return;
         // 跳过没有游戏脚本资源管理器的线程，不能从任意帧回调直接写实体。
         const handler = Number(ex.mpGetCurrentHandler());
         if (Number(ex.mpGetActiveThread()) !== thread || !handler) return;
+        if (stopped) {
+          entryCamera?.cancel();
+          try { updateEntry(now, false); if (!entryCameraStatus.cleanup_pending) releaseEntryInput(); } catch { /* Retry cleanup on its owner. */ }
+          return;
+        }
         if (!scratch) {
           scratch = Number(ex.mpAlloc(128n));
           block = Number(ex.mpAlloc(BigInt(CAPACITY + 16)));
@@ -803,6 +866,7 @@ self.prepareMultiplayerBridge = function (imports) {
           post({ type: 'memory', memory, block, capacity: CAPACITY });
         }
         readPacket();
+        updateEntry(now, false);
         // 服务端快照 ready 只表示网络基线完整，不能证明本地引擎完成场景加载。
         // 页面收到 GPU 的真实场景/稳定帧事件后通过共享快照打开此门槛。
         // 启动阶段只分配通信缓冲、读取快照；原VM继续完成加载，不创建实体、
@@ -811,14 +875,15 @@ self.prepareMultiplayerBridge = function (imports) {
         worldEntities?.suppressPopulation(packet);
         environmentBridge?.suppressLocalDispatch(packet);
         if (!useOwner(thread, handler, now)) return;
+        if (entryEnabled() && packet?.connected && !packet.entry.cancelled && !entryFinished()) holdEntryInput(ex.mpGetPlayerPed(-1));
         worldEntities?.renderEffects?.(packet, now);
         sampleShots(now);
         const meleePed = ex.mpGetPlayerPed(-1);
         collisionBridge?.tick(packet, now, meleePed, {
-          localReady: initialPlacement && avatarInitialized && !avatarChangeRequested && !modelRestore,
+          localReady: entryFinished() && initialPlacement && avatarInitialized && !avatarChangeRequested && !modelRestore,
         });
         worldEntities?.sampleMelee(packet, now, meleePed, {
-          localReady: initialPlacement && avatarInitialized && !avatarChangeRequested && !modelRestore
+          localReady: entryFinished() && initialPlacement && avatarInitialized && !avatarChangeRequested && !modelRestore
             && Boolean(meleePed && (ex.mpGetModel(meleePed) >>> 0) === avatarTarget),
         });
         if (now - lastTick < 40) return;
@@ -862,7 +927,7 @@ self.prepareMultiplayerBridge = function (imports) {
         updateWorld(now);
         const currentPed = ex.mpGetPlayerPed(-1);
         const worldStatus = worldEntities?.update(packet, now, currentPed, {
-          localReady: initialPlacement && avatarInitialized && !avatarChangeRequested && !modelRestore
+          localReady: entryFinished() && initialPlacement && avatarInitialized && !avatarChangeRequested && !modelRestore
             && (!currentPed || (ex.mpGetModel(currentPed) >>> 0) === avatarTarget),
         }) || { active: false };
         // 等待服务器恢复快照，避免刷新时先随机换装或上报单机出生坐标。
@@ -1048,6 +1113,21 @@ self.prepareMultiplayerBridge = function (imports) {
           initialPlacement = true;
           post({ type: 'game_status', connected: true, peer_count: replicas.size, spawned: true });
         }
+        if (entryEnabled()) {
+          const identity = entryIdentity();
+          entryCache.ped = localPed; entryCache.position = [...position]; entryCache.heading = ex.mpHeading(localPed);
+          entryCache.character = Boolean(identity && initialPlacement && avatarInitialized && !avatarChangeRequested
+            && !modelRestore && appearancePed === localPed && authority?.alive !== false
+            && (ex.mpGetModel(localPed) >>> 0) === avatarTarget && ex.mpExists(localPed));
+          try {
+            entryCache.scene = entryCache.character && Boolean(ex.mpCollisionLoadedAroundEntity?.(localPed))
+              && !ex.mpWaitingForWorldCollision?.(localPed);
+          } catch { entryCache.scene = false; }
+          updateEntry(now, true);
+          if (!entryFinished()) { holdEntryInput(localPed); return; }
+          entryCompletedKey = entryConnectionKey();
+          releaseEntryInput();
+        }
         maintainPublicRadar(now, localPed, authority?.alive);
         const model = ex.mpGetModel(localPed) >>> 0;
         const heading = ((ex.mpHeading(localPed) % 360) + 360) % 360;
@@ -1083,8 +1163,10 @@ self.prepareMultiplayerBridge = function (imports) {
         }
       } catch (error) {
         // 不能把 JS 异常抛回 scrThread::Run；它必须继续执行原来的 TLS 清理路径。
-        stopped = true;
+        stopped = true; entryCompletedKey = ''; entryCache.character = entryCache.scene = false;
+        entryCamera?.cancel();
         try { post({ type: 'bridge_error', message: String(error) }); } catch { /* 不向 WASM 抛异常 */ }
+        try { updateEntry(performance.now(), false); } catch { /* Preserve pending owner cleanup. */ }
       }
     };
   };
