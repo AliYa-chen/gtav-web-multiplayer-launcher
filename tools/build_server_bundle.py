@@ -50,7 +50,7 @@ def main(argv=None):
         'launcher_minimum': '0.2.0', 'java_minimum': 17,
         'public_session': 'PUBLIC', 'map': 'gta5', 'mode': 'sandbox',
         'game_resources_required': False,
-        'validation': '统一世界、共同环境、共享执法及车辆协议回归通过；实际游戏及八人持续玩法仍需验收。',
+        'validation': '统一世界、共同环境、共享执法及车辆协议回归通过。',
         'files': [],
     }
     bodies = {}

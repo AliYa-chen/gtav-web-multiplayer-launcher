@@ -150,7 +150,7 @@ Windows 将证书导入“受信任的根证书颁发机构”；macOS 将 BinGo
 启动器仅允许本机局域网 IPv4 地址提供共享服务，并校验请求目标及来源；不将资源服务作为公网下载站。
 HTTPS 服务保留游戏需要的跨域隔离响应头、Range 和批量资源读取。普通本机 `127.0.0.1` 游戏服务不受影响。
 窗口保持固定大小，禁止最大化和调整尺寸；长内容仅在卡片或设置面板内滚动。
-构建工作流不创建 GitHub Releases。
+统一工作流自动构建启动器并发布独立 Launcher Release。
 
 ## 开发和构建
 
@@ -176,13 +176,13 @@ npm run tauri -- build --no-bundle
 
 本机 macOS 命令优先使用 PATH 中的 Cargo；找不到时检查用户 Rust 目录和项目 `archive/cache/toolchains/rust`，自动补齐工具链环境，无需管理员权限。
 
-产物位于 `desktop/src-tauri/target/release/`。GitHub 的“构建 macOS 启动器”和“构建 Windows 启动器”是两个独立工作流，仅允许手动触发，普通提交和标签不会自动编译。它们只 checkout 源码，不能访问维护者的本地游戏目录。首次流程运行前需提交 `Cargo.lock` 和 `package-lock.json`，以固定依赖。
+产物位于 `desktop/src-tauri/target/release/`。GitHub 的统一 `release.yml` 在合并 `main` 后读取组件版本及 `release-notes/` 更新 MD，自动构建 Windows x64、macOS ARM64 和 Java 服务端，并分别发布 Launcher/Server Releases。工作流只 checkout 源码，不能访问维护者本地游戏目录。首次流程运行前需提交 `Cargo.lock` 和 `package-lock.json`，以固定依赖。
 
 固定 CA 内容已作为源码常量内置，构建不需要额外设置证书路径或 Secrets。
 运行用户不需要上传证书；朋友仅从 HTTP 引导页下载公共 CA 并手动安装信任。
-工作流只上传构建 Artifact，不创建 GitHub Releases。
+构建 Artifact 用于工作流之间传递产物，最终附件经版本、架构与 SHA-256 核验后自动公开到对应 Release。
 
-构建工作流使用中文步骤名称，只保留环境准备、依赖安装、编译缓存和产物打包上传，以及 macOS 签名校验。打包时不执行维护者本地回归，也不单独重复执行前端构建；Tauri 的 `beforeBuildCommand` 会自动构建前端。维护者本地验证文件不随源码分发。
+构建工作流包含版本/更新说明检查、环境与缓存准备、跨平台编译、macOS 签名核验及分类发布。打包时不执行维护者本地回归，也不单独重复执行前端构建；Tauri 的 `beforeBuildCommand` 会自动构建前端。维护者本地验证文件不随源码分发。
 
 维护者更新已支持的引擎适配描述：
 
@@ -234,3 +234,5 @@ bash sign-macos.sh --development \
 开发流程只输出以 `-development.zip` 结尾的测试包，验证包内签名完整性，不执行公证和公开分发检查。Ad hoc 签封没有开发者身份背书；Apple Development 签名也不能替代 Developer ID 和公证。不要要求玩家全局关闭 Gatekeeper 或移除下载隔离标记来补足发布流程。Windows Authenticode 是独立的代码签名体系，不复用 Apple 或 HTTPS 证书。
 
 参考核对：Clash Verge Rev 的 [v2.5.7 发布流程](https://github.com/clash-verge-rev/clash-verge-rev/blob/ea509b82363a40c3c32e951d7ce9d66d66da411f/.github/workflows/release.yml#L254-L264) 通过 Secrets 提供 Apple 证书、签名身份与公证凭据。用户提供的 2.5.7 ARM64 DMG 内 App 实测为 `Developer ID Application: won fen (JPH3Z7PPBB)`，有 stapled 公证票据，Gatekeeper 返回 `accepted / Notarized Developer ID`。外层 DMG 未附票据不代表内层 App 未公证。它的开源源码不包含这些私有证书凭据；Tauri 更新包签名密钥也不等于 Apple 代码签名证书。本核对没有运行 Clash Verge，也没有复制其私钥或证书到本项目。
+
+自动发布说明见[发布流程](../docs/releases.md)，本次更新 MD 默认英文在前、中文在后。启动器部署及 `index.php` 更新单独处理，服务端自动部署流程独立于启动器发布。

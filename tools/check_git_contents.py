@@ -11,6 +11,7 @@ DENIED_SUFFIXES = {
     '.ttf', '.otf', '.woff', '.woff2', '.jar', '.class', '.zip', '.pyc', '.pyo',
     '.log', '.tmp', '.part',
     '.exe', '.dll', '.dylib', '.rlib', '.a', '.pdb',
+    '.pem', '.key', '.p12', '.pfx',
 }
 
 

@@ -16,7 +16,7 @@ The repository contains project source and documentation. **It does not provide 
 - Public-session endpoints, names, announcements, and download metadata come from the [configuration API](https://oss.2t.hk/gtav/). Public server addresses are not compiled into the client.
 - A standalone Java 17+ server owns player/entity identity, seats, ownership leases, combat decisions, respawning, population, weather, and law rules. Authorized client engines execute assigned native movement and vehicle simulation.
 
-**Launcher source 0.2.16; existing desktop packages 0.2.15; server 0.4.3-world-experimental.** The 0.2.16 source fixes the synchronized explosive-effect rendering path. The existing 0.2.15 packages include passenger-seat reconciliation and ownership fixes. Server 0.4.3 is deployed to the main and experimental sessions in both China and the US (four routes). Launcher and server releases are separate; see [release categories](docs/releases.md) and the [0.2.15 build/deployment record](docs/0.2.15多人同乘与公开源码.md).
+**Launcher 0.2.16; server 0.4.3-world-experimental.** The launcher fixes the synchronized explosive-effect rendering path and retains shared-vehicle seating. One GitHub workflow builds both desktop platforms and the independently versioned Java server, then publishes separate Launcher/Server releases from English-first update MD files. Server 0.4.3 is deployed to the China/US main and experimental routes. See [automated releases](docs/releases.md).
 
 Multiplayer remains experimental. Static collision and pedestrian navigation cover roughly **600 × 600 metres around the test spawn**, not the whole map. There is no complete server-side RAGE physics runtime or migration of every single-player script, tool, mission, or vehicle weapon. This uses a custom protocol and does not implement native GTA Online or FiveM compatibility. Protocol tests do not establish complete gameplay synchronization; `game_sync` and `native_clone_transport` remain false.
 
@@ -161,7 +161,7 @@ npm run desktop:build:mac
 npm run tauri -- build --no-bundle
 ```
 
-Outputs are under `desktop/src-tauri/target/release/`; the macOS App is in `bundle/macos/`. Desktop artifact names retain the existing `GTA5Data` prefix. The two manual GitHub Actions workflows produce build artifacts and do not publish GitHub Releases. Game resources are not required or embedded for a desktop source build.
+Outputs are under `desktop/src-tauri/target/release/`; the macOS App is in `bundle/macos/`. Desktop artifact names retain the existing `GTA5Data` prefix. The single GitHub release workflow builds both platforms automatically after a versioned change is merged to `main`, then publishes the component release. Game resources are not required or embedded for a desktop source build.
 
 ## Repository layout
 
@@ -181,7 +181,8 @@ Outputs are under `desktop/src-tauri/target/release/`; the macOS App is in `bund
 | `tools/` | Build/package tools, read-only engine analysis, isolated adapter generation, and optional world-data extraction. |
 | `tools/readonly_game_outputs.py` | Shared output guard and atomic publishing helpers that protect player resource inputs. |
 | `docs/` | Design notes, protocol documentation, audits, limitations, and historical release/deployment evidence. |
-| `.github/workflows/` | Manually triggered macOS and Windows client builds. |
+| `.github/workflows/` | Unified automated builds, component releases and server deployment. |
+| `release-notes/` | English-first, Chinese-second update MD files consumed by the release workflow. |
 | `serve_local.py` | Optional Python local HTTP/resource server and explicit local multiplayer development startup. |
 | `Launch-Local.cmd` / `Start-Local.ps1` | Windows wrappers for starting the Python local server; require an available Python runtime. |
 | `AGENTS.md` | Mandatory development rules, including the read-only game-resource boundary. |

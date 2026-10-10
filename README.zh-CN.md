@@ -16,7 +16,7 @@
 - 公共线路、名称、公告和下载信息统一来自[配置接口](https://oss.2t.hk/gtav/)，客户端不内置公网服务器地址。
 - 独立 Java 17+ 服务端统一保存玩家与实体身份、座位、所有权租约、战斗判定、重生、人口、天气及执法规则；获授权的客户端引擎执行指定的原生移动与车辆模拟。
 
-**启动器源码 0.2.16，已有桌面安装包 0.2.15，服务端 0.4.3-world-experimental。** 0.2.16 源码修复共享爆炸效果的渲染路径；已有 0.2.15 安装包包含乘客座位纠正与所有权修复。服务端 0.4.3 已部署到中美两地的正式与实验战局，共四条线路。启动器和服务端分开发布，详见[发布分类](docs/releases.md#简体中文)及 [0.2.15 构建与部署记录](docs/0.2.15多人同乘与公开源码.md)。
+**启动器 0.2.16，服务端 0.4.3-world-experimental。** 启动器修复共享爆炸效果的渲染路径，保留多人同乘能力。一个 GitHub 工作流在版本化改动合并后自动构建两个桌面平台及独立版本的 Java 服务端，再按英文优先的更新 MD 分别发布启动器/服务端。服务端 0.4.3 已部署到中美正式与实验四条线路，详见[自动发布流程](docs/releases.md#简体中文)。
 
 多人功能仍为实验状态。静态碰撞和行人导航覆盖出生区附近约 **600×600 米**，尚未覆盖整张地图。服务端没有完整 RAGE 物理运行时，全部单机脚本、工具、任务和载具武器也尚未迁移。本项目使用自有协议，不兼容原 GTA Online 或 FiveM。协议测试不能证明完整游戏同步已完成，`game_sync` 和 `native_clone_transport` 仍为 false。
 
@@ -161,7 +161,7 @@ npm run desktop:build:mac
 npm run tauri -- build --no-bundle
 ```
 
-产物在 `desktop/src-tauri/target/release/`，macOS App 位于其 `bundle/macos/`。桌面产物文件名沿用 `GTA5Data` 前缀。两个 GitHub Actions 工作流均需手动触发，只提供构建 Artifact，不自动发布 GitHub Release。桌面源码构建不需要或嵌入游戏资源。
+产物在 `desktop/src-tauri/target/release/`，macOS App 位于其 `bundle/macos/`。桌面产物文件名沿用 `GTA5Data` 前缀。统一 GitHub Actions 工作流在合并 `main` 后读取更新 MD，自动构建并分类发布启动器与服务端。桌面源码构建不需要或嵌入游戏资源。
 
 ## 仓库目录与文件作用
 
@@ -181,7 +181,8 @@ npm run tauri -- build --no-bundle
 | `tools/` | 构建/打包、只读引擎分析、隔离适配生成与可选的世界数据提取工具。 |
 | `tools/readonly_game_outputs.py` | 共用输出保护与原子发布工具，防止生成物覆盖玩家资源。 |
 | `docs/` | 设计、协议、审计、功能边界和历史构建/部署证据。 |
-| `.github/workflows/` | 手动触发的 macOS 与 Windows 客户端构建流程。 |
+| `.github/workflows/` | 统一自动构建、分类发布及服务端部署流程。 |
+| `release-notes/` | 自动发布读取的本次更新 MD，英文在前、简体中文在后。 |
 | `serve_local.py` | 可选的 Python 本地 HTTP/资源服务，以及显式启动本地多人开发服务。 |
 | `Launch-Local.cmd` / `Start-Local.ps1` | Windows 的 Python 本地服务启动封装，需有可用 Python 运行环境。 |
 | `AGENTS.md` | 开发硬约束，包含玩家游戏资源必须只读的边界。 |

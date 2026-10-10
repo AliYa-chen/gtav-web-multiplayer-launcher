@@ -157,3 +157,5 @@ For each feature, inspect the actual affected layer, check input/message validat
 Record the exact client build commit, server build commit, platform versions, and final file hashes. Configuration/documentation commits can follow binary compilation; label them separately. Replacing a local JS file does not update an already packaged App/EXE. Publishing new binaries also does not update a running Java service or a separately hosted website.
 
 For integration into another website, use the [website integration guide](website-integration.md). Detailed engine evidence remains in [引擎分析](引擎分析.md), [resource isolation](启动器资源隔离.md), and [world design](统一世界服务端设计.md).
+
+Automatic GitHub builds, release-note files and component versioning are documented in [automated releases](releases.md). Server deployment follows that workflow; website configuration changes remain explicit operations.
