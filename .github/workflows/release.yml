@@ -6,9 +6,14 @@ on:
   workflow_dispatch:
     inputs:
       check_ssh:
-        description: 'Only verify encrypted SSH credentials / 仅检查加密 SSH 凭据'
+        description: 'Only verify US encrypted SSH credentials / 仅检查美国加密 SSH 凭据'
         type: boolean
         default: false
+        required: false
+      retry_server_run_id:
+        description: 'Retry US deployment from an original build run / 使用原构建任务重试美国部署'
+        type: string
+        default: ''
         required: false
 
 # Release tags are immutable. Queue merges instead of interrupting uploads.
@@ -45,21 +50,17 @@ jobs:
       - name: Install pinned SSH transport for diagnosis / 为诊断安装固定版本 SSH 通信库
         if: github.event_name == 'workflow_dispatch' && inputs.check_ssh == true
         run: python -m pip install 'paramiko==4.0.0'
-      - name: Verify encrypted SSH credentials / 仅校验加密 SSH 凭据
+      - name: Verify US encrypted SSH credentials / 仅校验美国加密 SSH 凭据
         if: github.event_name == 'workflow_dispatch' && inputs.check_ssh == true
         env:
-          GTA_CN_SSH_HOST: ${{ secrets.GTA_CN_SSH_HOST }}
-          GTA_CN_SSH_PORT: ${{ secrets.GTA_CN_SSH_PORT }}
-          GTA_CN_SSH_USER: ${{ secrets.GTA_CN_SSH_USER }}
-          GTA_CN_SSH_PASSWORD: ${{ secrets.GTA_CN_SSH_PASSWORD }}
           GTA_US_SSH_HOST: ${{ secrets.GTA_US_SSH_HOST }}
           GTA_US_SSH_PORT: ${{ secrets.GTA_US_SSH_PORT }}
           GTA_US_SSH_USER: ${{ secrets.GTA_US_SSH_USER }}
           GTA_US_SSH_PASSWORD: ${{ secrets.GTA_US_SSH_PASSWORD }}
           GTA_SSH_KNOWN_HOSTS: ${{ secrets.GTA_SSH_KNOWN_HOSTS }}
-        run: python -B tools/deploy_server.py --check-ssh
+        run: python -B tools/deploy_server.py --check-ssh --regions us
       - name: Select components from versions and update MD / 根据版本与更新 MD 选择待发布组件
-        if: inputs.check_ssh != true
+        if: inputs.check_ssh != true && inputs.retry_server_run_id == ''
         id: plan
         env:
           GH_TOKEN: ${{ github.token }}
@@ -68,7 +69,7 @@ jobs:
           --output archive/release-plan/release-plan.json
           --github-output "$GITHUB_OUTPUT"
       - name: Save verified artifact / 保存核验后的附件
-        if: inputs.check_ssh != true
+        if: inputs.check_ssh != true && inputs.retry_server_run_id == ''
         uses: actions/upload-artifact@v4
         with:
           name: release-plan
@@ -295,12 +296,17 @@ jobs:
           --component server --assets-directory archive/release-server
 
   deploy-server:
-    name: Deploy server / 部署服务端 · 实验线路先于正式线路
+    name: Deploy US server / 部署美国服务端 · 实验线路先于正式线路
     needs: [plan, publish-server]
-    if: needs.plan.outputs.server == 'true'
+    if: >-
+      ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.plan.result == 'success' &&
+      inputs.check_ssh != true &&
+      ((needs.plan.outputs.server == 'true' && needs.publish-server.result == 'success') ||
+      (github.event_name == 'workflow_dispatch' && inputs.retry_server_run_id != '')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: read
     timeout-minutes: 20
     steps:
       - name: Check out source / 拉取源码
@@ -323,32 +329,69 @@ jobs:
         with:
           name: release-plan
           path: archive/release-plan
+          run-id: ${{ inputs.retry_server_run_id || github.run_id }}
+          github-token: ${{ github.token }}
       - name: Download build artifact / 下载构建附件
         uses: actions/download-artifact@v4
         with:
           name: release-server
           path: archive/release-server
+          run-id: ${{ inputs.retry_server_run_id || github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify original published deployment assets / 核验原构建与已发布附件
+        if: inputs.retry_server_run_id != ''
+        id: retry
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GTA_RETRY_RUN_ID: ${{ inputs.retry_server_run_id }}
+        run: >-
+          python -B tools/prepare_deployment_retry.py
+          --run-id "$GTA_RETRY_RUN_ID"
+          --plan archive/release-plan/release-plan.json
+          --assets-directory archive/release-server
+          --github-output "$GITHUB_OUTPUT"
+      - name: Check out original build commit / 拉取原附件对应的构建提交
+        if: inputs.retry_server_run_id != ''
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.retry.outputs.source_commit }}
+          path: archive/retry-source
+      - name: Apply current deployment checks to original source / 将当前部署检查用于原构建源码
+        if: inputs.retry_server_run_id != ''
+        run: |
+          python -B - <<'PY'
+          from pathlib import Path
+          import sys
+          sys.path.insert(0, 'tools')
+          from readonly_game_outputs import atomic_write_bytes
+          for name in ('deploy_server.py', 'server_protocol_check.mjs'):
+              source = Path('tools') / name
+              target = Path('archive/retry-source/tools') / name
+              atomic_write_bytes(target, source.read_bytes(), sources=(source,))
+          PY
       - name: Install pinned SSH transport / 安装固定版本 SSH 通信库
         run: python -m pip install 'paramiko==4.0.0'
       - name: Deploy verified JARs / 部署已核验 JAR 并保留世界数据与生产证书
         env:
-          GTA_CN_SSH_HOST: ${{ secrets.GTA_CN_SSH_HOST }}
-          GTA_CN_SSH_PORT: ${{ secrets.GTA_CN_SSH_PORT }}
-          GTA_CN_SSH_USER: ${{ secrets.GTA_CN_SSH_USER }}
-          GTA_CN_SSH_PASSWORD: ${{ secrets.GTA_CN_SSH_PASSWORD }}
           GTA_US_SSH_HOST: ${{ secrets.GTA_US_SSH_HOST }}
           GTA_US_SSH_PORT: ${{ secrets.GTA_US_SSH_PORT }}
           GTA_US_SSH_USER: ${{ secrets.GTA_US_SSH_USER }}
           GTA_US_SSH_PASSWORD: ${{ secrets.GTA_US_SSH_PASSWORD }}
           GTA_SSH_KNOWN_HOSTS: ${{ secrets.GTA_SSH_KNOWN_HOSTS }}
           GTA_SERVER_BASE: ${{ vars.GTA_SERVER_BASE }}
-          GTA_CN_PUBLIC_DOMAIN: ${{ vars.GTA_CN_PUBLIC_DOMAIN }}
           GTA_US_PUBLIC_DOMAIN: ${{ vars.GTA_US_PUBLIC_DOMAIN }}
-        run: >-
-          python -B tools/deploy_server.py
-          --plan archive/release-plan/release-plan.json
-          --assets-directory archive/release-server
-          --report archive/deployment/server-deployment.json
+          GTA_DEPLOYMENT_SOURCE: ${{ inputs.retry_server_run_id && format('{0}/archive/retry-source', github.workspace) || github.workspace }}
+        run: |
+          python -B - <<'PY'
+          import os, subprocess, sys
+          from pathlib import Path
+          root = Path(os.environ['GTA_DEPLOYMENT_SOURCE'])
+          workspace = Path(os.environ['GITHUB_WORKSPACE'])
+          subprocess.run([sys.executable, '-B', str(root / 'tools/deploy_server.py'),
+              '--regions', 'us', '--plan', str(workspace / 'archive/release-plan/release-plan.json'),
+              '--assets-directory', str(workspace / 'archive/release-server'),
+              '--report', str(workspace / 'archive/deployment/server-deployment.json')], cwd=root, check=True)
+          PY
       - name: Preserve deployment/rollback audit / 保存部署与回滚记录
         if: always()
         uses: actions/upload-artifact@v4

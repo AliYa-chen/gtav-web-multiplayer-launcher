@@ -77,8 +77,11 @@ def decision(current_version, expected_version, installed_entries, candidate_ent
     return 'deploy'
 
 
-def settings():
+def settings(regions=('us', 'cn')):
     import paramiko
+    selected = tuple(dict.fromkeys(regions))
+    if not selected or any(region not in ('us', 'cn') for region in selected):
+        raise DeploymentError('Select at least one supported deployment region')
     known = os.environ.get('GTA_SSH_KNOWN_HOSTS', '')
     host_keys = paramiko.HostKeys()
     for line in known.splitlines():
@@ -89,8 +92,8 @@ def settings():
             raise DeploymentError('GTA_SSH_KNOWN_HOSTS contains an invalid entry')
         for hostname in entry.hostnames:
             host_keys.add(hostname, entry.key.get_name(), entry.key)
-    regions = {}
-    for region in ('us', 'cn'):
+    configurations = {}
+    for region in selected:
         prefix = f'GTA_{region.upper()}_SSH_'
         values = {name: os.environ.get(prefix + name, '') for name in ('HOST', 'PORT', 'USER', 'PASSWORD')}
         if not all(values.values()):
@@ -105,11 +108,11 @@ def settings():
         domain = os.environ.get(f'GTA_{region.upper()}_PUBLIC_DOMAIN', '') or f'gtaserver-{region}.2t.hk'
         if not re.fullmatch(r'[A-Za-z0-9.-]+', domain):
             raise DeploymentError('Invalid public domain configuration')
-        regions[region] = {**values, 'domain': domain}
+        configurations[region] = {**values, 'domain': domain}
     base = os.environ.get('GTA_SERVER_BASE', '') or '/opt/gta5data-server'
     if not re.fullmatch(r'/[A-Za-z0-9_./-]+', base) or '..' in Path(base).parts or base.endswith('/'):
         raise DeploymentError('Invalid server installation root')
-    return regions, host_keys, base
+    return configurations, host_keys, base
 
 
 def ssh_error_category(error, paramiko):
@@ -149,18 +152,18 @@ def connect(config, host_keys, region=None):
     return client
 
 
-def check_ssh():
-    """Authenticate both pinned hosts and close; no remote commands or writes."""
+def check_ssh(regions=('us', 'cn')):
+    """Authenticate selected pinned hosts and close; no remote commands or writes."""
     try:
-        regions, host_keys, _ = settings()
+        configurations, host_keys, _ = settings(regions)
     except Exception:
         print(json.dumps({'region': 'all', 'status': 'failed', 'error': 'ssh_configuration_invalid'}), flush=True)
         return 1
     failed = False
-    for region in ('us', 'cn'):
+    for region in configurations:
         client = None
         try:
-            client = connect(regions[region], host_keys, region)
+            client = connect(configurations[region], host_keys, region)
             row = {'region': region, 'status': 'connected'}
         except DeploymentError as error:
             failed = True
@@ -507,14 +510,15 @@ def rollout(client, config, lane, candidate, expected, base, stamp, timeout, row
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--check-ssh', action='store_true', help='Only check both pinned SSH connections; no remote commands or changes')
+    parser.add_argument('--check-ssh', action='store_true', help='Only check selected pinned SSH connections; no remote commands or changes')
+    parser.add_argument('--regions', nargs='+', choices=('us', 'cn'), default=['us', 'cn'], help='Regions to check/deploy, default: us cn')
     parser.add_argument('--plan', type=Path)
     parser.add_argument('--assets-directory', type=Path)
     parser.add_argument('--report', type=Path, default=ROOT / 'archive/deployment/server-deployment.json')
     parser.add_argument('--idle-timeout', type=int, default=120)
     args = parser.parse_args()
     if args.check_ssh:
-        return check_ssh()
+        return check_ssh(args.regions)
     if args.plan is None or args.assets_directory is None:
         parser.error('--plan and --assets-directory are required unless --check-ssh is used')
     if not 0 <= args.idle_timeout <= 120:
@@ -529,11 +533,11 @@ def main():
         verify_release_directory(plan, 'server', args.assets_directory)
         candidate = args.assets_directory / f"multiplayer-server-v{item['version']}.jar"
         inspect_server_jar(candidate.read_bytes(), item['runtime_version'], execute=True)
-        regions, host_keys, base = settings()  # Check every credential before any remote change.
+        regions, host_keys, base = settings(args.regions)  # Check selected credentials before any remote change.
         audit.update(source_commit=plan['commit'], server_version=item['runtime_version'],
-                     candidate_sha256=hashlib.sha256(candidate.read_bytes()).hexdigest())
+                     candidate_sha256=hashlib.sha256(candidate.read_bytes()).hexdigest(), regions=list(regions))
         stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + plan['commit'][:12]
-        for region in ('us', 'cn'):
+        for region in regions:
             clients[region] = connect(regions[region], host_keys, region)
             for lane in ('experimental', 'main'):
                 unit = 'gta5data-world-experimental.service' if lane == 'experimental' else 'gta5data-server.service'
@@ -542,7 +546,7 @@ def main():
                 if action == 'deploy':
                     remote(clients[region], GATE, 'preflight', 17486 if lane == 'experimental' else 17485, stamp)
         for lane in ('experimental', 'main'):
-            for region in ('us', 'cn'):
+            for region in regions:
                 row = {'region': region, 'lane': lane, 'status': 'preflight'}
                 audit['lanes'].append(row)
                 rollout(clients[region], regions[region], lane, candidate, item['runtime_version'], base, stamp, args.idle_timeout, row)

@@ -35,7 +35,7 @@ A failed build is not published as a finished binary release. Drafts with matchi
 
 The launcher artifacts are ready for download from GitHub. Deployment of the launcher and portal, and updating `remote-config/index.php`, remain separate operations performed only when explicitly requested. The workflow does not write, commit or publish website configuration.
 
-Server changes are automatically deployed after the server release succeeds. The deploy job checks provenance and SSH host identity, verifies no active players are interrupted, backs up current JAR/configuration, replaces the JAR atomically, and checks health, WSS snapshots and heartbeats. Both experimental routes precede the main routes. Identical installed Java classes are verified without restarting; failure restores the old JAR. See [automatic server deployment](server-deployment-automation.md).
+Server changes are automatically deployed to the US after the server release succeeds. The deploy job checks provenance and SSH host identity, verifies no active players are interrupted, backs up current JAR/configuration, replaces the JAR atomically, and checks health, WSS snapshots and heartbeats. The US experimental route precedes its main route. China is unreachable from foreign runners and is deployed from the maintainer machine only when explicitly requested. Identical installed Java classes are verified without restarting; failure restores the old JAR. See [automatic server deployment](server-deployment-automation.md).
 
 ### Credentials and resource boundary
 
@@ -74,7 +74,7 @@ Release publishing uses the repository's scoped `GITHUB_TOKEN`; server access us
 
 GitHub 提供启动器的最新构建产物。启动器/门户部署及 `remote-config/index.php` 更新在单独明确要求后处理，工作流不写入、提交或发布网站配置。
 
-服务端 Release 成功后自动部署：核对来源和 SSH 主机身份，避免中断活跃玩家，备份原 JAR/配置并原子替换，检查健康、WSS 快照和心跳。先两条实验线路，再正式线路；已安装 class 字节一致时只核验不重启，失败恢复原 JAR。详见[服务端自动部署](server-deployment-automation.md#简体中文)。
+服务端 Release 成功后自动部署美国线路：核对来源和 SSH 主机身份，避免中断活跃玩家，备份原 JAR/配置并原子替换，检查健康、WSS 快照和心跳。先美国实验线路，再美国正式线路。中国服务器无法从国外访问，待另行明确要求后通过维护者本机部署；已安装 class 字节一致时只核验不重启，失败恢复原 JAR。详见[服务端自动部署](server-deployment-automation.md#简体中文)。
 
 ### 凭据与资源边界
 
