@@ -123,6 +123,38 @@ def github_json(endpoint, *, missing=False):
     return json.loads(result.stdout)
 
 
+def github_release(repository, tag):
+    """Find published releases by tag and authenticated drafts by release ID.
+
+GitHub's releases/tags endpoint deliberately omits drafts. Listing authenticated
+releases is required both before a retry and immediately after draft creation.
+"""
+    release = github_json(f"repos/{repository}/releases/tags/{tag}", missing=True)
+    if release is not None:
+        return release
+    page = 1
+    matches = []
+    while True:
+        rows = github_json(f"repos/{repository}/releases?per_page=100&page={page}")
+        if not isinstance(rows, list):
+            raise ValueError("GitHub releases listing returned an unexpected response")
+        matches.extend(row for row in rows if row.get("tag_name") == tag)
+        if len(rows) < 100:
+            break
+        page += 1
+    if len(matches) > 1:
+        raise ValueError(f"Multiple releases use {tag}; refuse an ambiguous draft upload")
+    if not matches:
+        return None
+    release_id = matches[0].get("id")
+    if not isinstance(release_id, int) or release_id <= 0:
+        raise ValueError("GitHub release has an invalid numeric ID")
+    release = github_json(f"repos/{repository}/releases/{release_id}")
+    if release.get("tag_name") != tag:
+        raise ValueError("Release ID does not match its expected tag")
+    return release
+
+
 def github_tag_commit(repository, tag):
     reference = github_json(f"repos/{repository}/git/ref/tags/{tag}", missing=True)
     if reference is None:
@@ -175,7 +207,7 @@ def build_plan(repository, commit):
         tag = f"{component}-v{item['version']}"
         notes, notes_digest = release_notes(tag)
         digest, count = source_fingerprint(component, commit)
-        release = github_json(f"repos/{repository}/releases/tags/{tag}", missing=True)
+        release = github_release(repository, tag)
         build = release is None or release["draft"]
         if release is not None:
             previous = existing_provenance(repository, release, component)
@@ -242,14 +274,16 @@ def publish(plan, component, assets_directory):
     title = (f"[Launcher] GTAV Web Multiplayer Launcher {item['version']} / GTAV 网页多人启动器"
              if component == "launcher"
              else f"[Server] GTAV Web Multiplayer Server {item['version']} / GTAV 网页多人服务端")
-    release = github_json(f"repos/{repository}/releases/tags/{tag}", missing=True)
+    release = github_release(repository, tag)
     if release is None:
         existing_tag = github_tag_commit(repository, tag)
         if existing_tag not in (None, commit):
             raise ValueError("Refuse to publish artifacts under a tag from another commit")
         command(["gh", "release", "create", tag, "--repo", repository, "--target", commit,
                  "--title", title, "--notes-file", str(notes), "--draft", "--prerelease", "--latest=false"])
-        release = github_json(f"repos/{repository}/releases/tags/{tag}")
+        release = github_release(repository, tag)
+        if release is None:
+            raise ValueError("Created draft could not be found by authenticated release listing")
     tag_commit = github_tag_commit(repository, tag)
     if (tag_commit not in (None, commit) or (tag_commit is None and not release["draft"])
             or (release["draft"] and release.get("target_commitish") != commit)):
@@ -269,7 +303,9 @@ def publish(plan, component, assets_directory):
     missing = [str(path) for name, path in expected.items() if name not in existing]
     if missing:
         command(["gh", "release", "upload", tag, *missing, "--repo", repository])
-    release = github_json(f"repos/{repository}/releases/tags/{tag}")
+    release = github_json(f"repos/{repository}/releases/{release['id']}")
+    if release.get("tag_name") != tag:
+        raise ValueError("Uploaded release ID no longer matches its expected tag")
     uploaded = {row["name"]: row for row in release.get("assets", [])}
     if set(uploaded) != set(expected):
         raise ValueError("Uploaded assets do not match the complete release manifest")
