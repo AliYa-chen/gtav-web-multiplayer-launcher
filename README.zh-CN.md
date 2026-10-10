@@ -20,6 +20,12 @@
 
 多人功能仍为实验状态。静态碰撞和行人导航覆盖出生区附近约 **600×600 米**，尚未覆盖整张地图。服务端没有完整 RAGE 物理运行时，全部单机脚本、工具、任务和载具武器也尚未迁移。本项目使用自有协议，不兼容原 GTA Online 或 FiveM。协议测试不能证明完整游戏同步已完成，`game_sync` 和 `native_clone_transport` 仍为 false。
 
+## 多人如何实现
+
+原始游戏 WASM 由玩家提供。本项目生成隔离的适配运行副本，接入自己编写的 JavaScript 同步桥，由 Java 服务端裁决共同世界状态与规则。Python 脚本用于审计和生成适配，成品客户端使用 Rust 重现适配，不依赖 Python。普通功能主要修改 JS 和 Java；新增引擎接口能力时才需要进一步分析原生接口。
+
+实现与扩展流程见[多人架构、构建和维护](docs/multiplayer-development.zh-CN.md)，其他网站接入见[网站集成指南](docs/website-integration.zh-CN.md)。
+
 ## 实机截图
 
 以下截图记录此前的实际游戏演示。游戏画面继续适用其权利人的条款，详见 [NOTICE.zh-CN.md](NOTICE.zh-CN.md)。
@@ -168,8 +174,9 @@ npm run tauri -- build --no-bundle
 
 ## 详细资料
 
-历史文档中的旧版本小节描述的是当时状态，不代表当前已全部完成。
+建议先阅读[多人实现、构建与维护指南](docs/multiplayer-development.zh-CN.md)和[网站集成指南](docs/website-integration.zh-CN.md)。历史文档中的旧版本小节描述的是当时状态。
 
+- [多人实现与功能维护](docs/multiplayer-development.zh-CN.md) · [集成到其他网站](docs/website-integration.zh-CN.md)
 - [资源隔离](docs/启动器资源隔离.md) · [桌面使用与构建](desktop/README.md)
 - [远程配置](docs/远程启动器配置.md) · [国际化](docs/启动器国际化.md)
 - [统一世界设计](docs/统一世界服务端设计.md) · [共同环境协议](docs/统一世界环境协议.md)

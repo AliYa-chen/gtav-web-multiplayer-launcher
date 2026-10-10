@@ -20,6 +20,12 @@ The repository contains project source and documentation. **It does not provide 
 
 Multiplayer remains experimental. Static collision and pedestrian navigation cover roughly **600 × 600 metres around the test spawn**, not the whole map. There is no complete server-side RAGE physics runtime or migration of every single-player script, tool, mission, or vehicle weapon. This uses a custom protocol and does not implement native GTA Online or FiveM compatibility. Protocol tests do not establish complete gameplay synchronization; `game_sync` and `native_clone_transport` remain false.
 
+## How multiplayer works
+
+The original game WASM is player-provided. This project creates an isolated adapted runtime, connects it to a project-owned JavaScript synchronization bridge, and uses a Java server to decide shared world state and rules. Python scripts audit/build the adaptation; packaged clients reproduce it in Rust without a Python dependency. Ordinary feature development mostly changes JavaScript and Java; new engine-facing capabilities require additional native-interface analysis.
+
+See [architecture, builds, and maintenance](docs/multiplayer-development.md) or [website integration](docs/website-integration.md) for the implementation and extension workflow.
+
 ## Gameplay screenshots
 
 These screenshots record earlier gameplay demonstrations. Game content remains subject to its owners' terms; see [NOTICE.md](NOTICE.md).
@@ -168,8 +174,9 @@ Before contributing, follow [AGENTS.md](AGENTS.md). Check source-only staging wi
 
 ## Documentation
 
-The detailed technical reports are currently in Chinese. Older version sections describe their recorded state, not current completion.
+Start with the bilingual [multiplayer architecture, builds, and maintenance guide](docs/multiplayer-development.md) and [website integration guide](docs/website-integration.md). Most detailed historical technical reports are in Chinese; older version sections describe their recorded state.
 
+- [Multiplayer implementation and feature maintenance](docs/multiplayer-development.md) · [Integrate into your website](docs/website-integration.md)
 - [Launcher and resource isolation](docs/启动器资源隔离.md) · [Desktop usage/builds](desktop/README.md)
 - [Remote configuration](docs/远程启动器配置.md) · [Localization](docs/启动器国际化.md)
 - [World-server design](docs/统一世界服务端设计.md) · [Shared environment](docs/统一世界环境协议.md)
