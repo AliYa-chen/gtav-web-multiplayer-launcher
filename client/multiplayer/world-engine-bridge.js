@@ -63,6 +63,10 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     ex.mpSetAngularVelocity?.(handle, vector(48, value.angular_velocity));
   }
   function seatNumber(seat) { return seat === 'driver' ? -1 : Number(String(seat).split(':')[1]); }
+  function destroyedVehicle(entity) {
+    const vehicle = entity?.components?.vehicle;
+    return Boolean(vehicle && (vehicle.engine_health <= -4000 || vehicle.body_health <= 0));
+  }
   function protectSeat(handle, attached) {
     if (!ex.mpSetPedConfigFlag || !ex.mpGetPedConfigFlag) return;
     if (!ex.mpExists(handle)) { seatConfig.delete(handle); return; }
@@ -92,7 +96,7 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
   }
   function requestedSeat(vehicle, nativeSeat, localEntityId, entities) {
     const seats = vehicle?.components?.vehicle?.seats;
-    if (!seats || !Number.isInteger(nativeSeat) || nativeSeat < -1 || nativeSeat > 15) return null;
+    if (!seats || destroyedVehicle(vehicle) || !Number.isInteger(nativeSeat) || nativeSeat < -1 || nativeSeat > 15) return null;
     const requested = nativeSeat === -1 ? 'driver' : 'passenger:' + nativeSeat;
     if (!Object.hasOwn(seats, requested)) return null;
     if (seats[requested] === null || seats[requested] === localEntityId) return requested;
@@ -424,8 +428,9 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
         replica.driveStarted = false;
         applyTransform(replica.handle, state.transform);
       }
-      const offered = entity.owner_id === packet.client_id && entity.ownership === 'offered';
-      const active = entity.owner_id === packet.client_id && entity.ownership === 'active';
+      const destroyed = destroyedVehicle(entity);
+      const offered = !destroyed && entity.owner_id === packet.client_id && entity.ownership === 'offered';
+      const active = !destroyed && entity.owner_id === packet.client_id && entity.ownership === 'active';
       ex.mpFreeze(replica.handle, active ? 0 : 1);
       if (offered && now - replica.readyAt >= 1000) {
         replica.readyAt = now;
@@ -438,7 +443,7 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
             || replica.serverBody !== state.vehicle.body_health)) {
           ex.mpSetEngineHealth?.(replica.handle, state.vehicle.engine_health);
           ex.mpSetBodyHealth?.(replica.handle, state.vehicle.body_health);
-          ex.mpSetEngineOn?.(replica.handle, state.vehicle.engine_on ? 1 : 0, 1, 1);
+          ex.mpSetEngineOn?.(replica.handle, !destroyed && state.vehicle.engine_health > 0 && state.vehicle.engine_on ? 1 : 0, 1, 1);
         }
         replica.serverEngine = state.vehicle?.engine_health; replica.serverBody = state.vehicle?.body_health;
         if (active && state.vehicle) {

@@ -364,6 +364,7 @@ final class WorldService {
             }else{
                 for(String id:decision.entityIds()){
                     Entity entity=registry.entity(id);if(entity==null)continue;
+                    if(entity.kind()==Kind.VEHICLE && entity.components().vehicle().destroyed()){offers.remove(id);continue;}
                     // 驾驶权由唯一座位事务决定，不能被调度模块随后抢回。
                     if(entity.kind()==Kind.VEHICLE && playerDriver(entity)!=null)continue;
                     if("freeze".equals(decision.action())){

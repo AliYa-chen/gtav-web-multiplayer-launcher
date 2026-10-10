@@ -173,6 +173,7 @@ const serverErrorMessages = Object.freeze({
   wrong_world: 'This action belongs to an earlier session. Wait for synchronization and try again.',
   attached_entity: 'Leave the vehicle before moving this character independently.',
   dead_entity: 'This entity is no longer alive. Choose another target.',
+  destroyed_vehicle: 'This vehicle has been destroyed and cannot be used.',
   static_entity: 'This object cannot be moved.',
   invalid_movement: 'The server corrected this movement. Wait for synchronization and try again.',
   invalid_component: 'This action is not supported by the selected entity.',

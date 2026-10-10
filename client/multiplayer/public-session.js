@@ -173,6 +173,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   let lastServerMessageAt = performance.now(), pingNonce = 0;
   let stateSequence = 0, shotSequence = 0, pendingState = null;
   let pendingShot = null, latestLocalState = null;
+  const shotQueue = [];
   let lastSentState = null, lastCombatResultSequence = -1;
   let lastStateSentAt = -Infinity, lastShotSentAt = -Infinity;
   let lastStatus = '', latestStatusSource = null;
@@ -525,6 +526,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     const previous = combat.get(player.id);
     if (previous && player.revision < previous.revision) return false;
     combat.set(player.id, { ...previous, ...player });
+    if (player.id === clientId && !player.alive) clearPendingShot();
     return true;
   }
   function applyCombatEvent(message) {
@@ -583,7 +585,11 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     return true;
   }
   function clearPendingShot() {
-    pendingShot = null; clearTimeout(shotTimer); shotTimer = 0;
+    pendingShot = null; shotQueue.length = 0; clearTimeout(shotTimer); shotTimer = 0;
+  }
+  function nextShot() {
+    pendingShot = shotQueue.shift() || null;
+    if (pendingShot) scheduleShot();
   }
   function scheduleShot(delay = 10) {
     clearTimeout(shotTimer);
@@ -592,20 +598,21 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   function flushShot() {
     clearTimeout(shotTimer); shotTimer = 0;
     if (!pendingShot || !room || !profiled || stopped || !entryReady) return;
+    if (combat.get(clientId)?.alive === false) { clearPendingShot(); return; }
     const now = performance.now(), shot = pendingShot;
     if (now - shot.at >= shot.maxWait || latestLocalState?.weapon !== shot.event.weapon) {
-      clearPendingShot(); return;
+      nextShot(); return;
     }
-    const rule = weaponRuleByHash.get(shot.event.weapon);
-    const delay = Math.max(0, (rule ? Math.max(10, rule.cooldown_ms + 15) : 50) - (now - lastShotSentAt));
+    // 网络只保留很短的节奏，武器冷却和有界排队由服务端裁决。
+    const delay = Math.max(0, 10 - (now - lastShotSentAt));
     if (delay || !socket || socket.bufferedAmount > 65536) { scheduleShot(delay || 10); return; }
-    // 一条有限寿命的射击等待最新同武器状态，防止单发被状态节流或短暂背压丢弃。
+    // 队首意图等待最新同武器状态，防止状态节流或短暂背压丢掉单发。
     pendingState = latestLocalState || shot.state;
     if (!pendingState || pendingState.weapon !== shot.event.weapon || !flushState(true)) { scheduleShot(); return; }
     if (!send('shot_event', { seq: shotSequence + 1, ...shot.event })) { scheduleShot(); return; }
     shotSequence++; lastShotSentAt = now;
     logCombat({ stage: 'sent', client_id: clientId, seq: shotSequence, weapon: shot.event.weapon });
-    clearPendingShot();
+    nextShot();
   }
   function onWorkerMessage(data) {
     if (data?.type === 'bridge_ready') { postSession(); postWorld(); return; }
@@ -646,7 +653,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
       }
     } else if (data?.type === 'local_shot') {
       const event = cleanShotEvent(data.event), now = performance.now();
-      if (!event) return;
+      if (!event || combat.get(clientId)?.alive === false) return;
       let state;
       if (Object.hasOwn(data, 'state')) {
         state = cleanPlayerState(data.state);
@@ -656,8 +663,13 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
         if (!state || state.weapon !== event.weapon) return;
       }
       latestLocalState = state;
-      const rule = weaponRuleByHash.get(event.weapon);
-      pendingShot = { event, state, at: now, maxWait: Math.min(10250, Math.max(250, (rule?.cooldown_ms || 0) + 100)) };
+      if (pendingShot && pendingShot.event.weapon !== event.weapon) clearPendingShot();
+      const shot = { event, state, at: now, maxWait: 1000 };
+      if (pendingShot) {
+        // 每名客户端最多保留八个意图；队尾合并为最新输入，避免无限积压。
+        if (shotQueue.length >= 7) shotQueue[6] = shot;
+        else shotQueue.push(shot);
+      } else pendingShot = shot;
       flushShot();
     }
   }
@@ -992,7 +1004,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
           }
           break;
         }
-        if (profiled && ['rate_limited', 'stale_seq', 'invalid_shot', 'invalid_movement', 'not_ready', 'player_dead', 'unsupported_weapon', 'weapon_mismatch',
+        if (profiled && ['rate_limited', 'stale_seq', 'invalid_shot', 'invalid_movement', 'not_ready', 'player_dead', 'unsupported_weapon', 'weapon_mismatch', 'destroyed_vehicle',
           'stale_input', 'wrong_world', 'invalid_owner', 'not_owner', 'invalid_lease', 'invalid_revision', 'attached_entity', 'dead_entity',
           'seat_unavailable', 'invalid_seat', 'invalid_component', 'unsupported_interaction', 'stale_owner', 'simulation_not_ready',
           'player_input_required', 'health_increase_denied', 'unsupported_simulation', 'invalid_target', 'invalid_reason', 'not_facing', 'invalid_request',

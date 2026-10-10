@@ -25,7 +25,7 @@ Click a video preview to watch on YouTube.
 - Public-session endpoints, names, announcements, and download metadata come from the [configuration API](https://oss.2t.hk/gtav/). Public server addresses are not compiled into the client.
 - A standalone Java 17+ server owns player/entity identity, seats, ownership leases, combat decisions, respawning, population, weather, and law rules. Authorized client engines execute assigned native movement and vehicle simulation.
 
-**Component versions: launcher 0.2.17; server 0.4.5-world-experimental.** This release adds original-engine cloud/camera entry with server readiness acknowledgement, fixes shared-vehicle exits, and provides a local development runner. See [native cloud entry](docs/native-cloud-entry.md), [NPC perception](docs/npc-perception.md) and [automated releases](docs/releases.md).
+**Component versions: launcher 0.2.18; server 0.4.6-world-experimental.** This release fixes short-step remote locomotion, dropped firing intents, unobstructed projectile expiry, and vehicle seat/destruction lifecycle. See [core interactions and FiveM source comparison](docs/core-interactions.md), [native cloud entry](docs/native-cloud-entry.md) and [automated releases](docs/releases.md).
 
 Multiplayer remains experimental. Static collision and pedestrian navigation cover roughly **600 × 600 metres around the test spawn**, not the whole map. There is no complete server-side RAGE physics runtime or migration of every single-player script, tool, mission, or vehicle weapon. This uses a custom protocol and does not implement native GTA Online or FiveM compatibility. Protocol tests do not establish complete gameplay synchronization; `game_sync` and `native_clone_transport` remain false.
 
@@ -39,15 +39,20 @@ Multiplayer remains experimental. Static collision and pedestrian navigation cov
 | Foundation | ✅ | Basic player-versus-player gun, melee, and projectile damage, death, and respawning. |
 | Foundation | ✅ | Shared time, weather, and basic wanted/police rules. |
 | Foundation | ✅ | Local pedestrian population, AI movement, static collision, and navigation around the spawn area (about 600 × 600 m). |
-| Foundation | ✅ | Shared vehicle seats and passenger/ownership reconciliation; 0.2.17 fixes exit-animation reattachment for drivers and passengers. |
+| Foundation | ✅ | Shared vehicle seats and passenger/ownership reconciliation; 0.2.18 retains the exit-animation and seat-lifecycle fixes for drivers and passengers. |
 | Foundation | ✅ | Windows/macOS release packages, public source, MIT License, and bilingual development/integration guides. |
 | P0 — urgent stability | ✅ | Remove the identified fullscreen-glow crash path for synchronized rockets/grenades in 0.2.16; use bounded ordinary model markers and avoid native explosion replay. [Fix details](docs/explosive-rendering.md). |
 | P0 — entry experience | ✅ | Original-game cloud/camera entry with a random 5–10 second sky hold, snapshot/avatar/collision gates, server ACK, retry/cancel and input recovery; automated checks passed. [Scope](docs/native-cloud-entry.md). |
+| P0 — character interactions | ✅ | Sample-based short-step locomotion, bounded stop timing, shortest-angle heading, action precedence and lifecycle resets. [Implementation and limits](docs/core-interactions.md#players-short-steps-and-action-priority). |
+| P0 — weapon interactions | ✅ | Bounded client shot queues, current-aim sampling and weapon range; fix physical projectiles disappearing on an unobstructed static-only query. |
+| P0 — vehicle interactions | ✅ | Preserve driver movement allowance during passenger changes; confirmed destruction releases occupants and simulation ownership. |
+| P0 — character actions | ❌ | Moving aim/strafe blending, cover, rolling, climbing, swimming and complete ragdoll synchronization. |
+| P0 — combat detail | ❌ | Verified hit components, armour, lag compensation, authoritative ammunition/reloads and pickups. |
 | Research foundation | ✅ | REA/static inventory and 22 YSC structures verified; script behavior/runtime compatibility remains unproven. [Evidence](docs/rea-online-feasibility.md). |
 | P1 — AI and world coverage | ✅ | Gate NPC combat on confirmed line of sight, pursue remembered positions, and share sightings within the same police response; shared sightings do not authorize shooting. [Scope and limits](docs/npc-perception.md). |
 | P1 — AI and world coverage | ❌ | Complete NPC weapon behavior, field of view, cover selection, and tactical coordination. |
 | P1 — AI and world coverage | ❌ | Expand collision/navigation coverage and police dispatch beyond the current local area toward the full map. |
-| P2 — vehicles and equipment | ❌ | Synchronize vehicle damage and destruction from bullets and explosions. |
+| P2 — vehicles and equipment | ❌ | Validate model-specific vehicle hit geometry, then synchronize bullet/blast damage and tyres, windows, doors and fuel tanks; add repairs and terrain-safe exits. |
 | P2 — vehicles and equipment | ❌ | Add server-owned inventory, weapon/item pickups, ammunition consumption, and armor. |
 | P3 — tools and special weapons | ❌ | Implement fuel trails, fire extinguishers, fire propagation, night vision, and stun effects. |
 | P3 — tools and special weapons | ❌ | Support sticky bombs on moving vehicles, mounted vehicle weapons, and their permissions. |
@@ -65,7 +70,7 @@ Multiplayer remains experimental. Static collision and pedestrian navigation cov
 | Operations and capacity | ❌ | Container deployment, Redis presence/matching, backup recovery, independent sessions and measured scaling. |
 | Release maintenance | ✅ | Provide a locally built, ad hoc signed macOS development package. |
 
-Implementation order: **stability → cloud-style entry and world readiness → AI/physics plus minimal persistent identity → equipment/vehicles → cooperative activities → persistent progression and multiple sessions**. The P0–P5 labels remain feature groups; the minimum P5 identity and durable settlement work starts before rewards and purchases. Signing can proceed separately. See the [detailed online-mode roadmap](docs/online-mode-roadmap.md) and [feature maintenance guide](docs/multiplayer-development.md).
+Implementation order: **player, weapon and vehicle interaction correctness → richer action and damage state → AI/physics plus minimal persistent identity → cooperative activities → persistent progression and multiple sessions**. The P0–P5 labels remain feature groups; the minimum P5 identity and durable settlement work starts before rewards and purchases. Signing can proceed separately. See the [detailed online-mode roadmap](docs/online-mode-roadmap.md) and [feature maintenance guide](docs/multiplayer-development.md).
 
 ## Toward an Online-style shared world
 
@@ -80,6 +85,27 @@ Current limits remain eight players per process, 256 world entities and approxim
 The original game WASM is player-provided. This project creates an isolated adapted runtime, connects it to a project-owned JavaScript synchronization bridge, and uses a Java server to decide shared world state and rules. Python scripts audit/build the adaptation; packaged clients reproduce it in Rust without a Python dependency. Ordinary feature development mostly changes JavaScript and Java; new engine-facing capabilities require additional native-interface analysis.
 
 See [architecture, builds, and maintenance](docs/multiplayer-development.md) or [website integration](docs/website-integration.md) for the implementation and extension workflow.
+
+## What we can borrow from FiveM
+
+FiveM is a useful reference for the next interaction work, but it is not a
+drop-in runtime for this browser build. Its strongest ideas are the separation
+between entity lifetime and rendering, server-owned entity identity and scope,
+explicit ownership transfer, and acknowledgements for create, update, and
+remove operations. We are applying those ideas to the three current priorities:
+
+- **Players:** authoritative generations, movement leases, server corrections,
+  task/animation state, and clean respawn or disconnect cleanup.
+- **Weapons:** typed weapon rules, server-side hit and damage decisions,
+  bounded shot queues, projectile lifetime, and client-only hit effects.
+- **Vehicles:** atomic seat transactions, driver ownership, passenger exit,
+  destroyed-vehicle cleanup, and ownership release before reassignment.
+
+FiveM's PC hooks, RAGE clone bitstreams, ENet transport, CEF/NUI integration,
+and build-specific native addresses cannot be copied into a WebGPU WASM engine.
+The browser client therefore keeps the project's own WebSocket protocol and
+version-gated engine bridge. The detailed source review and licence boundary
+are documented in [FiveM reference and browser boundary](docs/FiveM参考与浏览器实现边界.md).
 
 ## Gameplay screenshots
 

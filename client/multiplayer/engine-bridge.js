@@ -52,7 +52,7 @@ self.prepareMultiplayerBridge = function (imports) {
       'weapon_heavysniper', 'weapon_marksmanrifle', 'weapon_minigun'].map(joaat));
     const decoder = new TextDecoder();
     let scratch = 0, block = 0, sequence = -1, packet = null, lastTick = 0, nameBuffer = 0;
-    let lastShot = 0, lastState = 0, initialPlacement = false, stopped = false;
+    let lastState = 0, initialPlacement = false, stopped = false;
     let smoothingTime = 0, lastStatus = 0;
     let owner = null, avatarTarget = 0, avatarInitialized = false, avatarChangeRequested = false;
     let sessionId = null, avatarChanges = 0, replicaCreates = 0, replicaRemovals = 0, publicRulesActive = false;
@@ -65,7 +65,7 @@ self.prepareMultiplayerBridge = function (imports) {
     let modelMismatch = null, modelRestore = null, lastGoodLocal = null;
     let modelDefaultsPending = false;
     let noticeBuffer = 0, lastNoticeAttempt = -Infinity, nativeHudAvailable = null;
-    let shotBuffer = 0, shotSampleAt = -Infinity, weaponSample = null, pendingShots = [];
+    let shotSampleAt = -Infinity, weaponSample = null, pendingShots = [];
     let worldReadinessAt = -Infinity, worldReadinessSignature = '';
     const entryCamera = self.createOnlineEntryCamera?.({ ex, memory });
     let entryStatusAt = -Infinity, entrySignature = '', entryControlsHeld = false, entryFrozenPed = 0, entryCompletedKey = '';
@@ -249,12 +249,12 @@ self.prepareMultiplayerBridge = function (imports) {
       }
       return { hash: ex.mpSelectedWeapon(ped) >>> 0, ready: true };
     }
-    function cameraRay() {
+    function cameraRay(range = 100) {
       ex.mpCamCoords(BigInt(scratch + 24)); ex.mpCamRot(BigInt(scratch + 48), 2);
       const origin = readVector(24), rotation = readVector(48);
       const pitch = rotation[0] * Math.PI / 180, yaw = rotation[2] * Math.PI / 180;
       const direction = [-Math.sin(yaw) * Math.cos(pitch), Math.cos(yaw) * Math.cos(pitch), Math.sin(pitch)];
-      return { origin, target: origin.map((value, index) => value + 100 * direction[index]) };
+      return { origin, target: origin.map((value, index) => value + range * direction[index]) };
     }
     function replicaMuzzle(replica, fallback) {
       const nearPed = (point) => validPosition(point) && Math.hypot(...point.map((part, index) => part - replica.position[index])) <= 3;
@@ -291,62 +291,86 @@ self.prepareMultiplayerBridge = function (imports) {
     function shotInterval(weapon) {
       const rule = (packet?.weapon_rules || []).find((entry) => entry.weapon === weapon);
       return Number.isInteger(rule?.cooldown_ms) && rule.cooldown_ms >= 1 && rule.cooldown_ms <= 10000
-        ? Math.max(10, rule.cooldown_ms + 15) : 50;
+        ? Math.max(10, rule.cooldown_ms) : 50;
     }
     // 每个有效 owner 回调只读取本地武器脉冲；较重的实体更新仍每 40ms 执行。
     function sampleShots(now) {
-      if (now - shotSampleAt < 5 || !packet?.connected || !initialPlacement || modelRestore || !entryFinished()) return;
+      if (now - shotSampleAt < 5 || !packet?.connected || !initialPlacement || modelRestore || !entryFinished()) {
+        // A disconnect or identity handoff invalidates the local edge and any
+        // intent captured before it. Never carry a pre-disconnect shot into a
+        // resumed world with the same client id.
+        if (!packet?.connected || (sessionId && sessionId !== packet.client_id)) {
+          pendingShots = []; weaponSample = null;
+        }
+        return;
+      }
       shotSampleAt = now;
       const authority = authorityStates.get(packet.client_id);
       const ped = ex.mpGetPlayerPed(-1);
       if (!ped || authority?.alive === false || (ex.mpGetModel(ped) >>> 0) !== avatarTarget) {
         weaponSample = null; pendingShots = []; return;
       }
-      const { hash: weapon, ready } = actualWeapon(ped);
+      const { hash: weapon } = actualWeapon(ped);
       const rule = (packet.weapon_rules || []).find(value => value.weapon === weapon);
       if (ex.mpControlJustPressed?.(0, 47)) {
         post({ type: 'interaction_request', request_id: 'detonate:' + Math.floor(now), action: 'detonate' });
       }
       const shooting = Boolean(ex.mpIsShooting(ped));
       const reloading = Boolean(ex.mpIsReloading?.(ped));
-      if (!weapon || !ready || reloading || rule?.mode === 'melee' || rule?.mode === 'environment') { weaponSample = null; return; }
+      // The current-weapon native can briefly report "not ready" while the selected
+      // hash is already authoritative in the local state. Do not drop a real shot
+      // for that visual-only asset transition; the server still validates the hash.
+      if (!weapon || rule?.mode === 'melee' || rule?.mode === 'environment') {
+        weaponSample = null; return;
+      }
       let clip = null;
       if (ex.mpGetAmmoInClip && ex.mpGetAmmoInClip(ped, weapon | 0, BigInt(scratch + 116))) clip = view().getInt32(scratch + 116, true);
-      const ammo = rule?.mode === 'projectile' && ex.mpGetAmmo ? ex.mpGetAmmo(ped, weapon | 0) : null;
+      if (!Number.isInteger(clip) || clip < 0) clip = null;
+      const totalAmmo = ex.mpGetAmmo?.(ped, weapon | 0);
+      const ammo = Number.isInteger(totalAmmo) && totalAmmo >= 0 ? totalAmmo : null;
       const same = weaponSample?.ped === ped && weaponSample.weapon === weapon;
-      const clipDecreased = same && clip !== null && weaponSample.clip !== null && clip < weaponSample.clip;
-      const ammoDecreased = same && ammo !== null && weaponSample.ammo !== null && ammo < weaponSample.ammo;
-      const decreased = clipDecreased || ammoDecreased;
-      const rising = shooting && (!same || !weaponSample.shooting);
+      const clipDelta = same && clip !== null && weaponSample.clip !== null ? Math.max(0, weaponSample.clip - clip) : 0;
+      const ammoDelta = same && ammo !== null && weaponSample.ammo !== null ? Math.max(0, weaponSample.ammo - ammo) : 0;
+      // Clip and total counts may update on different callbacks, while infinite
+      // total-ammo modes can still consume clip rounds. Match each delayed
+      // counter against the other source instead of counting both changes.
+      const waitingAmmo = same ? weaponSample.waitingAmmo.filter(at => now - at <= 300) : [];
+      const waitingClip = same ? weaponSample.waitingClip.filter(at => now - at <= 300) : [];
+      const matchedAmmo = Math.min(ammoDelta, waitingAmmo.length), matchedClip = Math.min(clipDelta, waitingClip.length);
+      waitingAmmo.splice(0, matchedAmmo); waitingClip.splice(0, matchedClip);
+      const freshAmmo = reloading ? 0 : ammoDelta - matchedAmmo, freshClip = reloading ? 0 : clipDelta - matchedClip;
+      const decrease = Math.max(freshAmmo, freshClip);
+      for (let i = 0; i < Math.min(8, freshClip - freshAmmo); i++) waitingAmmo.push(now);
+      for (let i = 0; i < Math.min(8, freshAmmo - freshClip); i++) waitingClip.push(now);
+      if (waitingAmmo.length > 8) waitingAmmo.splice(0, waitingAmmo.length - 8);
+      if (waitingClip.length > 8) waitingClip.splice(0, waitingClip.length - 8);
+      const decreased = decrease > 0;
+      const rising = !reloading && shooting && (!same || !weaponSample.shooting);
       const priorFiredAt = same ? weaponSample.firedAt : -Infinity;
-      let pendingDecrease = same ? weaponSample.pendingDecrease : null;
-      if (pendingDecrease && now - pendingDecrease.at > 300) pendingDecrease = null;
+      const pendingDecreases = same ? weaponSample.pendingDecreases.filter(at => now - at <= 300) : [];
       // 射击位可能比扣弹提前；记住尚未扣弹的已发送脉冲，匹配后续计数而非再算一发。
-      const delayedDecrease = decreased && pendingDecrease && ((clipDecreased && clip === pendingDecrease.clip - 1)
-        || (ammoDecreased && ammo === pendingDecrease.ammo - 1));
-      if (delayedDecrease) pendingDecrease = null;
+      const accounted = Math.min(decrease, pendingDecreases.length);
+      pendingDecreases.splice(0, accounted);
       // 持续无限弹时用慢速脉冲兜底，仍由服务器武器射速校验。
       const interval = shotInterval(weapon);
-      const fallback = shooting && !decreased && now - priorFiredAt >= Math.max(150, interval);
+      const fallback = !reloading && shooting && !decreased && now - priorFiredAt >= Math.max(150, interval);
       const firedAt = same ? weaponSample.firedAt : -Infinity;
-      weaponSample = { ped, weapon, shooting, clip, ammo, firedAt, pendingDecrease };
-      if ((!decreased || delayedDecrease) && !rising && !fallback) return;
-      if (now - firedAt < interval) return;
+      weaponSample = { ped, weapon, shooting, clip, ammo, firedAt, pendingDecreases, waitingAmmo, waitingClip };
+      const confirmed = Math.min(8, decrease - accounted);
+      // 扣弹是已发生的射击，不能再按服务器冷却丢弃；服务端负责有界排队与最终射速。
+      const count = Math.max(confirmed, !decreased && (rising || fallback) && now - firedAt >= 10 ? 1 : 0);
+      if (count <= 0) return;
       weaponSample.firedAt = now;
-      if (!decreased && (clip !== null || ammo !== null)) weaponSample.pendingDecrease = { clip, ammo, at: now };
-      const ray = cameraRay();
-      if (ex.mpLastWeaponImpact && rule?.mode !== 'projectile' && rule?.mode !== 'utility') {
-        if (!shotBuffer) shotBuffer = Number(ex.mpAlloc(16n));
-        if (shotBuffer && ex.mpLastWeaponImpact(ped, BigInt(shotBuffer))) {
-          // 此 native 使用紧凑 rage::Vector3，而不是 0/8/16 的 scrVector。
-          const impact = [0, 4, 8].map((offset) => view().getFloat32(shotBuffer + offset, true));
-          const range = Math.hypot(...impact.map((value, index) => value - ray.origin[index]));
-          if (validPosition(impact) && range > .001 && range <= 300) ray.target = impact;
-        }
+      if (!decreased && (clip !== null || ammo !== null)) {
+        pendingDecreases.push(now);
+        if (pendingDecreases.length > 8) pendingDecreases.shift();
       }
+      // LAST_WEAPON_IMPACT 没有本次射击时间戳，可能仍是上一发或上一把枪的落点。
+      // 只提交当前瞄准方向与目录射程；命中与世界遮挡均由服务端重新验证。
+      const ray = cameraRay(Number.isFinite(rule?.range) && rule.range > 0 ? Math.min(1500, rule.range) : 100);
       if (!validPosition(ray.origin) || !validPosition(ray.target)) return;
-      pendingShots.push({ at: now, ped, event: { ...ray, weapon } });
-      if (pendingShots.length > 4) pendingShots.shift();
+      for (let index = 0; index < count; index++) pendingShots.push({ at: now, ped, event: { ...ray, weapon } });
+      if (pendingShots.length > 8) pendingShots.splice(0, pendingShots.length - 8);
     }
     function requestModel(hash, now) {
       if (now - (requested.get(hash) ?? -Infinity) >= 1000) {
@@ -651,7 +675,7 @@ self.prepareMultiplayerBridge = function (imports) {
         ex.mpSetCoordsNoOffset(ped, vector(72, state.position), 1, 1, 1);
         replica = { ped, model: state.model, position: [...state.position], heading: state.heading,
           health: null, weapon: 0, seen: now, blip: 0, missingSince: null, pendingModel: null,
-          moving: false, behaviorAt: 0, target: [...state.position] };
+          moving: false, behaviorAt: -Infinity, motion: null };
         replicas.set(id, replica);
         replicaCreates++; lifecycle('create');
       }
@@ -688,7 +712,9 @@ self.prepareMultiplayerBridge = function (imports) {
         ex.mpSetHealth(replica.ped, state.server_authority ? nativeCombatHealth(state.health) : state.health, 0);
         if (ex.mpIsDead(replica.ped, 0)) { replica.recovering = true; return; }
         replica.dead = false; replica.recovering = false; replica.health = null; replica.position = [...state.position];
-        replica.actions = null;
+        replica.actions = null; replica.motion = null; replica.moving = false;
+        replica.animationUntil = -Infinity; replica.behaviorAt = -Infinity;
+        replica.idleAt = -Infinity; replica.heading = state.heading;
         replica.reloadActive = false;
         ex.mpSetCoordsNoOffset(replica.ped, vector(72, state.position), 1, 1, 1);
         lifecycle('replica_authority_restored');
@@ -723,33 +749,76 @@ self.prepareMultiplayerBridge = function (imports) {
         replica.weapon = confirmed.ready ? confirmed.hash : 0;
       }
       const distance = Math.hypot(...state.position.map((value, i) => value - replica.position[i]));
-      const newMovement = Math.hypot(...state.position.map((value, i) => value - replica.target[i]));
       const actions = state.actions || {};
       const animating = now < (replica.animationUntil ?? -Infinity);
+      const motionKey = state.motion_revision ?? state.seq;
+      const identity = state.motion_identity ?? id;
+      const attachment = state.attachment ? state.attachment.entity_id + ':' + state.attachment.seat : '';
+      let motion = replica.motion;
+      if (!motion || motion.identity !== identity || motion.attachment !== attachment || distance > 20) {
+        motion = replica.motion = { identity, attachment, key: motionKey, at: now,
+          position: [...state.position], direction: [0, 0], speed: 0, until: -Infinity };
+        replica.moving = false; replica.behaviorAt = -Infinity; replica.idleAt = -Infinity;
+      } else if (motion.key !== motionKey || (motionKey === undefined
+          && state.position.some((value, index) => value !== motion.position[index]))) {
+        // Samples, not render frames, determine movement. Re-reading one shared
+        // snapshot must neither look like a stop nor restart the same walk task.
+        const dx = state.position[0] - motion.position[0], dy = state.position[1] - motion.position[1];
+        const travel = Math.hypot(dx, dy), elapsed = Math.max(.05, (now - motion.at) / 1000);
+        if (!attachment && travel > .002 && now - motion.at <= 1000) {
+          motion.direction = [dx / travel, dy / travel];
+          motion.speed = Math.min(3, Math.max(.75, travel / elapsed));
+          motion.until = now + Math.min(300, Math.max(160, elapsed * 1500));
+        }
+        motion.position = [...state.position]; motion.at = now; motion.key = motionKey;
+      }
+      // GTA keeps locomotion while firing. Blocking it here leaves a remote
+      // shooter frozen while coordinates are still reconciled, which appears as
+      // a sliding/teleporting torso to the observer.
+      const locomotionAllowed = !animating && !attachment
+        && !actions.aiming && !actions.reloading && !actions.jumping;
+      const moving = locomotionAllowed && now < motion.until && motion.speed > 0;
+      if (locomotionAllowed && (replica.actions?.aiming || replica.actions?.reloading || replica.actions?.jumping)) {
+        replica.idleAt = -Infinity;
+      }
       if (typeof actions.ducking === 'boolean' && actions.ducking !== replica.actions?.ducking && ex.mpSetDucking) ex.mpSetDucking(replica.ped, actions.ducking ? 1 : 0);
-      if (!animating && actions.jumping && !replica.actions?.jumping && ex.mpTaskJump) ex.mpTaskJump(replica.ped, 0, 0, 0);
+      if (!animating && !attachment && actions.jumping && !replica.actions?.jumping && ex.mpTaskJump) ex.mpTaskJump(replica.ped, 0, 0, 0);
       const readyWeapon = replica.weapon === state.weapon;
-      if (!animating && actions.reloading && readyWeapon && !replica.reloadActive && ex.mpTaskReloadWeapon) {
+      if (!animating && !actions.jumping && actions.reloading && readyWeapon && !replica.reloadActive && ex.mpTaskReloadWeapon) {
         ex.mpTaskReloadWeapon(replica.ped, 1); replica.reloadActive = true;
       } else if (!actions.reloading) replica.reloadActive = false;
-      if (!animating && actions.aiming && readyWeapon && !actions.reloading && validPosition(state.aim_target) && ex.mpTaskAimGunAtCoord
-          && now - (replica.aimAt ?? -Infinity) >= 250) {
+      const aimPressed = actions.aiming && !replica.actions?.aiming;
+      if (!animating && !actions.jumping && actions.aiming && readyWeapon && !actions.reloading && validPosition(state.aim_target) && ex.mpTaskAimGunAtCoord
+          && (aimPressed || now - (replica.aimAt ?? -Infinity) >= 250)) {
         ex.mpTaskAimGunAtCoord(replica.ped, vector(72, state.aim_target), 500, 0, 0); replica.aimAt = now;
-      } else if (!animating && !actions.aiming && replica.actions?.aiming && !state.shooting && !actions.reloading && ex.mpTaskStandStill) {
-        ex.mpTaskStandStill(replica.ped, 500);
       }
       replica.actions = { ...actions };
-      if (!animating && !state.attachment && !state.shooting && !actions.aiming && !actions.reloading && !actions.jumping
-          && ex.mpTaskGoStraight && now - replica.behaviorAt >= 250) {
-        if (newMovement > .015 || distance > .15) {
-          const elapsed = Math.max(.05, (now - replica.behaviorAt) / 1000);
-          const speed = actions.sprinting ? 3 : Math.min(3, Math.max(.5, newMovement / elapsed));
-          ex.mpTaskGoStraight(replica.ped, vector(72, state.position), speed, 500, state.heading, .05);
+      if (moving && ex.mpTaskGoStraight) {
+        const directionChanged = !replica.moveDirection
+          || motion.direction[0] * replica.moveDirection[0] + motion.direction[1] * replica.moveDirection[1] < .94;
+        const speed = actions.sprinting ? 3 : motion.speed;
+        if (!replica.moving || directionChanged || Math.abs(speed - (replica.moveSpeed || 0)) > .5
+            || now - replica.behaviorAt >= 300) {
+          // The native is GoToPointAndStandStill. A tiny endpoint is already in
+          // its stopping region by the time interpolation reaches it. Keep an
+          // animation-only target ahead while authoritative coordinates remain
+          // frozen and corrected below; never extrapolate the rendered position.
+          const ahead = Math.max(2, speed * .75);
+          const destination = state.position.map((value, index) => index < 2
+            ? Math.max(-16000, Math.min(16000, value + motion.direction[index] * ahead)) : value);
+          ex.mpTaskGoStraight(replica.ped, vector(72, destination), speed, 650, state.heading, .05);
           replica.moving = true; replica.behaviorAt = now;
-        } else if (ex.mpTaskStandStill && (replica.moving || now - (replica.idleAt ?? -Infinity) >= 1000)) {
-          ex.mpTaskStandStill(replica.ped, -1); replica.moving = false; replica.behaviorAt = now; replica.idleAt = now;
+          replica.moveDirection = [...motion.direction]; replica.moveSpeed = speed;
         }
-        replica.target = [...state.position];
+      } else if (locomotionAllowed) {
+        if (ex.mpTaskStandStill && (replica.moving || now - (replica.idleAt ?? -Infinity) >= 1000)) {
+          ex.mpTaskStandStill(replica.ped, -1); replica.idleAt = now;
+        }
+        replica.moving = false;
+      } else {
+        // Aim/reload/jump/melee/vehicle tasks own the pose until they finish.
+        // Reset the walk cache so returning to motion installs a new task now.
+        replica.moving = false;
       }
       const amount = distance > 20 ? 1 : Math.min(1, delta / 100);
       replica.position = state.position.map((value, i) => replica.position[i] + (value - replica.position[i]) * amount);
@@ -762,11 +831,12 @@ self.prepareMultiplayerBridge = function (imports) {
           ex.mpSetCoordsNoOffset(replica.ped, vector(72, replica.position), 1, 1, drift > 20 ? 1 : 0);
         }
         ex.mpSetVelocity?.(replica.ped, vector(72, [0, 0, 0]));
+        const headingDelta = ((state.heading - replica.heading + 540) % 360) - 180;
+        replica.heading = (replica.heading + headingDelta * amount + 360) % 360;
         const actualHeading = ex.mpHeading(replica.ped);
-        if (!Number.isFinite(actualHeading) || Math.abs(((state.heading - actualHeading + 540) % 360) - 180) > .1) {
-          ex.mpSetHeading(replica.ped, state.heading);
+        if (!Number.isFinite(actualHeading) || Math.abs(((replica.heading - actualHeading + 540) % 360) - 180) > .1) {
+          ex.mpSetHeading(replica.ped, replica.heading);
         }
-        replica.heading = state.heading;
       }
       const nativeHealth = state.server_authority ? nativeCombatHealth(state.health) : state.health;
       if (ex.mpSetHealth && Number.isInteger(state.health) && ex.mpGetHealth(replica.ped) !== nativeHealth) {
@@ -784,6 +854,7 @@ self.prepareMultiplayerBridge = function (imports) {
           const c = entity.components, q = c.transform.rotation;
           const heading = (Math.atan2(2 * (q[3] * q[2] + q[0] * q[1]), 1 - 2 * (q[1] ** 2 + q[2] ** 2)) * 180 / Math.PI + 360) % 360;
           return { player_id: entity.player_id, state: { position: c.transform.position, heading, model: entity.model,
+            motion_revision: entity.revision, motion_identity: packet.world.world_epoch + ':' + entity.generation,
             ...c.ped, ...(c.appearance ? { appearance: c.appearance } : {}), health: c.combat?.health ?? 200,
             alive: c.combat?.alive !== false, revision: entity.combat_revision ?? entity.revision, server_authority: true,
             attachment: c.attachment } };
@@ -835,7 +906,15 @@ self.prepareMultiplayerBridge = function (imports) {
         } catch { continue; } // 可视接口暂不可用，不能永久停止整个实体桥。
         visualPlayed++; finishShot(id);
         // 弹道已经完成；姿态接口失败不得重播同一发弹道。
-        try { ex.mpTaskAimGunAtCoord?.(replica.ped, vector(72, shot.event.target), 250, 0, 0); } catch {}
+        // Aim replaces GoStraight in the native task stack. A visual-only shot
+        // must not interrupt walking or another action on every automatic round.
+        // Explicit aiming already owns its pose; use this only as an idle fallback.
+        if (!replica.moving && !replica.motion?.attachment && now >= (replica.animationUntil ?? -Infinity)
+            && !replica.actions?.aiming && !replica.actions?.reloading && !replica.actions?.jumping) {
+          try {
+            ex.mpTaskAimGunAtCoord?.(replica.ped, vector(72, shot.event.target), 250, 0, 0);
+          } catch {}
+        }
       }
       while (visualShots.size > 32) { visualExpired++; finishShot(visualShots.keys().next().value); }
       if (shotAcknowledged.size) post({ type: 'shot_ack', ids: [...shotAcknowledged] });
@@ -1153,10 +1232,9 @@ self.prepareMultiplayerBridge = function (imports) {
               native_health: ex.mpGetHealth(localPed), native_dead: Boolean(ex.mpIsDead(localPed, 0)),
               kills: authority.kills, deaths: authority.deaths } : {}) });
         }
-        pendingShots = pendingShots.filter((shot) => now - shot.at <= Math.max(250, shotInterval(shot.event.weapon) + 100)
+        pendingShots = pendingShots.filter((shot) => now - shot.at <= 1000
           && shot.ped === localPed && shot.event.weapon === weapon);
-        if (pendingShots.length && now - lastShot >= shotInterval(weapon) && (!authority || authority.alive)) {
-          lastShot = now;
+        for (let sent = 0; sent < 4 && pendingShots.length && (!authority || authority.alive); sent++) {
           const shot = pendingShots.shift();
           // 同一武器的新状态随事件交给页面，网络层先发状态再发射击，避免换枪竞态。
           post({ type: 'local_shot', event: shot.event, state: localState });

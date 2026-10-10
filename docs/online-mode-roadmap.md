@@ -6,7 +6,7 @@
 
 Build an original shared online world with a cloud-to-character entry sequence, stable sessions, cooperative activities and persistent characters/assets. The current resources provide substantial models, animations, map data and script candidates; they do not provide a working GTA Online backend. This design extends the project's own protocol and version-gated engine bridge. It does not promise compatibility with official services or execute original online scripts on Java.
 
-Evidence date: **2026-10-10**. Read the [REA resource analysis](rea-online-feasibility.md) for measured archive/native findings. Published launcher **0.2.16** and documented deployed server **0.4.3** remain the release baseline. The separately developed **0.4.4-world-experimental** NPC perception changes are included in the pending source delivery; their actual publication/US rollout is tracked by Actions. None of the proposed classes or phases below is implemented by this document.
+Evidence date: **2026-10-11**. Read the [REA resource analysis](rea-online-feasibility.md) for measured archive/native findings. The source targets launcher **0.2.18** and server **0.4.6-world-experimental**; release and deployment evidence must be recorded separately. The bounded player, weapon and vehicle fixes in [core interactions](core-interactions.md) are implemented and tested; the remaining classes and phases below stay explicitly planned until their listed evidence exists. This roadmap does not claim official GTA Online or FiveM compatibility.
 
 The audit decoded 1,528 RPF directories and found 1,762 YSC file records across the scanned directories, including duplicate/variant entries; 261 nested RPF entries were not recursively scanned. It validated the headers/page bounds of 22 representative scripts, not their complete bytecode control flow or runtime success. Names such as `freemode`, `fm_mission_controller`, `fm_race_controler`, `gb_delivery` and `gb_casino_heist` identify research candidates. An original server mission definition is safer to develop than assuming these scripts can run without their original session, statistics, inventory, cloud and scene dependencies.
 
@@ -15,39 +15,22 @@ The audit decoded 1,528 RPF directories and found 1,762 YSC file records across 
 | Area | Available in current source | Proposed work; not implemented |
 | --- | --- | --- |
 | Connections and world | `Main`, `WorldService`, `WorldRegistry`; one public world, reconnection, epoch/revision/stream sequence, leases, entity generations, snapshots/deltas | `SessionDirectory`, persistent character login, invitation/party membership and admission tickets |
-| Entity projection | Version-gated `engine-bridge.js` and `world-engine-bridge.js`; local ped/vehicle creation, poses, seats, life, weapons, animations, owned AI tasks | Additional typed object, checkpoint, camera, interior and scenario adapters after native lifecycle validation |
+| Entity projection | Version-gated `engine-bridge.js` and `world-engine-bridge.js`; local ped/vehicle creation, short-step locomotion, poses, seats, life, weapons, animations and owned AI tasks | Additional typed object, checkpoint, interior and scenario adapters after native lifecycle validation |
 | World rules | `WorldEnvironment`, `WorldLaw`, `WorldAi`, population and collision/navigation services | `MissionService`, `ObjectiveValidator`, `IncidentService`, mission-scoped NPC/vehicle budgets |
-| Combat/equipment | Server shot/melee/projectile rules, weapon catalog, health; vehicle engine/body health and seats | `InventoryService`, server ammunition/reload ownership, consumables; `VehicleDamage` for tyres/windows/doors and repair rules |
+| Combat/equipment | Server shot/melee/projectile rules, weapon catalog, bounded firing delivery, health; vehicle engine/body health and seats | `InventoryService`, server ammunition/reload ownership, consumables; `VehicleDamage` for tyres/windows/doors and repair rules |
 | Identity/economy | In-memory session identity and bounded reconnect lifetime | `AccountService`, `CharacterStore`, `RewardLedger`, `GarageService`, durable ownership and audit trail |
-| Entry presentation | Existing loading UI and `world: true` renderer gate | `OnlineEntryController`, original cloud overlay, checked camera transition and cancellation/recovery |
+| Entry presentation | Launcher 0.2.18 cloud/camera entry, `world: true` renderer gate, snapshot/character/collision gates and server acknowledgement | Further camera/interior/scenario adapters and broader cancellation/recovery evidence |
 | Operations | GitHub builds/releases and existing deployment checks | Container packaging, database migrations, backup/restore drills and measured capacity checks |
 
 An `ObjectState` record in the registry is not a complete object-rendering bridge. A vehicle's present health fields do not establish persistent garage ownership or detailed damage replication. Every new client capability must be negotiated; absent capabilities must fail admission or disable the particular activity explicitly.
 
 ### Cloud loading and entry sequence
 
-A convincing cloud entry is feasible in two layers. Before the engine renders the world, draw an original cloud/sky visual in the launcher-owned DOM/canvas and show actual connection/resource stages. After the existing renderer gate and required engine-context checks, a separately validated native camera can orbit above the destination and descend to the confirmed character. A separately version-verified script camera and cloud-hat renderer are candidates until their ABI, scheduling and cleanup work in this build; the early overlay must not call them. The native `CPlayerSwitchMgrLong::SetState` body includes dispatch flushing, vehicle removal/population refill and scene-loading changes. Do not use the original player-switch path as a cosmetic shortcut: it can interfere with the server-owned world. No backend service is required merely to draw clouds; server admission and character state remain separate gates.
+The entry path introduced by launcher 0.2.17 and server 0.4.5 remains in the current 0.2.18/0.4.6 source targets; public release/deployment status is tracked separately. It uses the original title artwork, native `Cloudy 01` resource and owned script cameras. Before the world is ready, the original loading path remains active. The native camera starts only after the renderer/context gates. See [native cloud entry](native-cloud-entry.md) for the version-verified ABI, camera stages and actual evidence.
 
-Proposed states (network and asset work may progress concurrently, but every gate must pass):
+Readiness requires the complete world snapshot, matching character/generation, model placement, local collision, camera cleanup and negotiated server acknowledgement. A timer, rendered frame or camera success alone cannot admit the player. Attempts have bounded deadlines, stale-message rejection and owner-context cleanup. Once the high camera is rendering, a deliberately bounded random 5–10 second hold precedes three descent stages; reduced-motion entry skips the cinematic. The original player-switch state machine is not invoked because it changes population, dispatch and streaming.
 
-```text
-CONNECTING -> AUTHENTICATING -> SNAPSHOT_SYNC -> ENGINE_LOADING
- -> RESOURCE_READY -> CHARACTER_READY -> CLOUD_ORBIT -> DESCENT -> ACTIVE
-        any pending state -> FAILED / CANCELLED
-        ACTIVE -> RECONNECTING -> SNAPSHOT_SYNC or FAILED
-```
-
-- `CONNECTING/AUTHENTICATING`: verified WSS endpoint, compatible build/capabilities, own account or guest identity; show the server's real queue/admission state. Do not claim a cloud save exists before durable character storage is available.
-- `SNAPSHOT_SYNC`: accept only a complete begin/chunk/end baseline and matching epoch, then consume a continuous delta stream. Stage scene changes until engine readiness; a complete snapshot alone does not authorize native world changes.
-- `ENGINE_LOADING`: retain required loading scripts until the existing GPU readiness signal reports `world: true`. A `76% / First frame` event is not world readiness. The original worker's `world` heuristic itself has a 60-second fallback, so retain it as the minimum mutation gate and separately require character, snapshot and scene/collision readiness. Never replace these gates with a decorative timer or camera success.
-- `RESOURCE_READY`: request destination models and applicable map/collision/interior resources. Readiness must come from validated engine results. Native request submission is not a load acknowledgement.
-- `CHARACTER_READY`: confirm server-approved spawn, entity generation, assigned lease, health and seat/appearance projection. Hold gameplay input and protect spawning through an explicit server entry state; a local invincibility flag alone is insufficient.
-- `CLOUD_ORBIT/DESCENT`: use only a camera owned by this entry attempt; select height and path from validated geometry, retain destination streaming focus, synchronize a fade and then restore gameplay camera/input. Camera altitude must not move the server's player position or falsely complete a checkpoint.
-- `ACTIVE`: start simulation participation only after admission and readiness acknowledgement. Skip or shorten the decorative transition for an already-ready reconnect, without skipping state reconciliation.
-
-Give each attempt an `entry_id` and each phase a deadline. Track connection, engine and streaming deadlines separately; asset progress may extend a bounded streaming budget, never reset an unlimited wait. A cancelled or superseded attempt releases its camera, focus, input hold, listeners and lease, and ignores late callbacks. Failure offers retry/return with a specific stage; missing camera support falls back to the overlay plus fade once the character is ready. A failed resource/collision gate must not spawn the player into an unloaded world. Reduced-motion mode uses a short fade; the visual must not intentionally prolong an otherwise completed load.
-
-Acceptance: cold/warm cache, invalid build, early socket loss, missing models, delayed snapshot, cancellation in every state, renderer loss, timeout and successful reconnect. Verify control/camera restoration and unchanged original hashes. This document adds no runtime loading screen.
+Automated checks cover readiness, cancellation, stale identity, recovery and resource isolation. Existing local screenshots record visible clouds and native states record the descent/cleanup. Broader real two-client cold/warm load, reconnect and cancellation observations remain an O0 acceptance item; this roadmap does not turn protocol or native mocks into rendered gameplay evidence.
 
 ### Original mission definitions and scripts
 
@@ -139,16 +122,18 @@ Migrations use an expand/backfill/contract sequence compatible with rolling appl
 
 ### Milestones and acceptance gates
 
-All rows below are **❌ planned**, not completed features.
+✅ marks only the listed completed scope; ❌ marks unfinished work and its required evidence.
 
-| Order | Deliverable | Required exit evidence |
+| Order | Status | Deliverable and evidence |
 | --- | --- | --- |
-| O0 | Reconnect/epoch/lease stability, diagnostics and cloud-entry prototype | Real two-client load/reconnect/cancel; camera cleanup; resource hash/isolation checks |
-| O1 | Minimal persistent identity, character session and reward ledger | Duplicate request/restart/concurrent-login tests; backup restore; no double credit |
-| O2 | Server inventory/ammunition, detailed vehicle damage and typed mission foundation | Unauthorized item/ammo rejection, late join, seat/owner change and damage revision consistency |
-| O3 | Race, courier, escort and survival activities | Two-client complete/fail/rejoin flows; shared outcomes; deterministic settlement receipt |
-| O4 | Shared emergency incidents, garages/shops, then original staged interiors/heists | Incident uniqueness, asset ownership, streaming barriers and per-stage recovery |
-| O5 | Capacity and wider-world readiness | Measured 2/4/8-client runs, actual game clients and failure injection before proposing larger caps |
+| O0 foundation | ✅ | Snapshot/epoch/lease gates, native cloud/camera entry and server acknowledgement; automated cleanup, stale-message and resource-isolation checks. |
+| O0 interactions | ✅ | The bounded player movement, shot-delivery/projectile and seat/destruction fixes in [core interactions](core-interactions.md). |
+| O0 runtime acceptance | ❌ | Broader real two-client load/reconnect/cancel and rendered movement/action observations. |
+| O1 | ❌ | Minimal persistent identity, character session and reward ledger; Duplicate request/restart/concurrent-login tests; backup restore; no double credit |
+| O2 | ❌ | Server inventory/ammunition, detailed vehicle damage and typed mission foundation; Unauthorized item/ammo rejection, late join, seat/owner change and damage revision consistency |
+| O3 | ❌ | Race, courier, escort and survival activities; Two-client complete/fail/rejoin flows; shared outcomes; deterministic settlement receipt |
+| O4 | ❌ | Shared emergency incidents, garages/shops, then original staged interiors/heists; Incident uniqueness, asset ownership, streaming barriers and per-stage recovery |
+| O5 | ❌ | Capacity and wider-world readiness; Measured 2/4/8-client runs, actual game clients and failure injection before proposing larger caps |
 
 Current `Main` defaults to and caps at **8 clients**, maintains every **50 ms**, and `WorldService` creates a registry with a **256-entity** limit. Interest selection uses 300 m entry/400 m retention and a grid prefilter while still scanning the snapshot; it is not a complete spatial index. Measure tick duration, queue age, snapshot/delta bytes, RTT, client frame time, memory, model streaming delay and mission/ledger latency. Replace repeated scans with a verified spatial index only if profiles justify it. No 32-player or whole-map performance claim follows from these static limits.
 
@@ -158,7 +143,7 @@ Run restart-during-payout, duplicate/reordered intents, late baseline, old owner
 
 All game resources and original engine files remain read-only. Apply any new ABI adaptation only to a launcher-managed runtime copy, validate every selected supported resource pack/version, and fail clearly for unsupported inputs. Guard outputs, reports and temporary files against symlink/hard-link aliases; publish from fresh temporary files atomically and compare original input hashes. Store derived geometry only outside game data, never in the repository.
 
-This document changes no component version and ships no new capability. Implementation commits must separately update the appropriate component version and bilingual release note, preserve current automated build/deploy checks, and state actual runtime evidence. Local test harnesses stay ignored. A completed document is a design milestone, not a completed gameplay milestone.
+This document records current source and remaining designs; publication/deployment evidence is tracked separately. Implementation commits must update the appropriate component version and bilingual release note, preserve automated build/deploy checks, and state actual runtime evidence. Local test harnesses stay ignored. A completed document is not a completed gameplay milestone.
 
 ## 简体中文
 
@@ -166,7 +151,7 @@ This document changes no component version and ships no new capability. Implemen
 
 目标是逐步做出具有云层入场、稳定战局、合作活动、持久角色和资产的自有线上世界。现有资源提供大量模型、动画、地图数据与脚本研究线索，但没有一个可直接启动的 GTA Online 后端。方案沿用项目自己的协议和经过版本校验的引擎桥，不承诺兼容官方服务，也不把原线上 YSC 放进 Java 执行。
 
-证据日期为 **2026-10-10**。实测目录与 native 证据见 [REA 资源分析](rea-online-feasibility.md)。已发布启动器 **0.2.16**、已有部署记录中的服务端 **0.4.3** 是发布基线；独立开发的 **0.4.4-world-experimental** NPC 感知改动随此次源码提交交付，实际发布/美国部署以 Actions 为准。本文列出的拟议类和阶段没有因此实现或上线。
+证据日期为 **2026-10-11**。实测目录与 native 证据见 [REA 资源分析](rea-online-feasibility.md)。当前组件版本为启动器 **0.2.18**、服务端 **0.4.6-world-experimental**。[三类核心交互](core-interactions.md#简体中文)中的有限角色、武器和载具修复已实现并完成对应检查；其余类和阶段仍须满足表中证据，不能据此宣称兼容官方 GTA Online 或 FiveM。
 
 审计解读了 1,528 个 RPF 目录，共发现 1,762 条 YSC 文件记录，其中含变体/重复；261 条嵌套 RPF 尚未递归。22 份代表脚本验证了头部与分页范围，没有完整反编译控制流或运行原任务。`freemode`、`fm_mission_controller`、`fm_race_controler`、`gb_delivery`、`gb_casino_heist` 可用来安排后续审计，不能仅凭名称认定任务可玩。原脚本的会话、统计、库存、云存档与场景依赖必须逐项解决。
 
@@ -175,30 +160,22 @@ This document changes no component version and ships no new capability. Implemen
 | 领域 | 当前源码已有 | 拟新增，尚未实现 |
 | --- | --- | --- |
 | 连接与世界 | `Main`、`WorldService`、`WorldRegistry`；公共战局、恢复、epoch/版本/流序号、租约、代次、快照/增量 | `SessionDirectory`、持久角色登录、队伍/邀请及入场凭据 |
-| 实体表现 | 版本固定的引擎桥；角色/车辆、姿态、座位、生命、武器、动画及授权 AI 任务 | 经生命周期验证的物件、检查点、相机、室内与场景桥 |
+| 实体表现 | 版本固定的引擎桥；角色/车辆、小步移动、姿态、座位、生命、武器、动画及授权 AI 任务 | 经生命周期验证的物件、检查点、室内与场景桥 |
 | 世界规则 | 环境、通缉、AI、人口、碰撞与导航服务 | `MissionService`、`ObjectiveValidator`、`IncidentService` 及任务实体预算 |
-| 战斗/装备 | 射击/近战/抛射物规则、武器目录、生命、车辆引擎/车身血量与座位 | `InventoryService`、弹药/装填/消耗品所有权；轮胎/玻璃/车门的 `VehicleDamage` |
+| 战斗/装备 | 射击/近战/抛射物规则、武器目录、有界射击送达、生命、车辆引擎/车身血量与座位 | `InventoryService`、弹药/装填/消耗品所有权；轮胎/玻璃/车门的 `VehicleDamage` |
 | 身份/资产 | 内存会话与有限断线恢复 | `AccountService`、`CharacterStore`、`RewardLedger`、`GarageService` |
-| 入场体验 | 现有加载 UI、`world: true` 渲染门槛 | `OnlineEntryController`、原创云层覆盖、相机下降及取消/恢复 |
+| 入场体验 | 启动器 0.2.18 云层/相机入局、`world: true` 渲染门槛、快照/角色/碰撞门控及服务端确认 | 更多镜头/室内/场景桥及更广的取消/恢复证据 |
 | 运维 | 现有构建发布部署检查 | 容器打包、数据库迁移、备份恢复与容量测量 |
 
 注册表有 `ObjectState` 不等于已有完整物件表现桥；车辆健康字段不等于车库产权或精细损坏。新能力必须通过协议协商，不支持时明确拒绝相关活动或关闭该项能力。
 
-### “看云”加载可以怎样实现
+### 已实现的“看云”入局
 
-分两层实现：引擎世界尚未就绪时，用启动器自有 DOM/canvas 绘制原创云层和天空，显示真实连接、排队、资源加载阶段；现有渲染门槛与必要引擎上下文检查通过之后，才使用经过验证的原生相机进行高空环绕和下降。独立脚本相机和云层 cloud-hat 渲染函数仍须逐个核对本构建版本、ABI、执行线程与清理方式，前期覆盖画面不能提前调用它们。实际 `CPlayerSwitchMgrLong::SetState` 函数包含清空调度、移除车辆/补充人口和场景加载操作，因此不能把原生角色切换当作装饰镜头捷径，否则会干扰服务端共同世界。绘制云层本身不需要一个虚构的“云端后端”；服务端入场与角色状态是另外的就绪门槛。
+启动器 0.2.17、服务端 0.4.5 引入的原生入局已由当前 0.2.18/0.4.6 源码目标继续保留；公开发布/部署状态另行记录。使用原标题画面、`Cloudy 01` 云层和本次尝试拥有的脚本相机；世界未就绪时保留原加载流程，渲染与上下文门槛通过后才启动相机。经过版本核对的 ABI、相机阶段及实际证据见[原生云层入局](native-cloud-entry.md#简体中文)。
 
-拟议状态机与英文示意一致：`连接 → 身份确认 → 快照同步 → 引擎加载 → 资源就绪 → 角色就绪 → 云层环绕 → 下降 → 可操作`。网络与资源可以并行，但所有门槛都要满足。任一等待阶段可失败/取消；可操作阶段断线后进入恢复，再核对快照。
+就绪须同时满足完整世界快照、匹配的角色/代次、模型放置、本地碰撞、相机清理和协商后的服务端确认，计时器、首帧或相机成功不能单独放行。每次尝试保留有界期限、旧消息拒绝和所属上下文清理。高空相机开始渲染后有意随机停留 5–10 秒，再执行三段下降；减少动态效果模式跳过镜头。不调用会改变人口、调度和流送的原始角色切换状态机。
 
-- **连接和身份**：校验 WSS、构建与能力，使用自有账号/访客；排队位置来自服务端。没有持久角色服务时，不显示虚假的“正在同步云存档”。
-- **快照和引擎**：完整接收同一 epoch 的 begin/chunk/end，再消费连续增量。快照完成不代表允许修改世界；GPU 的 `76% / First frame` 不是 `world: true`，不能为相机动画提前停掉加载脚本。原 worker 的 `world` 启发式本身也有 60 秒兜底，因此它仅是最低执行门槛，角色、快照、目标场景/碰撞须另行确认。
-- **资源和角色**：验证模型、目标区域碰撞/室内加载及服务端出生点、实体代次、租约、外观、生命、座位。提交资源请求不等于资源已加载。出生保护和禁止操作需要明确的服务端入场状态，不能只依赖本地无敌。
-- **云层和下降**：本次入场独占相机，路径与高度来自可验证几何，保持目的地流式加载焦点，淡入后恢复游戏相机/操作。相机位置不改变服务器角色坐标，也不能触发任务到点。
-- **可操作和重连**：确认入场与就绪回执后才参与模拟；已经加载的重连可缩短装饰动画，但必须重新对齐状态。
-
-每次入场带 `entry_id`、每阶段有独立截止时间。连接、引擎、资源使用各自预算；资源真实进展只能延长有上限的等待。取消/新尝试必须释放相机、焦点、输入锁、监听器与租约，忽略旧回调。缺相机能力时在角色就绪后使用覆盖画面加淡入；缺碰撞/资源时明确失败，不能生成到未加载区域。支持减少动态效果，不为表现效果故意拖延已完成加载。
-
-验收覆盖冷/热缓存、错误构建、断线、缺模型、延迟快照、每个状态取消、渲染丢失、超时和恢复成功，并核对镜头/操作恢复及资源原哈希。本文尚未实现这套加载画面。
+自动检查覆盖就绪、取消、旧身份、恢复与资源隔离；已有本机截图记录可见云层，原生状态记录下降与清理。更广的真实双客户端冷/热加载、重连和取消观察仍列为 O0 验收，不能把协议或 native mock 当作双端画面证据。
 
 ### 自有任务脚本与服务端状态机
 
@@ -251,16 +228,18 @@ Redis `SETNX` 和另一次余额修改不构成原子支付。数据库失败时
 
 ### 阶段和验收
 
-以下全部为 **❌ 未完成的计划**。
+✅ 只表示该行列出的范围已完成；❌ 表示未完成工作及所需证据。
 
-| 顺序 | 交付范围 | 完成证据 |
+| 顺序 | 状态 | 交付范围与证据 |
 | --- | --- | --- |
-| O0 | 恢复/epoch/租约稳定性、诊断和云层入场原型 | 真实双客户端加载/恢复/取消、相机清理、资源哈希/隔离 |
-| O1 | 最小持久身份、角色会话、奖励账本 | 重复请求、重启、并发登录、备份恢复、无重复入账 |
-| O2 | 服务端库存/弹药、精细车辆损坏、类型化任务基础 | 非法物品/弹药拒绝、晚加入、座位/所有者变化和损坏版本一致 |
-| O3 | 竞速、快递、护送、生存 | 双客户端完成/失败/恢复、共同结果、唯一结算收据 |
-| O4 | 共同紧急事件、车库/商店、原创室内/抢劫 | 事故唯一、产权一致、流式就绪屏障、阶段恢复 |
-| O5 | 容量与扩大世界覆盖 | 实测 2/4/8 客户端、真实游戏负载和故障注入后再考虑扩大人数 |
+| O0 基础 | ✅ | 快照/epoch/租约门控、原云层/相机入局和服务端确认；自动清理、旧消息及资源隔离检查。 |
+| O0 交互 | ✅ | [三类核心交互](core-interactions.md#简体中文)列出的有限移动、射击送达/投射物及座位/损毁修复。 |
+| O0 实机验收 | ❌ | 更广的真实双客户端加载/恢复/取消，以及移动/动作画面观察。 |
+| O1 | ❌ | 最小持久身份、角色会话、奖励账本; 重复请求、重启、并发登录、备份恢复、无重复入账 |
+| O2 | ❌ | 服务端库存/弹药、精细车辆损坏、类型化任务基础; 非法物品/弹药拒绝、晚加入、座位/所有者变化和损坏版本一致 |
+| O3 | ❌ | 竞速、快递、护送、生存; 双客户端完成/失败/恢复、共同结果、唯一结算收据 |
+| O4 | ❌ | 共同紧急事件、车库/商店、原创室内/抢劫; 事故唯一、产权一致、流式就绪屏障、阶段恢复 |
+| O5 | ❌ | 容量与扩大世界覆盖; 实测 2/4/8 客户端、真实游戏负载和故障注入后再考虑扩大人数 |
 
 当前默认且最多 **8 人**，维护周期 **50 ms**，登记实体上限 **256**。兴趣范围为进入 300 米、保留 400 米，虽有格网预筛仍扫描快照，并非完整空间索引。记录 tick 时长、队列等待、快照/增量流量、RTT、客户端帧耗时、内存、模型流式加载与结算延迟，依据瓶颈再引入真正空间索引。这些静态上限不证明支持 32 人或全地图高密度运行。
 
@@ -270,4 +249,4 @@ Redis `SETNX` 和另一次余额修改不构成原子支付。数据库失败时
 
 所有原游戏资源与原引擎始终只读。新增 ABI 适配只生成启动器管理的隔离运行副本，对玩家选择的每份受支持资源核验版本，不支持则明确失败。主输出、报告、临时文件都防止符号链接/硬链接别名写入，使用独立临时文件原子发布，核对原输入哈希。派生几何在游戏目录外生成且不提交。
 
-本文只补充设计，不升组件版本或宣称新能力上线。实际实现时分别维护组件版本与双语更新说明，沿用构建部署检查，仅记录实际运行证据。本地测试材料继续忽略。文档完成不能等同于玩法完成。
+本文记录当前版本和剩余设计，不代替组件发布，也不把文档完成等同于玩法完成。后续实现分别维护组件版本与双语更新说明，沿用构建部署检查，仅记录实际运行证据。本地测试材料继续忽略。

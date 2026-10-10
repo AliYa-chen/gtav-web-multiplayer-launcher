@@ -101,6 +101,7 @@ public final class WorldOwnership {
                                       Map<String, Entity> entities, Map<String, Entity> players) {
         if (anchor.kind() == Kind.PED && !alive(anchor)) return null;
         if (anchor.kind() == Kind.VEHICLE) {
+            if (anchor.components().vehicle().destroyed()) return null;
             Entity driver = entities.get(anchor.components().vehicle().seats().get("driver"));
             if (driver != null && driver.playerId() != null) {
                 // Never hand a player-driven car or its NPC passengers to a bystander.

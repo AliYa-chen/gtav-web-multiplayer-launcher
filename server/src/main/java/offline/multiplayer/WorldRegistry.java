@@ -156,6 +156,7 @@ public final class WorldRegistry {
             for (int index=0; index<passengers; index++) seats.put("passenger:"+index, null);
             return new Vehicle(1000, 1000, seats, new VehicleView(false, false));
         }
+        public boolean destroyed() { return engineHealth <= -4000 || bodyHealth <= 0; }
     }
     public record ObjectState(boolean dynamic) {}
     public record Attachment(String entityId, String seat) {
@@ -311,6 +312,8 @@ public final class WorldRegistry {
         if (old.components.attachment != null) throw reject("attached_entity", "已入座的角色不能独立提交移动");
         if (old.components.combat != null && !old.components.combat.alive())
             throw reject("dead_entity", "死亡实体不能提交动态状态");
+        if (old.kind==Kind.VEHICLE && old.components.vehicle.destroyed())
+            throw reject("destroyed_vehicle", "已摧毁载具不能继续模拟");
         if (old.kind == Kind.OBJECT && !old.components.object.dynamic)
             throw reject("static_entity", "静态物件不能由客户端移动");
         double speed=old.kind==Kind.PED ? 14 : old.kind==Kind.VEHICLE ? 150 : 100;
@@ -407,9 +410,25 @@ public final class WorldRegistry {
         tick(nowTick); Entity old=require(id); revision(old,expectedRevision);
         if (old.kind!=Kind.VEHICLE) throw reject("invalid_component","只有车辆有引擎和车身生命值");
         Components c=old.components; Vehicle vehicle=c.vehicle;
-        Entity updated=updated(old,new Components(c.transform,null,
-            new Vehicle(engineHealth,bodyHealth,vehicle.seats,vehicle.view),null,c.combat,null));
-        entities.put(id,updated); return commit(Change.UPDATE,List.of(updated),List.of());
+        Vehicle damaged=new Vehicle(engineHealth,bodyHealth,vehicle.seats,vehicle.view);
+        Map<String,Entity> updates=new LinkedHashMap<>();
+        Transform transform=c.transform;
+        if(damaged.destroyed()){
+            Map<String,String> seats=new LinkedHashMap<>(vehicle.seats);
+            for(Map.Entry<String,String> seat:vehicle.seats.entrySet()){
+                if(seat.getValue()==null)continue;
+                Entity ped=require(seat.getValue()); Components pc=ped.components;
+                updates.put(ped.entityId,updated(ped,new Components(exitTransform(old,seat.getKey()),pc.ped,null,null,pc.combat,null)));
+                seats.put(seat.getKey(),null);
+            }
+            damaged=new Vehicle(engineHealth,bodyHealth,seats,new VehicleView(false,false));
+            transform=new Transform(c.transform.position,c.transform.rotation,Vector.zero(),Vector.zero());
+        }
+        Entity updated=updated(old,new Components(transform,null,damaged,null,c.combat,null));
+        if(damaged.destroyed() && updated.ownerId!=null)updated=ownedAtRevision(updated,null,0);
+        updates.put(id,updated);updates.forEach(entities::put);
+        if(damaged.destroyed())for(String changed:updates.keySet())motion.put(changed,new MotionBudget(nowTick,2));
+        return commit(Change.UPDATE,new ArrayList<>(updates.values()),List.of());
     }
 
     public synchronized Commit respawnTrusted(String id, Transform transform, Combat combat,
@@ -433,6 +452,8 @@ public final class WorldRegistry {
                                                   long leaseUntilTick, long nowTick) throws Rejection {
         tick(nowTick); Entity old=require(id); revision(old, expectedRevision); lease(ownerId, leaseUntilTick, nowTick);
         if (ownerId==null) throw reject("invalid_owner", "迁移目标不能为空");
+        if (old.kind==Kind.VEHICLE && old.components.vehicle.destroyed())
+            throw reject("destroyed_vehicle", "已摧毁载具不能授予模拟权");
         Entity updated=owned(old, ownerId, leaseUntilTick);
         entities.put(id, updated); motion.put(id, new MotionBudget(nowTick, 2));
         return commit(Change.OWNER, List.of(updated), List.of());
@@ -446,6 +467,8 @@ public final class WorldRegistry {
         List<Entity> values=new ArrayList<>();
         for(String id:ids){Entity entity=require(id);
             if(entity.playerId!=null || entity.kind==Kind.OBJECT)throw reject("invalid_owner","不能通过人口迁移修改玩家归属");
+            if(ownerId!=null && entity.kind==Kind.VEHICLE && entity.components.vehicle.destroyed())
+                throw reject("destroyed_vehicle","已摧毁载具不能授予模拟权");
             if(!Objects.equals(entity.ownerId,ownerId) || entity.ownerId!=null && entity.leaseUntilTick<=nowTick)
                 values.add(owned(entity,ownerId,ownerId==null?0:nowTick+limits.defaultLeaseTicks));
         }
@@ -485,6 +508,7 @@ public final class WorldRegistry {
         if (ped.kind!=Kind.PED || vehicle.kind!=Kind.VEHICLE || !actorId.equals(ped.playerId))
             throw reject("invalid_seat", "只能请求自己的玩家角色进入车辆");
         if (ped.components.combat!=null && !ped.components.combat.alive()) throw reject("dead_entity", "死亡角色不能入座");
+        if (vehicle.components.vehicle.destroyed()) throw reject("destroyed_vehicle", "已摧毁载具不能入座");
         if (ped.components.attachment!=null || !vehicle.components.vehicle.seats.containsKey(seat))
             throw reject("seat_unavailable", "座位不存在、被占用或角色已入座");
         Entity evicted=null;String occupant=vehicle.components.vehicle.seats.get(seat);
@@ -506,10 +530,11 @@ public final class WorldRegistry {
         Entity updatedVehicle=updated(vehicle,vc);
         if ("driver".equals(seat)) updatedVehicle=ownedAtRevision(updatedVehicle,actorId,nowTick+limits.defaultLeaseTicks);
         Components pc=ped.components;
-        Entity updatedPed=updated(ped,new Components(pc.transform,pc.ped,null,null,pc.combat,new Attachment(vehicleId,seat)));
+        Entity updatedPed=updated(ped,new Components(vehicle.components.transform,pc.ped,null,null,pc.combat,new Attachment(vehicleId,seat)));
         entities.put(vehicleId,updatedVehicle); entities.put(pedId,updatedPed);
-        if(evicted!=null)entities.put(evicted.entityId,evicted);
-        motion.put(vehicleId,new MotionBudget(nowTick,2));
+        if(evicted!=null){entities.put(evicted.entityId,evicted);motion.put(evicted.entityId,new MotionBudget(nowTick,2));}
+        motion.put(pedId,new MotionBudget(nowTick,2));
+        if("driver".equals(seat))motion.put(vehicleId,new MotionBudget(nowTick,2));
         return commit(Change.SEAT,evicted==null?List.of(updatedVehicle,updatedPed):List.of(updatedVehicle,updatedPed,evicted),List.of());
     }
 
@@ -527,6 +552,8 @@ public final class WorldRegistry {
         if(ped.kind!=Kind.PED || ped.playerId!=null || vehicle.kind!=Kind.VEHICLE || ped.components.attachment!=null
             || !vehicle.components.vehicle.seats.containsKey(seat) || vehicle.components.vehicle.seats.get(seat)!=null)
             throw reject("invalid_seat","NPC座位分配无效");
+        if(vehicle.components.vehicle.destroyed() || ped.components.combat!=null && !ped.components.combat.alive())
+            throw reject("invalid_seat","死亡角色或已摧毁载具不能分配座位");
         Map<String,String> seats=new LinkedHashMap<>(vehicle.components.vehicle.seats);seats.put(seat,pedId);
         Vehicle v=vehicle.components.vehicle;
         Entity car=updated(vehicle,new Components(vehicle.components.transform,null,new Vehicle(v.engineHealth,v.bodyHealth,seats,v.view),null,vehicle.components.combat,null));
@@ -572,7 +599,8 @@ public final class WorldRegistry {
             for (String pedId:old.components.vehicle.seats.values()) {
                 if (pedId==null) continue;
                 Entity ped=require(pedId); Components c=ped.components;
-                updates.put(pedId,updated(ped,new Components(c.transform,c.ped,c.vehicle,c.object,c.combat,null)));
+                updates.put(pedId,updated(ped,new Components(exitTransform(old,c.attachment.seat),c.ped,c.vehicle,c.object,c.combat,null)));
+                motion.put(pedId,new MotionBudget(nowTick,2));
             }
         }
         updates.remove(id); updates.forEach(entities::put);
@@ -609,8 +637,19 @@ public final class WorldRegistry {
             updatedVehicle=ownedAtRevision(updatedVehicle,null,0);
         updates.put(vehicle.entityId,updatedVehicle);
         Components c=ped.components;
-        updates.put(ped.entityId,updated(ped,new Components(c.transform,c.ped,null,null,c.combat,null)));
-        motion.put(vehicle.entityId,new MotionBudget(nowTick,2));
+        updates.put(ped.entityId,updated(ped,new Components(exitTransform(vehicle,attachment.seat),c.ped,null,null,c.combat,null)));
+        motion.put(ped.entityId,new MotionBudget(nowTick,2));
+        if("driver".equals(attachment.seat))motion.put(vehicle.entityId,new MotionBudget(nowTick,2));
+    }
+    /** Conservative seat-side exit anchor; subsequent native walking is still bounded by the player budget. */
+    private static Transform exitTransform(Entity vehicle,String seat){
+        Transform car=vehicle.components.transform;double heading=Math.toRadians(car.rotation.heading());
+        int passenger="driver".equals(seat)?-1:Integer.parseInt(seat.substring("passenger:".length()));
+        double side=(passenger<0 || passenger%2==1)?-1.5:1.5;
+        double row=passenger<1?0:Math.min(3,(passenger+1)/2)*-.7;
+        Vector position=new Vector(Math.max(-16000,Math.min(16000,car.position.x+Math.cos(heading)*side-Math.sin(heading)*row)),
+            Math.max(-16000,Math.min(16000,car.position.y+Math.sin(heading)*side+Math.cos(heading)*row)),car.position.z);
+        return new Transform(position,car.rotation,Vector.zero(),Vector.zero());
     }
     private void validate(Kind kind,long model,Components components) throws Rejection {
         validateShape(kind,model,components);

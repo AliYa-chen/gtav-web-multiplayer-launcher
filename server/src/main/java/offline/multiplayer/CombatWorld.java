@@ -258,7 +258,7 @@ public final class CombatWorld {
         if(rule==null)throw reject("unsupported_weapon",String.format("本地资源目录没有武器 0x%08x",weapon));
         if(!rule.shootable())throw reject("invalid_shot","该目录项不能射击；近战武器应提交近战意图");
         double range=distance(origin,target);
-        if(range<=.001 || range>Math.max(MAX_RAY_LENGTH,rule.range()))
+        if(range<=.001 || range>Math.max(MAX_RAY_LENGTH,rule.range())+.001)
             throw reject("invalid_shot","射击射线超出当前武器允许的输入距离");
         if(rule.projectile() && (projectiles.size()+hazards.size()>=128 ||
             projectiles.values().stream().filter(p->p.attackerId.equals(id)).count()+
@@ -468,24 +468,7 @@ public final class CombatWorld {
             WorldCollision.Result result=collision.take(p.query);
             if(result==null)return;p.query=null;
             if(!result.complete()){expireProjectile(p,now,events);return;}
-            long start=p.validatedUntil;
-            for(int i=0;i<result.hits().size();i++){
-                long a=start+(p.queryEnd-start)*i/result.hits().size(),b=start+(p.queryEnd-start)*(i+1)/result.hits().size();
-                WorldCollision.Segment segment=new WorldCollision.Segment(vector(p.at(a)),vector(p.at(b)),.02);
-                WorldCollision.Hit hit=result.hits().get(i);double length=segment.from().distance(segment.to());
-                if(length>.000001){
-                    double[] direction=direction(segment.from().values(),segment.to().values());
-                    WorldRegistry.Entity ped=nearest(segment.from().values(),direction,length,p.attackerEntity);
-                    if(ped!=null){double distance=capsule(segment.from().values(),direction,length,ped.components().transform().position().values());
-                        if(hit==null || distance<segment.from().distance(hit.position())){
-                            hit=new WorldCollision.Hit(vector(point(segment.from().values(),direction,distance)),new WorldRegistry.Vector(-direction[0],-direction[1],-direction[2]),0);
-                            p.hitEntity=ped.entityId();p.hitGeneration=ped.generation();
-                        }
-                    }
-                }
-                if(hit!=null){p.impact=hit;p.impactAt=a+Math.round((b-a)*Math.max(0,Math.min(1,WorldCollision.projection(segment,p.impact.position()))));break;}
-            }
-            p.validatedUntil=p.queryEnd;
+            resolveProjectileSegments(p,result.hits());
         }
         if(!p.landed && p.impact!=null && now>=p.impactAt){
             p.position=p.impact.position().values();WeaponPhysics.Physics physics=WeaponPhysics.byHash(p.rule.hash());
@@ -528,7 +511,9 @@ public final class CombatWorld {
                     segments.add(new WorldCollision.Segment(vector(from),vector(to),.02));
                 }
                 p.query=collision.submit(p.attackerId,"projectile",segments,now);
-                if(p.query==null){expireProjectile(p,now,events);return;}
+                // A null ticket means the static-only query completed with no world obstruction.
+                // Continue the same authoritative ped sweep; it is not a query failure.
+                if(p.query==null)resolveProjectileSegments(p,Collections.nCopies(segments.size(),null));
                 return;
             }
             p.position=p.at(Math.min(now,p.validatedUntil));
@@ -538,6 +523,26 @@ public final class CombatWorld {
         if(timed || impact || (p.detonateAt>0 && now>=p.detonateAt) || p.remoteRequested){
             projectiles.remove(p.id);explode(p,now,events);
         }
+    }
+    private void resolveProjectileSegments(Projectile p,List<WorldCollision.Hit> hits){
+        long start=p.validatedUntil;
+        for(int i=0;i<hits.size();i++){
+            long a=start+(p.queryEnd-start)*i/hits.size(),b=start+(p.queryEnd-start)*(i+1)/hits.size();
+            WorldCollision.Segment segment=new WorldCollision.Segment(vector(p.at(a)),vector(p.at(b)),.02);
+            WorldCollision.Hit hit=hits.get(i);double length=segment.from().distance(segment.to());
+            if(length>.000001){
+                double[] direction=direction(segment.from().values(),segment.to().values());
+                WorldRegistry.Entity ped=nearest(segment.from().values(),direction,length,p.attackerEntity);
+                if(ped!=null){double distance=capsule(segment.from().values(),direction,length,ped.components().transform().position().values());
+                    if(hit==null || distance<segment.from().distance(hit.position())){
+                        hit=new WorldCollision.Hit(vector(point(segment.from().values(),direction,distance)),new WorldRegistry.Vector(-direction[0],-direction[1],-direction[2]),0);
+                        p.hitEntity=ped.entityId();p.hitGeneration=ped.generation();
+                    }
+                }
+            }
+            if(hit!=null){p.impact=hit;p.impactAt=a+Math.round((b-a)*Math.max(0,Math.min(1,WorldCollision.projection(segment,p.impact.position()))));break;}
+        }
+        p.validatedUntil=p.queryEnd;
     }
     private void expireProjectile(Projectile p,long now,List<Map<String,Object>> events){
         collision.discard(p.query);projectiles.remove(p.id);events.add(projectileEvent(p,"expired",now));
