@@ -158,4 +158,4 @@ Record the exact client build commit, server build commit, platform versions, an
 
 For integration into another website, use the [website integration guide](website-integration.md). Detailed engine evidence remains in [引擎分析](引擎分析.md), [resource isolation](启动器资源隔离.md), and [world design](统一世界服务端设计.md).
 
-Automatic GitHub builds, release-note files and component versioning are documented in [automated releases](releases.md). Server deployment follows that workflow; website configuration changes remain explicit operations.
+Automatic GitHub builds, release-note files and component versioning are documented in [automated releases](releases.md). US server deployment, launcher downloads and generated PHP configuration follow that workflow. China server deployment remains a separately requested local operation; portal changes remain separate.

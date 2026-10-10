@@ -2,7 +2,7 @@
 
 [Website](https://gtav.2t.hk/) · [Repository](https://github.com/AliYa-chen/gtav-web-multiplayer-launcher)
 
-The single `release.yml` workflow builds and publishes separately versioned launcher and server releases. After a new server release is published, its `deploy-server` job installs the verified JAR into the existing US services. China cannot be reached from foreign runners; its existing services are deployed from the maintainer machine only when explicitly requested. Launcher-only updates do not restart servers. The workflow does not change the portal or `remote-config/index.php`.
+The single `release.yml` workflow builds and publishes separately versioned launcher and server releases. After a new server release is published, its `deploy-server` job installs the verified JAR into the existing US services. China cannot be reached from foreign runners; its existing services are deployed from the maintainer machine only when explicitly requested. Launcher-only updates do not restart servers. The server job preserves website files; the independent launcher deployment job manages download packages and generated `index.php`. Portal changes remain separate.
 
 ## Required configuration
 
@@ -39,7 +39,7 @@ Player resource inputs, extracted world data, certificates, proxy configuration,
 
 # 服务端自动部署
 
-唯一的 `release.yml` 工作流分别构建并发布独立版本的启动器与服务端。新服务端 Release 发布后，`deploy-server` 将通过核验的 JAR 安装到美国现有服务。中国服务器无法从国外访问，仅在用户另行明确要求后通过维护者本机部署。仅修改启动器时不会重启服务端；工作流不修改门户或 `remote-config/index.php`。
+唯一的 `release.yml` 工作流分别构建并发布独立版本的启动器与服务端。新服务端 Release 发布后，`deploy-server` 将通过核验的 JAR 安装到美国现有服务。中国服务器无法从国外访问，仅在用户另行明确要求后通过维护者本机部署。仅修改启动器时不会重启服务端；服务端任务保留网站文件；独立启动器部署任务管理下载包及生成的 `index.php`，门户改版仍独立处理。
 
 ## 凭据与环境
 

@@ -16,7 +16,7 @@ The repository contains project source and documentation. **It does not provide 
 - Public-session endpoints, names, announcements, and download metadata come from the [configuration API](https://oss.2t.hk/gtav/). Public server addresses are not compiled into the client.
 - A standalone Java 17+ server owns player/entity identity, seats, ownership leases, combat decisions, respawning, population, weather, and law rules. Authorized client engines execute assigned native movement and vehicle simulation.
 
-**Launcher 0.2.16; server 0.4.3-world-experimental.** The launcher fixes the synchronized explosive-effect rendering path and retains shared-vehicle seating. One GitHub workflow builds both desktop platforms and the independently versioned Java server, then publishes separate Launcher/Server releases from English-first update MD files. Server 0.4.3 is deployed to the China/US main and experimental routes. See [automated releases](docs/releases.md).
+**Launcher 0.2.16; server 0.4.3-world-experimental.** The launcher fixes the synchronized explosive-effect rendering path and retains shared-vehicle seating. One GitHub workflow builds both desktop platforms and the independently versioned Java server, then publishes separate Launcher/Server releases from English-first update MD files and deploys launcher downloads plus PHP configuration to the download site. Server 0.4.3 is deployed to the China/US main and experimental routes. See [automated releases](docs/releases.md).
 
 Multiplayer remains experimental. Static collision and pedestrian navigation cover roughly **600 × 600 metres around the test spawn**, not the whole map. There is no complete server-side RAGE physics runtime or migration of every single-player script, tool, mission, or vehicle weapon. This uses a custom protocol and does not implement native GTA Online or FiveM compatibility. Protocol tests do not establish complete gameplay synchronization; `game_sync` and `native_clone_transport` remain false.
 
@@ -181,7 +181,7 @@ Outputs are under `desktop/src-tauri/target/release/`; the macOS App is in `bund
 | `tools/` | Build/package tools, read-only engine analysis, isolated adapter generation, and optional world-data extraction. |
 | `tools/readonly_game_outputs.py` | Shared output guard and atomic publishing helpers that protect player resource inputs. |
 | `docs/` | Design notes, protocol documentation, audits, limitations, and historical release/deployment evidence. |
-| `.github/workflows/` | Unified automated builds, component releases and server deployment. |
+| `.github/workflows/` | Unified builds, component releases, launcher download/configuration deployment and US server deployment. |
 | `release-notes/` | English-first, Chinese-second update MD files consumed by the release workflow. |
 | `serve_local.py` | Optional Python local HTTP/resource server and explicit local multiplayer development startup. |
 | `Launch-Local.cmd` / `Start-Local.ps1` | Windows wrappers for starting the Python local server; require an available Python runtime. |
