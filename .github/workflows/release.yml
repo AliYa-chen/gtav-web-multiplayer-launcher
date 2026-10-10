@@ -411,7 +411,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Check out source and release provenance / 拉取源码与历史发布来源
         uses: actions/checkout@v4
@@ -431,7 +431,7 @@ jobs:
           --metadata-output archive/launcher-deployment/deployment.json
       - name: Install pinned SSH transport / 安装固定版本 SSH 通信库
         run: python -m pip install 'paramiko==4.0.0'
-      - name: Deploy packages, activate PHP and retire old packages / 部署新包、启用配置并清理旧包
+      - name: Fetch packages, activate PHP and retire old packages / 拉取新包、启用配置并清理旧包
         env:
           GTA_OSS_SSH_HOST: ${{ secrets.GTA_OSS_SSH_HOST }}
           GTA_OSS_SSH_PORT: ${{ secrets.GTA_OSS_SSH_PORT }}
@@ -441,6 +441,7 @@ jobs:
           GTA_OSS_SITE_ROOT: /opt/1panel/www/sites/oss.2t.hk/index/gtav
           GTA_OSS_PUBLIC_ORIGIN: https://oss.2t.hk/gtav
           GTA_OSS_PHP_CONTAINER: PHP85
+          GTA_OSS_DOWNLOAD_MIRRORS: '["https://gh-proxy.com/", "https://ghfast.top/", "https://gh-proxy.org/"]'
         run: >-
           python -B tools/deploy_launcher.py
           --assets-directory archive/launcher-deployment/assets

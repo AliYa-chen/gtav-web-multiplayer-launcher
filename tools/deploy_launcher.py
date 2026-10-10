@@ -32,6 +32,43 @@ class LauncherDeploymentError(RuntimeError):
     pass
 
 
+def download_mirror(value):
+    if not value:
+        return ''
+    if not isinstance(value, str) or re.fullmatch(r'https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/', value) is None:
+        raise LauncherDeploymentError('OSS download mirror must be a plain HTTPS origin ending with /')
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.port is not None and not 1 <= parsed.port <= 65535:
+        raise LauncherDeploymentError('OSS download mirror has an invalid port')
+    return value
+
+
+def download_mirrors(value, legacy=''):
+    try:
+        values = json.loads(value) if value else []
+    except (TypeError, json.JSONDecodeError):
+        raise LauncherDeploymentError('OSS download mirrors must be a JSON array of HTTPS origins') from None
+    if not isinstance(values, list) or len(values) > 5 or any(not isinstance(item, str) or not item for item in values):
+        raise LauncherDeploymentError('OSS download mirrors must list at most five HTTPS origins')
+    mirrors = [download_mirror(item) for item in values]
+    if legacy:
+        mirrors.append(download_mirror(legacy))
+    return list(dict.fromkeys(mirrors))
+
+
+def public_release_urls(metadata, name, mirrors):
+    repository = metadata.get('repository')
+    if (not isinstance(repository, str) or re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository) is None
+            or any(part in ('.', '..') for part in repository.split('/'))):
+        raise LauncherDeploymentError('Launcher repository must identify a public owner/repository')
+    candidate = version(metadata.get('version'))
+    if metadata.get('tag') != f'launcher-v{candidate}' or name not in {row['name'] for row in metadata['payloads']}:
+        raise LauncherDeploymentError('Launcher download must identify an exact verified release asset')
+    official = f'https://github.com/{repository}/releases/download/launcher-v{candidate}/{name}'
+    mirrors = [download_mirror(mirror) for mirror in mirrors]
+    return [mirror + official for mirror in mirrors] + [official]
+
+
 def validate_local(assets_directory, config, metadata):
     assets_directory, config, metadata = map(Path, (assets_directory, config, metadata))
     if assets_directory.is_symlink() or not assets_directory.is_dir():
@@ -82,6 +119,8 @@ def validate_local(assets_directory, config, metadata):
             if row.get('bytes') != path.stat().st_size or row.get('sha256') != sha256(path):
                 raise LauncherDeploymentError('Launcher payload differs from its original SHA-256 or size')
     rows = description['payloads']
+    for row in rows:
+        public_release_urls(description, row['name'], [])
     if {row.get('platform') for row in rows} != {'windows_x64', 'macos_arm64'}:
         raise LauncherDeploymentError('Launcher metadata must contain Windows x64 and macOS ARM64')
     mapping = {'windows_x64': payloads[0].name, 'macos_arm64': payloads[1].name}
@@ -140,7 +179,10 @@ def settings():
     container = os.environ.get('GTA_OSS_PHP_CONTAINER') or ''
     if container and re.fullmatch(r'[A-Za-z0-9_.-]+', container) is None:
         raise LauncherDeploymentError('Invalid OSS PHP container name')
-    return values, keys, {'site': site, 'private': private, 'origin': origin.rstrip('/'), 'php_container': container}
+    mirrors = download_mirrors(os.environ.get('GTA_OSS_DOWNLOAD_MIRRORS', ''),
+                               os.environ.get('GTA_OSS_DOWNLOAD_MIRROR', ''))
+    return values, keys, {'site': site, 'private': private, 'origin': origin.rstrip('/'),
+                          'php_container': container, 'download_mirrors': mirrors}
 
 
 def connect(values, keys):
@@ -152,7 +194,8 @@ def connect(values, keys):
     try:
         client.connect(values['HOST'], port=int(values['PORT']), username=values['USER'],
                        password=values['PASSWORD'], look_for_keys=False, allow_agent=False,
-                       timeout=15, auth_timeout=15, banner_timeout=15)
+                       timeout=15, auth_timeout=15, banner_timeout=15, compress=True)
+        client.get_transport().set_keepalive(30)
     except Exception as error:
         client.close()
         raise LauncherDeploymentError('OSS SSH failed: ' + ssh_error_category(error, paramiko)) from None
@@ -162,7 +205,7 @@ def connect(values, keys):
 # Runs in one SSH process. Its exclusive flock spans staging, HTTPS checks and
 # publication, including deployments started outside this GitHub workflow.
 REMOTE_TRANSACTION = r'''
-import fcntl,hashlib,json,os,pathlib,re,shutil,signal,stat,subprocess,sys,tempfile
+import fcntl,hashlib,json,os,pathlib,re,shutil,signal,stat,subprocess,sys,tempfile,urllib.parse
 class Fail(Exception):pass
 state=None
 def interrupted(signum,frame):raise SystemExit(1)
@@ -250,6 +293,13 @@ def rollback():
  state['rolled_back']=True;journal()
 def begin(request):
  global state
+ repository=request.get('repository')
+ if not isinstance(repository,str) or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',repository) or any(part in ('.','..') for part in repository.split('/')):raise Fail('invalid_release_repository')
+ mirrors=request.get('download_mirrors',[])
+ if not isinstance(mirrors,list) or len(mirrors)>6:raise Fail('invalid_download_mirror')
+ for mirror in mirrors:
+  if not isinstance(mirror,str) or not re.fullmatch(r'https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/',mirror):raise Fail('invalid_download_mirror')
+  if urllib.parse.urlsplit(mirror).port is not None and not 1<=urllib.parse.urlsplit(mirror).port<=65535:raise Fail('invalid_download_mirror')
  site=ordinary(request['site'],'directory');private=ordinary(request['private'],'directory')
  if private==site or private.is_relative_to(site) or site.is_relative_to(private):raise Fail('private_storage_must_be_outside_site')
  # A hard kill/power loss cannot run Python finally. Preserve its journal and
@@ -270,29 +320,59 @@ def begin(request):
   ordinary(entry,'file')
   if found>candidate:raise Fail('newer_launcher_file_already_present')
   if found<candidate:older.append({'name':entry.name,'sha256':digest(entry),'attrs':attributes(entry)})
+ existing_names=[]
  for row in request['payloads']:
   target=ordinary(site/row['name'],missing=True)
-  if target.exists() and digest(target)!=row['sha256']:raise Fail('same_version_payload_is_immutable')
+  if target.exists():
+   ordinary(target,'file')
+   if target.stat().st_size!=row['bytes'] or digest(target)!=row['sha256']:raise Fail('same_version_payload_is_immutable')
+   existing_names.append(row['name'])
  transaction=pathlib.Path(tempfile.mkdtemp(prefix='transaction-',dir=private));os.chmod(transaction,0o700)
  stage=transaction/'stage';backup=transaction/'backup';mkdir(stage);mkdir(backup)
  state={'site':str(site),'transaction':str(transaction),'stage':str(stage),'backup':str(backup),
   'version':request['version'],'payloads':request['payloads'],'config_sha256':request['config_sha256'],
   'index_attrs':attrs,'index_original_sha256':digest(index),'older':older,'added':[],'removed':[],
-  'switched':False,'committed':False,'rolled_back':False,'php_container':request['php_container']}
+  'switched':False,'committed':False,'rolled_back':False,'php_container':request['php_container'],
+  'repository':repository,'download_mirrors':mirrors}
  fresh_copy(index,backup/'index.php',attrs);journal()
- return {'stage':str(stage),'backup':str(backup),'current':php(index.read_bytes(),request['php_container']), 'older_files':len(older)}
+ return {'stage':str(stage),'backup':str(backup),'current':php(index.read_bytes(),request['php_container']), 'older_files':len(older),'existing_names':existing_names}
+def fetch(request):
+ row=next((row for row in state['payloads'] if row['name']==request.get('name')),None)
+ if row is None or managed_version(row['name'])!=semver(state['version']):raise Fail('invalid_fetch_payload')
+ official='https://github.com/'+state['repository']+'/releases/download/launcher-v'+state['version']+'/'+row['name']
+ permitted=[official]+[mirror+official for mirror in state['download_mirrors']]
+ url=request.get('url')
+ if not isinstance(url,str) or url not in permitted:raise Fail('invalid_fetch_url')
+ stage=ordinary(state['stage'],'directory');target=ordinary(stage/row['name'],missing=True)
+ if target.exists():raise Fail('staged_payload_already_exists')
+ descriptor,name=tempfile.mkstemp(prefix='.fetch-',dir=stage);os.close(descriptor);temporary=pathlib.Path(name)
+ try:
+  ordinary(temporary,'file')
+  try:
+   result=subprocess.run(['curl','--proto','=https','--proto-redir','=https','--fail','--location','--silent','--show-error','--connect-timeout','8','--max-time','120','--max-filesize',str(row['bytes']),'--output',str(temporary),url],capture_output=True,timeout=130)
+  except (OSError,subprocess.TimeoutExpired):return {'fetched':False,'reason':'download_failed'}
+  if result.returncode:return {'fetched':False,'reason':'download_failed'}
+  ordinary(temporary,'file')
+  if temporary.stat().st_size!=row['bytes'] or digest(temporary)!=row['sha256']:return {'fetched':False,'reason':'download_integrity_failed'}
+  with temporary.open('rb') as downloaded:os.fsync(downloaded.fileno())
+  ordinary(target,missing=True)
+  if target.exists():raise Fail('staged_payload_already_exists')
+  os.replace(temporary,target)
+  return {'fetched':True,'source_host':urllib.parse.urlsplit(url).hostname}
+ finally:temporary.unlink(missing_ok=True)
 def install():
  site=pathlib.Path(state['site']);stage=pathlib.Path(state['stage'])
  config=ordinary(stage/'candidate-index.php','file')
  if digest(config)!=state['config_sha256']:raise Fail('staged_config_hash_mismatch')
  expected=php(config.read_bytes(),state['php_container'])
  for row in state['payloads']:
-  source=ordinary(stage/row['name'],'file')
-  if source.stat().st_size!=row['bytes'] or digest(source)!=row['sha256']:raise Fail('staged_payload_hash_mismatch')
   target=ordinary(site/row['name'],missing=True)
   if target.exists():
-   if digest(target)!=row['sha256']:raise Fail('same_version_payload_is_immutable')
+   ordinary(target,'file')
+   if target.stat().st_size!=row['bytes'] or digest(target)!=row['sha256']:raise Fail('same_version_payload_is_immutable')
    continue
+  source=ordinary(stage/row['name'],'file')
+  if source.stat().st_size!=row['bytes'] or digest(source)!=row['sha256']:raise Fail('staged_payload_hash_mismatch')
   state['added'].append({'name':row['name'],'sha256':row['sha256']});journal();fresh_copy(source,target,state['index_attrs'])
  return {'candidate':expected,'payloads_ready':True}
 def switch():
@@ -327,6 +407,7 @@ try:
   try:
    request=json.loads(line);operation=request['operation']
    if operation=='begin':result=begin(request)
+   elif operation=='fetch':result=fetch(request)
    elif operation=='install':result=install()
    elif operation=='switch':result=switch()
    elif operation=='cleanup':result=cleanup()
@@ -350,7 +431,7 @@ finally:
 class RemoteTransaction:
     def __init__(self, client, private):
         self.stdin, self.stdout, self.stderr = client.exec_command(
-            'python3 -u -c ' + shlex.quote(REMOTE_TRANSACTION), timeout=60)
+            'python3 -u -c ' + shlex.quote(REMOTE_TRANSACTION), timeout=160)
         self.stdin.write(json.dumps({'private': private}) + '\n')
         self.stdin.flush()
         self.read()
@@ -465,15 +546,35 @@ def verify_public_config(origin, expected, timeout=45):
 def upload(client, stage, files):
     sftp = client.open_sftp()
     try:
+        sftp.get_channel().settimeout(60)
         for source, name in files:
+            size = source.stat().st_size
+            print(f'Uploading {name} ({size} bytes)', flush=True)
             destination = stage + '/' + name
             with sftp.open(destination, 'wx') as target, source.open('rb') as stream:
                 target.set_pipelined(True)
                 for chunk in iter(lambda: stream.read(1024 * 1024), b''):
                     target.write(chunk)
             sftp.chmod(destination, 0o600)
+            print(f'Uploaded {name} ({size} bytes)', flush=True)
     finally:
         sftp.close()
+
+
+def fetch_payloads(transaction, metadata, mirrors, payloads):
+    fetched, sources = set(), {}
+    for path in payloads:
+        for url in public_release_urls(metadata, path.name, mirrors):
+            host = urllib.parse.urlsplit(url).hostname
+            print(f'Fetching {path.name} from {host}', flush=True)
+            result = transaction.call('fetch', name=path.name, url=url)
+            if result.get('fetched') is True:
+                fetched.add(path.name)
+                sources[path.name] = host
+                print(f'Fetched {path.name} from {host}', flush=True)
+                break
+            print(f'Fetch failed for {path.name} from {host}; trying next source or SSH upload', flush=True)
+    return fetched, sources
 
 
 def main():
@@ -495,12 +596,18 @@ def main():
         client = connect(values, keys)
         transaction = RemoteTransaction(client, config['private'])
         begin = transaction.call('begin', **config, version=metadata['version'], payloads=metadata['payloads'],
-                                 config_sha256=metadata['config_sha256'])
+                                 config_sha256=metadata['config_sha256'], repository=metadata['repository'])
         audit['backup'] = begin['backup']
         live_version = begin['current'].get('update', {}).get('latest_version')
         if tuple(map(int, version(live_version).split('.'))) > tuple(map(int, metadata['version'].split('.'))):
             raise LauncherDeploymentError('Live launcher version is newer; downgrade refused')
-        upload(client, begin['stage'], [(path, path.name) for path in payloads] + [(args.config, 'candidate-index.php')])
+        existing_names = set(begin['existing_names'])
+        audit['reused_payloads'] = len(existing_names)
+        missing = [path for path in payloads if path.name not in existing_names]
+        fetched, sources = fetch_payloads(transaction, metadata, config['download_mirrors'], missing)
+        audit.update(fetched_payloads=len(fetched), payload_sources=sources)
+        upload(client, begin['stage'], [(path, path.name) for path in missing if path.name not in fetched]
+               + [(args.config, 'candidate-index.php')])
         installed = transaction.call('install')
         expected = installed['candidate']
         verify_candidate(expected, metadata, config['origin'])

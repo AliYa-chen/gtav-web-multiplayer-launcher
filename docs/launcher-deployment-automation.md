@@ -26,11 +26,15 @@ Configure repository **Settings → Secrets and variables → Actions → Reposi
 
 Only the deployment step receives these values as environment variables. The workflow keeps SSH host-key and public HTTPS certificate verification enabled and does not print credentials. The current 1Panel PHP runtime is the existing `PHP85` container, used to lint and render the candidate through standard input; no panel, PHP, proxy or service configuration changes are needed.
 
+### Transfer through a public acceleration source
+
+The download server fetches public Release files through the configured HTTPS acceleration prefixes (`GTA_OSS_DOWNLOAD_MIRRORS`: `https://gh-proxy.com/`, `https://ghfast.top/`, `https://gh-proxy.org/`), trying them in order. Only public repository/tag/file URLs go to this service; no GitHub token or SSH credential is sent. Every result must match the original GitHub size and SHA-256 before it becomes a staged package. Failed or mismatched mirror responses try the next source, then GitHub, then bounded SFTP upload. The mirror accelerates transport and cannot change the accepted package bytes. Existing same-version, same-hash packages are reused for configuration-only updates. SSH compression, keepalive and transfer timeouts also apply.
+
 ### Activation and retirement
 
 1. Validate the published packages and generated configuration before opening a server connection.
 2. Hold a remote deployment lock and validate ordinary, symlink-free paths. Stage and back up files outside the public directory under `/opt/gta5data-launcher-deploy/`.
-3. Upload and verify both packages, atomically install them, and hash the bytes served by their public HTTPS URLs before publishing the new version in configuration.
+3. Fetch or upload and verify both packages, atomically install them, and hash the bytes served by their public HTTPS URLs before publishing the new version in configuration.
 4. Lint and render the PHP candidate, then atomically replace `index.php`. Check the served JSON, version, bilingual notes, URLs and hashes against the candidate; verify both downloads again.
 5. Only after successful verification, remove strictly older `GTA5Data-Launcher-Windows-x64-vX.Y.Z.exe` and `GTA5Data-Launcher-macOS-arm64-vX.Y.Z-development.zip` files from the public directory. Keep their private rollback backups; preserve unrelated files and newer versions.
 6. If verification fails, restore the previous configuration and affected files. Reject downgrades, same-version files with different hashes and symbolic links. Do not modify player game resources.
@@ -53,11 +57,15 @@ The `launcher-deployment-audit` Actions artifact records the published source, v
 
 当前 PHP 由既有 `PHP85` 容器运行，通过标准输入检查候选配置的语法并输出 JSON；无需修改 1Panel、PHP、代理或服务设置。
 
+### 公开加速源与传输
+
+下载服务器通过配置的 HTTPS 加速入口主动拉取公开 Release 文件，`GTA_OSS_DOWNLOAD_MIRRORS` 按顺序配置 `https://gh-proxy.com/`、`https://ghfast.top/`、`https://gh-proxy.org/`。加速源只收到公开的仓库、标签和文件地址，不接收 GitHub Token 或 SSH 凭据。每个结果必须符合原 GitHub 文件大小与 SHA-256 才能进入暂存安装；失败或哈希不符时尝试下一个入口，全部失败后尝试 GitHub 直连与有超时的 SFTP 上传。镜像只加速传输，不能改变实际接受的程序字节。仅修改配置时复用已存在且同版本、同哈希的安装包，并保留 SSH 压缩、心跳及传输超时。
+
 ### 启用与清理
 
 1. 连接前核验已发布安装包及生成配置。
 2. 持有服务器部署锁，检查普通文件和无符号链接路径。在公共目录之外的 `/opt/gta5data-launcher-deploy/` 暂存并备份。
-3. 上传、核验并原子安装两个新包，先通过公开 HTTPS 下载核对真实字节和哈希，再公布新版本。
+3. 拉取或上传、核验并原子安装两个新包，先通过公开 HTTPS 下载核对真实字节和哈希，再公布新版本。
 4. 检查 PHP 语法及输出，原子替换 `index.php`；核对线上 JSON、版本、双语说明、地址及哈希，再核对两个下载。
 5. 全部成功后，只移除公共目录中版本严格较低、文件名精确匹配的 Windows EXE 和 macOS 开发 ZIP；站外保留回滚备份，无关文件与更高版本保留。
 6. 检查失败恢复原配置及相关文件；拒绝降级、同版本不同哈希和符号链接。玩家游戏资源始终只读。
