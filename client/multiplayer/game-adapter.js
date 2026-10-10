@@ -283,12 +283,14 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
         const key = 'effect:' + data.projectile_id + ':' + data.world_tick;
         if (!seenWorldEvents.has(key)) {
           seenWorldEvents.add(key); effectEvents.push({ id: ++nextEffectId, event: { ...data, ...received } });
+          if (effectEvents.length > 64) effectEvents.splice(0, effectEvents.length - 64);
           if (data.effect_duration_ms) areaEffects.set(data.projectile_id, { ...data, ...received,
             expires_at: data.world_tick + data.effect_duration_ms });
         }
       }
       while (projectiles.size > 256) projectiles.delete(projectiles.keys().next().value);
       while (areaEffects.size > 256) areaEffects.delete(areaEffects.keys().next().value);
+      while (seenWorldEvents.size > 256) seenWorldEvents.delete(seenWorldEvents.values().next().value);
     } else if (data.type === 'world_shot_event') {
       if (!world || data.world_epoch !== world.world_epoch || !data.event_id || seenWorldEvents.has(data.event_id)) return;
       seenWorldEvents.add(data.event_id); worldShots.push({ id: ++nextWorldShotId, event: data });

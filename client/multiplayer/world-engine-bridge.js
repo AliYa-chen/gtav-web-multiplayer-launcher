@@ -13,6 +13,9 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
   let lastMeleeSampleAt = -Infinity, lastMeleeSentAt = -Infinity, lastMeleeInput = false;
   let pendingMelee = [], lastMeleePhase = null;
   const consumedWorldEvents = new Set(), animationEvents = new Map();
+  const effectFlashes = new Map(), consumedEffects = new Set();
+  let effectEpoch = null, lastEffectFrame = null;
+  const MAX_EFFECT_MARKERS = 32, FLASH_DURATION_MS = 450;
   const meleeDict = 'melee@unarmed@streamed_core';
   const meleeClips = ['heavy_punch_a', 'heavy_punch_b', 'heavy_punch_c'];
   const validPosition = (value) => Array.isArray(value) && value.length === 3
@@ -36,6 +39,7 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     lastSeat = null; leavePendingAt = lastInteractionAt = -Infinity;
     pendingMelee = []; lastMeleeInput = false; lastMeleePhase = null;
     consumedWorldEvents.clear(); animationEvents.clear();
+    effectFlashes.clear(); consumedEffects.clear(); effectEpoch = null; lastEffectFrame = null;
   }
   function transform(handle) {
     ex.mpGetEntityCoords(BigInt(buffer), handle, 1);
@@ -171,10 +175,57 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     if (!packet?.connected || !packet.world?.ready) return;
     if (!buffer) buffer = Number(ex.mpAlloc(128n));
     if (!buffer) return;
+    // Effects run before the heavier entity update. Complete this transition
+    // once so update() cannot erase acknowledged flashes or reset frame limits.
+    if (epoch !== packet.world.world_epoch) { clear(); epoch = packet.world.world_epoch; }
     const tickFor = value => (value.world_tick || 0) + Math.max(0, value.received_at_epoch
       && Number.isFinite(globalThis.performance?.timeOrigin)
       ? globalThis.performance.timeOrigin + now - value.received_at_epoch : now - (value.received_at ?? now));
-    for (const item of packet.world_projectiles || []) {
+    if (effectEpoch !== packet.world.world_epoch) {
+      effectEpoch = packet.world.world_epoch; effectFlashes.clear(); consumedEffects.clear(); lastEffectFrame = null;
+    }
+    const acknowledge = [];
+    for (const item of (packet.world_effects || []).slice(0, 64)) {
+      const event = item.event, key = 'effect:' + item.id;
+      if (!consumedEffects.has(key)) {
+        consumedEffects.add(key);
+        if (event?.world_epoch === effectEpoch && validPosition(event.position)
+            && event.damage_type === 'EXPLOSIVE' && Number.isFinite(event.radius)) {
+          const age = Math.max(0, tickFor(event) - (event.world_tick || 0));
+          if (age < FLASH_DURATION_MS) effectFlashes.set(key, { position: [...event.position],
+            radius: Math.min(8, Math.max(.2, event.radius)), at: now - age });
+        }
+      }
+      acknowledge.push(item.id);
+    }
+    while (consumedEffects.size > 2048) consumedEffects.delete(consumedEffects.values().next().value);
+    while (effectFlashes.size > MAX_EFFECT_MARKERS) effectFlashes.delete(effectFlashes.keys().next().value);
+    if (acknowledge.length) post({ type: 'world_effect_ack', ids: acknowledge });
+    // DrawMarkerSphere uses the fullscreen-glow renderer, which traps in this
+    // engine build. AddExplosion also runs physics/events even with noDamage.
+    // Use ordinary model markers instead; never replay a native explosion.
+    const frame = ex.mpFrameCount?.() ?? Math.floor(now / 16);
+    if (frame === lastEffectFrame || !ex.mpDrawMarker) return;
+    lastEffectFrame = frame;
+    let drawn = 0;
+    function marker(position, radius, red, green, blue, alpha) {
+      if (drawn >= MAX_EFFECT_MARKERS || !validPosition(position) || !Number.isFinite(radius) || radius <= 0) return;
+      const diameter = Math.min(16, radius * 2);
+      drawn++;
+      try {
+        ex.mpDrawMarker(28, vector(0, position), vector(24, [0, 0, 0]), vector(48, [0, 0, 0]),
+          vector(72, [diameter, diameter, diameter]), red, green, blue, alpha, 0, 0, 2, 0, 0n, 0n, 0);
+      } catch { /* A visual failure must not stop input, state or effect acknowledgements. */ }
+    }
+    for (const [key, flash] of effectFlashes) {
+      const age = now - flash.at;
+      if (age >= FLASH_DURATION_MS) { effectFlashes.delete(key); continue; }
+      const progress = Math.max(0, age / FLASH_DURATION_MS);
+      marker(flash.position, Math.max(.2, flash.radius * (.25 + .75 * progress)), 255, 155, 40,
+        Math.round(180 * (1 - progress)));
+    }
+    for (const item of (packet.world_projectiles || []).slice(0, 256)) {
+      if (drawn >= MAX_EFFECT_MARKERS) break;
       if (item.world_epoch !== packet.world.world_epoch || !validPosition(item.position)) continue;
       const tick = tickFor(item);
       if (tick >= item.expires_at || item.phase === 'expired') continue;
@@ -190,27 +241,15 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
         const arc = item.gravity * 9.81 * (item.flight_ms / 1000) ** 2 / 8;
         position = item.origin.map((value, index) => value + (item.target[index] - value) * t + (index === 2 ? 4 * arc * t * (1 - t) : 0));
       }
-      // 纯渲染标记不创建武器实体，不产生本地碰撞、伤害或另一套投射物计时器。
-      if (validPosition(position)) ex.mpDrawSphere?.(vector(0, position), .09, 245, 180, 70, .85);
+      marker(position, .09, 245, 180, 70, 217);
     }
-    for (const item of packet.world_areas || []) {
+    for (const item of (packet.world_areas || []).slice(0, 256)) {
+      if (drawn >= MAX_EFFECT_MARKERS) break;
       if (item.world_epoch !== packet.world.world_epoch || !validPosition(item.position) || tickFor(item) >= item.expires_at) continue;
       const fire = item.damage_type === 'FIRE';
-      ex.mpDrawSphere?.(vector(0, item.position), Math.min(8, Math.max(.2, item.radius)), fire ? 230 : 135, fire ? 100 : 145, fire ? 30 : 150, .18);
+      marker(item.position, Math.min(8, Math.max(.2, item.radius)), fire ? 230 : 135,
+        fire ? 100 : 145, fire ? 30 : 150, 46);
     }
-    const acknowledge = [];
-    for (const item of packet.world_effects || []) {
-      const event = item.event, key = 'effect:' + item.id;
-      if (!consumedWorldEvents.has(key) && event?.world_epoch === packet.world.world_epoch && validPosition(event.position)) {
-        if (event.damage_type === 'EXPLOSIVE') {
-          // CommandAddExplosion的最后一个bool是noDamage；禁止省略或改成0。
-          ex.mpVisualExplosion?.(vector(0, event.position), 0, 0, 1, 0, 0, 1);
-        }
-        consumedWorldEvents.add(key);
-      }
-      acknowledge.push(item.id);
-    }
-    if (acknowledge.length) post({ type: 'world_effect_ack', ids: acknowledge });
   }
   function sampleMelee(packet, now, localPed, { localReady = true } = {}) {
     if (now - lastMeleeSampleAt < 5 || !packet?.connected || !packet.world?.ready || !localReady || !localPed) return;
@@ -519,6 +558,10 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
         consumedWorldEvents.add('shot:' + item.id); shotAcks.push(item.id); continue;
       }
       if (attacker.owner_id === packet.client_id) { consumedWorldEvents.add('shot:' + item.id); shotAcks.push(item.id); continue; }
+      const rule = (packet.weapon_rules || []).find((entry) => entry.weapon === event.weapon);
+      if (!rule || !['hitscan', 'shotgun'].includes(rule.mode)) {
+        consumedWorldEvents.add('shot:' + item.id); shotAcks.push(item.id); continue;
+      }
       const handle = replicas.get(attacker.entity_id)?.handle;
       if (!handle || !ex.mpExists(handle) || !ex.mpHasWeaponAsset?.(event.weapon | 0)) {
         ex.mpRequestWeaponAsset?.(event.weapon | 0, 31, 0); continue;

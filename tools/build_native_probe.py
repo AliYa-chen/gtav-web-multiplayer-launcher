@@ -180,6 +180,12 @@ ENTITY_EXPORTS = {
     "mpDriveToCoord": (60575, "task_commands::CommandTaskVehicleDriveToCoordLongRange(int, int, rage::scrVector const&, float, int, float)", ["i32", "i32", "i64", "f32", "i32", "f32"], []),
     "mpVisualExplosion": (50437, "fire_commands::CommandAddExplosion(rage::scrVector const&, int, float, bool, bool, float, bool)", ["i64", "i32", "f32", "i32", "i32", "f32", "i32"], []),
     "mpDrawSphere": (50518, "graphics_commands::CommandDrawMarkerSphere(rage::scrVector const&, float, int, int, int, float)", ["i64", "f32", "i32", "i32", "i32", "f32"], []),
+    # Shared effects use ordinary model markers, not the fullscreen-glow sphere
+    # above. Type 28 is PROP_MK_SPHERE in CMarkers::Init; scrVector uses 0/8/16.
+    # CMarkers::Register has 128 slots: budget markers once per game frame.
+    "mpDrawMarker": (50517, "graphics_commands::CommandDrawMarker(int, rage::scrVector const&, rage::scrVector const&, rage::scrVector const&, rage::scrVector const&, int, int, int, int, bool, bool, int, bool, char const*, char const*, bool)", ["i32", "i64", "i64", "i64", "i64", "i32", "i32", "i32", "i32", "i32", "i32", "i32", "i32", "i64", "i64", "i32"], []),
+    # Same global frame counter read by the original GET_FRAME_COUNT wrapper.
+    "mpFrameCount": (91, "GetGameFrame()", [], ["i32"]),
     # 视觉弹起点沿真实武器对象的 gun_muzzle 获取；名字查询前须确认 BoneCount > 0。
     # 未就绪返回 0/-1/零向量；输出和 PedBoneCoords 的偏移都是 0/8/16 的 scrVector。
     "mpCurrentWeaponEntity": (62919, "weapon_commands::CommandGetCurrentPedWeaponEntityIndex(int, bool)", ["i32", "i32"], ["i32"]),

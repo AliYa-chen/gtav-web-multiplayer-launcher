@@ -16,9 +16,36 @@ The repository contains project source and documentation. **It does not provide 
 - Public-session endpoints, names, announcements, and download metadata come from the [configuration API](https://oss.2t.hk/gtav/). Public server addresses are not compiled into the client.
 - A standalone Java 17+ server owns player/entity identity, seats, ownership leases, combat decisions, respawning, population, weather, and law rules. Authorized client engines execute assigned native movement and vehicle simulation.
 
-**Client 0.2.15 and server 0.4.3-world-experimental.** This revision includes passenger-seat reconciliation and ownership fixes. The macOS build was verified locally, the Windows build was produced by GitHub Actions and verified, and server 0.4.3 is deployed to the main and experimental sessions in both China and the US (four routes). Uploading the client packages and configuration to the download website remains a manual step. See the [0.2.15 build and deployment record](docs/0.2.15多人同乘与公开源码.md); source and build versions alone do not establish the version currently offered by the download site.
+**Launcher source 0.2.16; existing desktop packages 0.2.15; server 0.4.3-world-experimental.** The 0.2.16 source fixes the synchronized explosive-effect rendering path. The existing 0.2.15 packages include passenger-seat reconciliation and ownership fixes. Server 0.4.3 is deployed to the main and experimental sessions in both China and the US (four routes). Launcher and server releases are separate; see [release categories](docs/releases.md) and the [0.2.15 build/deployment record](docs/0.2.15多人同乘与公开源码.md).
 
 Multiplayer remains experimental. Static collision and pedestrian navigation cover roughly **600 × 600 metres around the test spawn**, not the whole map. There is no complete server-side RAGE physics runtime or migration of every single-player script, tool, mission, or vehicle weapon. This uses a custom protocol and does not implement native GTA Online or FiveM compatibility. Protocol tests do not establish complete gameplay synchronization; `game_sync` and `native_clone_transport` remain false.
+
+## Phased roadmap
+
+✅ means the stated scope is implemented; ❌ means it remains unfinished. Completed foundations do not imply that every weapon, vehicle, or area is supported.
+
+| Phase | Status | Scope |
+| --- | --- | --- |
+| Foundation | ✅ | Shared player/entity identities, snapshots, reconnect recovery, and ownership leases. |
+| Foundation | ✅ | Basic player-versus-player gun, melee, and projectile damage, death, and respawning. |
+| Foundation | ✅ | Shared time, weather, and basic wanted/police rules. |
+| Foundation | ✅ | Local pedestrian population, AI movement, static collision, and navigation around the spawn area (about 600 × 600 m). |
+| Foundation | ✅ | Shared vehicle seats and passenger/ownership reconciliation in client 0.2.15. |
+| Foundation | ✅ | Windows/macOS release packages, public source, MIT License, and bilingual development/integration guides. |
+| P0 — urgent stability | ✅ | Remove the identified fullscreen-glow crash path for synchronized rockets/grenades in 0.2.16; use bounded ordinary model markers and avoid native explosion replay. [Fix details](docs/explosive-rendering.md). |
+| P1 — AI and world coverage | ❌ | Complete NPC weapon combat, line of sight, cover selection, and coordinated responses. |
+| P1 — AI and world coverage | ❌ | Expand collision/navigation coverage and police dispatch beyond the current local area toward the full map. |
+| P2 — vehicles and equipment | ❌ | Synchronize vehicle damage and destruction from bullets and explosions. |
+| P2 — vehicles and equipment | ❌ | Add server-owned inventory, weapon/item pickups, ammunition consumption, and armor. |
+| P3 — tools and special weapons | ❌ | Implement fuel trails, fire extinguishers, fire propagation, night vision, and stun effects. |
+| P3 — tools and special weapons | ❌ | Support sticky bombs on moving vehicles, mounted vehicle weapons, and their permissions. |
+| P4 — public interactions and events | ❌ | Add shared item use, scene occupancy, and common interaction rules. |
+| P4 — public interactions and events | ❌ | Implement public scenario/task state machines, firefighting, and ambulance responses. |
+| P5 — persistence | ❌ | Persist accounts, characters, inventory, vehicles, and other assets across disconnects and server restarts. |
+| Release maintenance | ✅ | Provide a locally built, ad hoc signed macOS development package. |
+| Release maintenance | ❌ | Add macOS Developer ID signing and notarization. |
+
+Implementation order: **P0 stability fix → P1 AI/world → P2 vehicles/equipment → P3 special tools → P4 public events → P5 persistence**. Signing can proceed separately. Each stage builds on the shared-state and read-only resource boundaries above; single-player scripts are not a substitute for server-owned rules. See the [AI implementation order](docs/服务端人口与步行AI.md#后续实施顺序) and [feature maintenance guide](docs/multiplayer-development.md).
 
 ## How multiplayer works
 
@@ -177,6 +204,7 @@ Before contributing, follow [AGENTS.md](AGENTS.md). Check source-only staging wi
 Start with the bilingual [multiplayer architecture, builds, and maintenance guide](docs/multiplayer-development.md) and [website integration guide](docs/website-integration.md). Most detailed historical technical reports are in Chinese; older version sections describe their recorded state.
 
 - [Multiplayer implementation and feature maintenance](docs/multiplayer-development.md) · [Integrate into your website](docs/website-integration.md)
+- [Launcher and server release categories](docs/releases.md) · [0.2.16 explosive-effect fix](docs/explosive-rendering.md)
 - [Launcher and resource isolation](docs/启动器资源隔离.md) · [Desktop usage/builds](desktop/README.md)
 - [Remote configuration](docs/远程启动器配置.md) · [Localization](docs/启动器国际化.md)
 - [World-server design](docs/统一世界服务端设计.md) · [Shared environment](docs/统一世界环境协议.md)
