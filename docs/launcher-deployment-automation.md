@@ -35,7 +35,7 @@ The download server fetches public Release files through the configured HTTPS ac
 1. Validate the published packages and generated configuration before opening a server connection.
 2. Hold a remote deployment lock and validate ordinary, symlink-free paths. Stage and back up files outside the public directory under `/opt/gta5data-launcher-deploy/`.
 3. Fetch or upload and verify both packages, atomically install them, and hash the bytes served by their public HTTPS URLs before publishing the new version in configuration.
-4. Lint and render the PHP candidate, then atomically replace `index.php`. Check the served JSON, version, bilingual notes, URLs and hashes against the candidate; verify both downloads again.
+4. Lint and render the PHP candidate, then atomically replace `index.php`. Check the served JSON, version, bilingual notes, URLs and hashes against the candidate; verify both downloads again. Temporary network errors receive at most three download attempts. Certificate, origin, size and SHA-256 failures stop deployment; retries never bypass validation.
 5. Only after successful verification, remove strictly older `GTA5Data-Launcher-Windows-x64-vX.Y.Z.exe` and `GTA5Data-Launcher-macOS-arm64-vX.Y.Z-development.zip` files from the public directory. Keep their private rollback backups; preserve unrelated files and newer versions.
 6. If verification fails, restore the previous configuration and affected files. Reject downgrades, same-version files with different hashes and symbolic links. Do not modify player game resources.
 
@@ -66,7 +66,7 @@ The `launcher-deployment-audit` Actions artifact records the published source, v
 1. 连接前核验已发布安装包及生成配置。
 2. 持有服务器部署锁，检查普通文件和无符号链接路径。在公共目录之外的 `/opt/gta5data-launcher-deploy/` 暂存并备份。
 3. 拉取或上传、核验并原子安装两个新包，先通过公开 HTTPS 下载核对真实字节和哈希，再公布新版本。
-4. 检查 PHP 语法及输出，原子替换 `index.php`；核对线上 JSON、版本、双语说明、地址及哈希，再核对两个下载。
+4. 检查 PHP 语法及输出，原子替换 `index.php`；核对线上 JSON、版本、双语说明、地址及哈希，再核对两个下载。临时网络错误最多尝试三次；证书、来源、大小或 SHA-256 不符仍终止部署，重试不跳过校验。
 5. 全部成功后，只移除公共目录中版本严格较低、文件名精确匹配的 Windows EXE 和 macOS 开发 ZIP；站外保留回滚备份，无关文件与更高版本保留。
 6. 检查失败恢复原配置及相关文件；拒绝降级、同版本不同哈希和符号链接。玩家游戏资源始终只读。
 

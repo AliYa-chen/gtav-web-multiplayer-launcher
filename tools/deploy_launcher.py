@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -19,6 +20,7 @@ import subprocess
 import sys
 import time
 import urllib.parse
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -475,33 +477,95 @@ class SameOriginRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(request, response, code, message, headers, new_url)
 
 
-def https_body(origin, url, *, maximum=None, digest=None, request_timeout=60):
+def https_failure(error):
+    if isinstance(error, urllib.error.HTTPError):
+        return f'http_{error.code}', error.code in (408, 429) or 500 <= error.code <= 599
+    if isinstance(error, urllib.error.URLError):
+        if isinstance(error.reason, BaseException):
+            category, retry = https_failure(error.reason)
+            if category == 'transport_error' and isinstance(error.reason, OSError):
+                return 'network_error', True
+            return category, retry
+        return 'network_error', True
+    if isinstance(error, ssl.SSLCertVerificationError):
+        return 'certificate_verification_failed', False
+    if isinstance(error, ssl.SSLError):
+        return 'tls_error', False
+    if isinstance(error, TimeoutError):
+        return 'timeout', True
+    if isinstance(error, (http.client.IncompleteRead, http.client.RemoteDisconnected)):
+        return 'incomplete_response', True
+    if isinstance(error, (ConnectionError, socket.gaierror)):
+        return 'connection_error', True
+    return 'transport_error', False
+
+
+def https_body(origin, url, *, maximum=None, digest=None, request_timeout=60,
+               attempts=1, attempt_timeout=120, verification_phase='config'):
     parsed, trusted = urllib.parse.urlsplit(url), urllib.parse.urlsplit(origin)
     if parsed.scheme != 'https' or parsed.netloc != trusted.netloc or parsed.username or parsed.password:
         raise LauncherDeploymentError('Launcher public URL differs from the configured HTTPS origin')
     opener = urllib.request.build_opener(SameOriginRedirect(origin), urllib.request.HTTPSHandler(context=ssl.create_default_context()))
     request = urllib.request.Request(url, headers={'Cache-Control': 'no-cache', 'User-Agent': 'GTAV-Launcher-Deploy/1'})
-    hasher, total, chunks = hashlib.sha256(), 0, []
-    try:
-        with opener.open(request, timeout=request_timeout) as response:
-            if response.status != 200:
-                raise LauncherDeploymentError('OSS HTTPS verification did not return HTTP 200')
-            for chunk in iter(lambda: response.read(1024 * 1024), b''):
-                total += len(chunk)
-                if maximum is not None and total > maximum:
-                    raise LauncherDeploymentError('OSS HTTPS verification exceeded its expected size')
-                hasher.update(chunk)
-                if digest is None:
-                    chunks.append(chunk)
-    except LauncherDeploymentError:
-        raise
-    except Exception:
-        raise LauncherDeploymentError('OSS HTTPS/TLS verification failed') from None
-    if digest is not None:
-        if hasher.hexdigest() != digest or maximum is not None and total != maximum:
-            raise LauncherDeploymentError('Public launcher download SHA-256 or size verification failed')
-        return total
-    return b''.join(chunks)
+    name = Path(parsed.path).name
+    if re.fullmatch(r'[A-Za-z0-9_.-]+', name) is None:
+        name = 'config'
+    for attempt in range(1, attempts + 1):
+        # Restart from byte zero and a fresh digest after any interrupted read.
+        hasher, total, chunks = hashlib.sha256(), 0, []
+        deadline = time.monotonic() + attempt_timeout
+        try:
+            with opener.open(request, timeout=min(request_timeout, attempt_timeout)) as response:
+                if response.status != 200:
+                    raise LauncherDeploymentError('OSS HTTPS verification did not return HTTP 200')
+                read = getattr(response, 'read1', response.read)
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError('HTTPS verification attempt deadline exceeded')
+                    # urllib's HTTPResponse uses a buffered SocketIO. Limit each
+                    # read to the remaining total deadline as well as idle time.
+                    raw = getattr(getattr(response, 'fp', None), 'raw', None)
+                    connection = getattr(raw, '_sock', None)
+                    if connection is not None:
+                        connection.settimeout(min(request_timeout, remaining))
+                    chunk = read(1024 * 1024)
+                    if not chunk:
+                        outstanding = getattr(response, 'length', None)
+                        if isinstance(outstanding, int) and outstanding > 0:
+                            raise http.client.IncompleteRead(b'', outstanding)
+                        break
+                    total += len(chunk)
+                    if maximum is not None and total > maximum:
+                        raise LauncherDeploymentError('OSS HTTPS verification exceeded its expected size')
+                    hasher.update(chunk)
+                    if digest is None:
+                        chunks.append(chunk)
+            if digest is not None:
+                if hasher.hexdigest() != digest or maximum is not None and total != maximum:
+                    raise LauncherDeploymentError('Public launcher download SHA-256 or size verification failed')
+                return total
+            return b''.join(chunks)
+        except LauncherDeploymentError:
+            raise
+        except Exception as error:
+            category, retry = https_failure(error)
+            print(f'HTTPS verification phase={verification_phase} file={name} '
+                  f'attempt={attempt}/{attempts} category={category}', flush=True)
+            if not retry or attempt == attempts:
+                raise LauncherDeploymentError('OSS HTTPS/TLS verification failed: ' + category) from None
+            time.sleep(min(3 * attempt, 6))
+
+
+def verify_downloads(metadata, origin, phase, audit):
+    audit['phase'] = phase
+    for row in metadata['payloads']:
+        audit['last_download'] = row['name']
+        print(f'Verifying HTTPS download phase={phase} file={row["name"]}', flush=True)
+        https_body(origin, row['url'], maximum=row['bytes'], digest=row['sha256'],
+                   request_timeout=45, attempts=3, attempt_timeout=120, verification_phase=phase)
+        audit['last_verified_download'] = row['name']
+        print(f'Verified HTTPS download phase={phase} file={row["name"]}', flush=True)
 
 
 def verify_candidate(candidate, metadata, origin):
@@ -586,15 +650,18 @@ def main():
     args = parser.parse_args()
     sources = (args.config, args.metadata, *[path for path in args.assets_directory.glob('*') if path.is_file()])
     validate_outputs((args.report,), sources=sources)
-    audit = {'started_utc': datetime.now(timezone.utc).isoformat(), 'result': 'failed', 'rollback': 'not_needed'}
+    audit = {'started_utc': datetime.now(timezone.utc).isoformat(), 'result': 'failed',
+             'rollback': 'not_needed', 'phase': 'validate_inputs'}
     client, transaction = None, None
     try:
         metadata, payloads, source_available = validate_local(args.assets_directory, args.config, args.metadata)
         values, keys, config = settings()
         audit.update(version=metadata['version'], source_commit=metadata['source_commit'],
                      original_source_checked=source_available, config_sha256=metadata['config_sha256'])
+        audit['phase'] = 'connect'
         client = connect(values, keys)
         transaction = RemoteTransaction(client, config['private'])
+        audit['phase'] = 'begin'
         begin = transaction.call('begin', **config, version=metadata['version'], payloads=metadata['payloads'],
                                  config_sha256=metadata['config_sha256'], repository=metadata['repository'])
         audit['backup'] = begin['backup']
@@ -604,24 +671,28 @@ def main():
         existing_names = set(begin['existing_names'])
         audit['reused_payloads'] = len(existing_names)
         missing = [path for path in payloads if path.name not in existing_names]
+        audit['phase'] = 'stage_downloads'
         fetched, sources = fetch_payloads(transaction, metadata, config['download_mirrors'], missing)
         audit.update(fetched_payloads=len(fetched), payload_sources=sources)
         upload(client, begin['stage'], [(path, path.name) for path in missing if path.name not in fetched]
                + [(args.config, 'candidate-index.php')])
+        audit['phase'] = 'install'
         installed = transaction.call('install')
         expected = installed['candidate']
         verify_candidate(expected, metadata, config['origin'])
-        for row in metadata['payloads']:
-            https_body(config['origin'], row['url'], maximum=row['bytes'], digest=row['sha256'])
+        verify_downloads(metadata, config['origin'], 'before_config', audit)
         audit['downloads_verified_before_config'] = True
+        audit['phase'] = 'switch_config'
         transaction.call('switch')
+        audit['phase'] = 'verify_config'
         verify_public_config(config['origin'], expected)
-        for row in metadata['payloads']:
-            https_body(config['origin'], row['url'], maximum=row['bytes'], digest=row['sha256'])
+        verify_downloads(metadata, config['origin'], 'after_config', audit)
         audit['complete_config_and_downloads_verified'] = True
+        audit['phase'] = 'cleanup'
         removed = transaction.call('cleanup')
+        audit['phase'] = 'finalize'
         completed = transaction.call('finalize')
-        audit.update(result='success', removed_old_files=removed['old_files_removed'], backup=completed['backup'])
+        audit.update(result='success', phase='complete', removed_old_files=removed['old_files_removed'], backup=completed['backup'])
         print(json.dumps({'launcher_version': metadata['version'], 'result': 'success',
                           'removed_old_files': removed['old_files_removed']}), flush=True)
     except Exception as error:
