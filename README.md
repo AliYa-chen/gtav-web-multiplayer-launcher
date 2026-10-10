@@ -16,7 +16,7 @@ The repository contains project source and documentation. **It does not provide 
 - Public-session endpoints, names, announcements, and download metadata come from the [configuration API](https://oss.2t.hk/gtav/). Public server addresses are not compiled into the client.
 - A standalone Java 17+ server owns player/entity identity, seats, ownership leases, combat decisions, respawning, population, weather, and law rules. Authorized client engines execute assigned native movement and vehicle simulation.
 
-**Launcher 0.2.16; server 0.4.3-world-experimental.** The launcher fixes the synchronized explosive-effect rendering path and retains shared-vehicle seating. One GitHub workflow builds both desktop platforms and the independently versioned Java server, then publishes separate Launcher/Server releases from English-first update MD files and deploys launcher downloads plus PHP configuration to the download site. Server 0.4.3 is deployed to the China/US main and experimental routes. See [automated releases](docs/releases.md).
+**Launcher 0.2.16; server source 0.4.4-world-experimental.** This server update adds confirmed NPC line of sight, last-known-position pursuit, and shared police sightings. It uses the existing 0.2.16 client and does not rebuild the launcher or modify game resources. The workflow publishes and deploys the US routes; China remains a separately requested local deployment. Check the Actions audit for the actual running version. See [NPC perception](docs/npc-perception.md) and [automated releases](docs/releases.md).
 
 Multiplayer remains experimental. Static collision and pedestrian navigation cover roughly **600 × 600 metres around the test spawn**, not the whole map. There is no complete server-side RAGE physics runtime or migration of every single-player script, tool, mission, or vehicle weapon. This uses a custom protocol and does not implement native GTA Online or FiveM compatibility. Protocol tests do not establish complete gameplay synchronization; `game_sync` and `native_clone_transport` remain false.
 
@@ -33,19 +33,39 @@ Multiplayer remains experimental. Static collision and pedestrian navigation cov
 | Foundation | ✅ | Shared vehicle seats and passenger/ownership reconciliation in client 0.2.15. |
 | Foundation | ✅ | Windows/macOS release packages, public source, MIT License, and bilingual development/integration guides. |
 | P0 — urgent stability | ✅ | Remove the identified fullscreen-glow crash path for synchronized rockets/grenades in 0.2.16; use bounded ordinary model markers and avoid native explosion replay. [Fix details](docs/explosive-rendering.md). |
-| P1 — AI and world coverage | ❌ | Complete NPC weapon combat, line of sight, cover selection, and coordinated responses. |
+| P0 — entry experience | ❌ | Cloud-style loading, verified camera descent, real snapshot/avatar/scene readiness, retry/cancel and control restoration. |
+| Research foundation | ✅ | REA/static inventory and 22 YSC structures verified; script behavior/runtime compatibility remains unproven. [Evidence](docs/rea-online-feasibility.md). |
+| P1 — AI and world coverage | ✅ | Gate NPC combat on confirmed line of sight, pursue remembered positions, and share sightings within the same police response; shared sightings do not authorize shooting. [Scope and limits](docs/npc-perception.md). |
+| P1 — AI and world coverage | ❌ | Complete NPC weapon behavior, field of view, cover selection, and tactical coordination. |
 | P1 — AI and world coverage | ❌ | Expand collision/navigation coverage and police dispatch beyond the current local area toward the full map. |
 | P2 — vehicles and equipment | ❌ | Synchronize vehicle damage and destruction from bullets and explosions. |
 | P2 — vehicles and equipment | ❌ | Add server-owned inventory, weapon/item pickups, ammunition consumption, and armor. |
 | P3 — tools and special weapons | ❌ | Implement fuel trails, fire extinguishers, fire propagation, night vision, and stun effects. |
 | P3 — tools and special weapons | ❌ | Support sticky bombs on moving vehicles, mounted vehicle weapons, and their permissions. |
 | P4 — public interactions and events | ❌ | Add shared item use, scene occupancy, and common interaction rules. |
-| P4 — public interactions and events | ❌ | Implement public scenario/task state machines, firefighting, and ambulance responses. |
-| P5 — persistence | ❌ | Persist accounts, characters, inventory, vehicles, and other assets across disconnects and server restarts. |
+| P4 — common free-mode lifecycle | ❌ | Session entry/exit, character/world readiness and shared event lifetime; inspect `freemode` as a dependency reference, not an executable Java script. |
+| P4 — cooperative mission framework | ❌ | Original server task definitions, instance membership, objective revisions, deadlines, late join and phase recovery; `fm_mission_controller` is an audited candidate. |
+| P4 — racing | ❌ | Countdown, ordered checkpoints, swept crossing, lap/finish validation and rankings; `fm_race_controler` resources guide further native investigation. |
+| P4 — taxi and delivery | ❌ | Passenger pickup/dropoff, cargo entitlement, assignment/vehicle binding, deadlines and unique payout; candidates include `fm_content_taxi_driver` and `gb_delivery`. |
+| P4 — escort and survival | ❌ | Shared protectee/waves, spawn budgets, owner handover, shared failure and bounded cleanup. |
+| P4 — emergency incidents | ❌ | Shared police, ambulance and fire incidents; arrest, rescue/revival and fire-state rules remain separate work. |
+| P4 — staged interiors and heists | ❌ | Original staged objectives, props/doors/interior readiness, scene synchronization and recovery; heist-script names do not prove complete compatible assets. |
+| P5 — identity and inventory | ❌ | Accounts, permanent characters, one active character session, item/ammunition ownership and restart recovery. |
+| P5 — garages and progression | ❌ | Durable vehicle assets, store/retrieve/repair conditions, shops and later businesses. |
+| P5 — settlement | ❌ | PostgreSQL transaction ledger, unique reward entitlement, atomic inventory/balance changes and replay-safe outbox. |
+| Operations and capacity | ❌ | Container deployment, Redis presence/matching, backup recovery, independent sessions and measured scaling. |
 | Release maintenance | ✅ | Provide a locally built, ad hoc signed macOS development package. |
 | Release maintenance | ❌ | Add macOS Developer ID signing and notarization. |
 
-Implementation order: **P0 stability fix → P1 AI/world → P2 vehicles/equipment → P3 special tools → P4 public events → P5 persistence**. Signing can proceed separately. Each stage builds on the shared-state and read-only resource boundaries above; single-player scripts are not a substitute for server-owned rules. See the [AI implementation order](docs/服务端人口与步行AI.md#后续实施顺序) and [feature maintenance guide](docs/multiplayer-development.md).
+Implementation order: **stability → cloud-style entry and world readiness → AI/physics plus minimal persistent identity → equipment/vehicles → cooperative activities → persistent progression and multiple sessions**. The P0–P5 labels remain feature groups; the minimum P5 identity and durable settlement work starts before rewards and purchases. Signing can proceed separately. See the [detailed online-mode roadmap](docs/online-mode-roadmap.md) and [feature maintenance guide](docs/multiplayer-development.md).
+
+## Toward an Online-style shared world
+
+The goal is a self-hosted experience with cloud-style loading, character entry, shared free roam, cooperative jobs, garages and persistent progression. It is a staged reconstruction using the supported resources and project-owned rules. Compatibility with Rockstar services, original GTA Online scripts or the full official feature set has not been established.
+
+A new [REA/resource audit](docs/rea-online-feasibility.md) parsed four shipped JavaScript files, 1,528 top-level RPF directories and 22 representative YSC structures. The mounted script package contains 1,026 YSC entries, including free-mode, race, taxi and delivery candidates; names and valid structures do not mean those modes run in this server. Original socket gaps remain, and REA does not directly support this WASM format; the native findings use the project's version-checked static parser.
+
+Current limits remain eight players per process, 256 world entities and approximately 600 × 600 m of exported pedestrian navigation/collision. Containers and Redis do not supply missing RAGE physics or native synchronization. Permanent identity and idempotent reward transactions must precede meaningful progression; increasing the player limit requires measured load tests. See [phases, proposed modules and acceptance criteria](docs/online-mode-roadmap.md).
 
 ## How multiplayer works
 

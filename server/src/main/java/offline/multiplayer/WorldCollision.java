@@ -37,6 +37,7 @@ final class WorldCollision {
     void geometry(StaticCollision value){geometry=Objects.requireNonNull(value);}
     boolean hasGeometry(){return ((Number)geometry.metadata().get("triangles")).intValue()>0;}
     Hit first(Segment segment){return geometry.first(segment);}
+    Hit first(Segment segment,String purpose){return geometry.first(segment,purpose);}
     void observer(String actor,boolean enabled){
         if(enabled)observers.add(actor);else {
             observers.remove(actor);

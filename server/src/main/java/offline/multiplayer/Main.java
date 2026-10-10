@@ -37,7 +37,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** 独立公共战局服务：鉴权恢复、权威移动校验、伤害、死亡、重生及状态分发。 */
 public final class Main {
-    private static final String VERSION = "0.4.3-world-experimental";
+    private static final String VERSION = "0.4.4-world-experimental";
     private static final List<String> CAPABILITIES = List.of("public_session", "chat", "player_state", "shoot_events", "appearance", "combat", "resume", "heartbeat", "snapshot", "actions", "combat_feedback", "weapon_rules", "world_registry", "world_v2", "entity_batch", "melee_events", "world_environment", "shared_law", "server_ai", "projectiles", "action_queue", "session_policy", "physics_queries");
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final int MAX_MESSAGE_BYTES = 64 * 1024;
@@ -411,7 +411,7 @@ public final class Main {
                     "world_entities", ((List<?>) view.get("entities")).size(), "shared_population", view.get("shared_population"),
                     "world_policy",view.get("world_policy"),"session_policy",world.sessionPolicy(),"ai_decisions_authoritative",true,
                     "collision",world.collisionStatus(),"navigation",view.get("navigation"),"population",view.get("population"),
-                    "pedestrian_navigation",world.pedestrianStatus(),
+                    "pedestrian_navigation",world.pedestrianStatus(),"ai_perception",world.perceptionStatus(),
                     "melee_requests_received",world.meleeStats().get("melee_requests_received"),
                     "melee_events_approved",world.meleeStats().get("melee_events_approved"),"melee_hits",world.meleeStats().get("melee_hits"));
             }

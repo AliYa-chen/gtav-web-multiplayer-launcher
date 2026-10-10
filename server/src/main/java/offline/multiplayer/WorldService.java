@@ -57,7 +57,7 @@ final class WorldService {
         collision=new WorldCollision(registry.worldEpoch());collision.geometry(geometry);
         combat=new CombatWorld(registry,collision);
         law=new WorldLaw(registry.worldEpoch());
-        ai=new WorldAi(registry.worldEpoch(),roads,pedestrian);
+        ai=new WorldAi(registry.worldEpoch(),roads,pedestrian,collision);
         try{registry.createTrusted(Kind.VEHICLE,BLISTA,null,Components.vehicle(
             Transform.at(new Vector(715.5,-1088.1,22.4),90),Vehicle.empty(3)),null,0,now());}
         catch(WorldRegistry.Rejection error){throw new IllegalStateException(error);}
@@ -223,6 +223,7 @@ final class WorldService {
         "corpse_max_ms",WorldPopulation.CORPSE_MAX_TICKS,"refill_delay_ms",WorldPopulation.REFILL_DELAY_TICKS,
         "ownership","current_position_groups");}
     Map<String,Object> pedestrianStatus(){return ai.pedestrianStatus();}
+    Map<String,Object> perceptionStatus(){return ai.perceptionStatus();}
     int statePlayers(){return combat.statePlayers();}
     Map<String,Object> combatState(){return combat.combatState();}
     Map<String,Object> worldState(){return combat.worldState();}
@@ -679,6 +680,7 @@ final class WorldService {
         return map("schema_version",2,"world_epoch",epoch(),"cut_revision",snapshot.cutRevision(),"world_tick",captured.tick(),"environment",captured.environment(),"law",captured.law(),
             "entities",entities,"tombstones",deleted,"source","authoritative_world_registry","shared_population",!populationEntities.isEmpty(),"native_clone_transport",false,"session_policy",sessionPolicy(),
             "navigation",roads.metadata(),"pedestrian_navigation",pedestrianStatus(),"collision",collision.status(),"population",populationStats(),
+            "ai_perception",perceptionStatus(),
             "world_policy",map("pvp",true,"ai_decisions","server","navigation","server_roads_with_leased_steering","scripts","server_allowlist_after_ready",
                 "weapons",WeaponCatalog.rules().size(),"weapon_source_sha256",WeaponCatalog.SOURCE_SHA256,"collision","server_triangles_and_native_queries",
                 "input_policy","queued_combat_coalesced_bursts"));

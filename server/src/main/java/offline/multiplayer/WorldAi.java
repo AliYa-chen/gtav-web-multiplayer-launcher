@@ -5,6 +5,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -16,9 +17,9 @@ import offline.multiplayer.WorldRegistry.Vector;
 /**
  * 共同世界的 NPC 决策层。只接收服务器已经接受的动作/伤害和 Registry 快照；
  * 客户端不能直接设置目标、人格或任务。道路驾驶目标由服务端道路图给出，
- * 避障、原生驾驶控制及任务动画仍由租约端引擎执行；没有步行导航网格。
- * 没有地图碰撞/视线数据，所以 60 米事件感知只是本地 DEFAULT_PERCEPTION 听觉半径的
- * 有界近似，不能据此声称复现了 RAGE 的视觉、场景或整套行为树。
+ * 步行路线来自已安装的局部导航网格，原生驾驶控制及任务动画由租约端引擎执行。
+ * 视线使用静态遮挡与租约端几何候选；60 米声音事件仍是有界听觉近似。
+ * 不复现 RAGE 的完整视野角、掩体、听觉传播、场景或整套行为树。
  */
 public final class WorldAi {
     public static final double HEARING_RADIUS = 60;
@@ -32,7 +33,11 @@ public final class WorldAi {
     private static final double ROAD_LOOKAHEAD = 12;
 
     private record Threat(String sourceId, long sourceGeneration, String victimId,
-                          long victimGeneration, Vector origin, long expires, long observedAt) {}
+                          long victimGeneration, Vector origin, Vector sourcePosition, long expires, long observedAt) {}
+    private record Hostile(Entity target, String reason, long expires, String responseId, Threat evidence) {}
+    private record Sighting(Vector position, long observedAt) {}
+    private record SquadKey(String responseId, String targetId, long targetGeneration,
+                            String targetOwner, long targetOwnerEpoch) {}
     private record Plan(long generation, long ownerEpoch, String action, String reason,
                         String targetId, long targetGeneration, Vector targetPosition,
                         Vector destination, double speed, String vehicleId, long expires) {}
@@ -55,10 +60,12 @@ public final class WorldAi {
     private final String worldEpoch;
     private final RoadNetwork roads;
     private final PedNavigation pedestrian;
+    private final WorldPerception perception;
     private final Map<String,Threat> threats = new LinkedHashMap<>();
     private final Map<String,Decision> decisions = new LinkedHashMap<>();
     private final Map<String,Course> courses = new LinkedHashMap<>();
     private final Map<String,WalkCourse> walks=new LinkedHashMap<>();
+    private final Map<SquadKey,Sighting> squadSightings = new LinkedHashMap<>();
     private long walkReplans,walkRecoveries,walkFailures;
     private static final class WalkCourse {
         long generation,ownerEpoch,plannedAt,lastProgress,retryAt,serial;
@@ -78,14 +85,19 @@ public final class WorldAi {
         this(worldEpoch,roads,PedNavigation.empty());
     }
     public WorldAi(String worldEpoch, RoadNetwork roads,PedNavigation pedestrian) {
+        this(worldEpoch, roads, pedestrian, new WorldCollision(worldEpoch));
+    }
+    WorldAi(String worldEpoch, RoadNetwork roads, PedNavigation pedestrian, WorldCollision collision) {
         if (worldEpoch == null || !worldEpoch.matches("[A-Za-z0-9_-]{1,64}"))
             throw new IllegalArgumentException("世界 epoch 无效");
         this.worldEpoch = worldEpoch;
         this.roads = Objects.requireNonNull(roads);
         this.pedestrian=Objects.requireNonNull(pedestrian);
+        this.perception=new WorldPerception(Objects.requireNonNull(collision));
     }
 
     public synchronized long revision() { return revision; }
+    public synchronized Map<String,Object> perceptionStatus() { return perception.status(); }
     public synchronized Map<String,Object> pedestrianStatus(){
         Map<String,Object> value=new LinkedHashMap<>(pedestrian.status());
         value.put("replans",walkReplans);value.put("stuck_recoveries",walkRecoveries);value.put("failed_routes",walkFailures);
@@ -103,7 +115,8 @@ public final class WorldAi {
         return immutable(map("world_epoch", worldEpoch, "revision", revision,
             "tasks", List.copyOf(tasks), "decision_authority", "server",
             "navigation_authority", "server_road_graph", "task_execution_authority", "leased_engine",
-            "road_network", roads.metadata(), "hearing_radius", HEARING_RADIUS));
+            "road_network", roads.metadata(), "hearing_radius", HEARING_RADIUS,
+            "perception", perception.status()));
     }
 
     /** 只能由服务器战斗规则接受动作后调用；拒绝纯动画、无武器和离体的声音。 */
@@ -111,7 +124,7 @@ public final class WorldAi {
         advance(now);
         if (!activeActor(actor, now) || !armed(actor) || actor.components().ped().weapon() != weapon
             || origin == null || position(actor).distance(origin) > 6) return false;
-        remember(new Threat(actor.entityId(), actor.generation(), null, 0, origin,
+        remember(new Threat(actor.entityId(), actor.generation(), null, 0, origin, position(actor),
             now + THREAT_MEMORY_TICKS, now));
         return true;
     }
@@ -124,7 +137,7 @@ public final class WorldAi {
             || damage <= 0 || damage > victim.components().combat().maxHealth()
             || position(attacker).distance(position(victim)) > 1_200) return false;
         remember(new Threat(attacker.entityId(), attacker.generation(), victim.entityId(), victim.generation(),
-            position(victim), now + THREAT_MEMORY_TICKS, now));
+            position(victim), position(attacker), now + THREAT_MEMORY_TICKS, now));
         return true;
     }
 
@@ -155,8 +168,34 @@ public final class WorldAi {
         // Stable order makes task revisions reproducible for equivalent world snapshots.
         List<Entity> npcs = byId.values().stream().filter(entity -> entity.kind() == Kind.PED
             && entity.playerId() == null).sorted(Comparator.comparing(Entity::entityId)).toList();
+        Map<String,Hostile> hostiles = new LinkedHashMap<>();
+        Map<String,WorldPerception.Contact> contacts = new LinkedHashMap<>();
+        Set<SquadKey> activeSquads = new LinkedHashSet<>();
+        // Gather observations before making any plans, so all officers in the same
+        // response receive the same report regardless of entity iteration order.
         for (Entity npc : npcs) {
-            Plan plan = plan(npc, byId, players, eligibleOwners, law, now);
+            if (!simulated(npc, players, eligibleOwners, now)) continue;
+            Hostile hostile = hostile(npc, byId, law, now);
+            if (hostile == null) continue;
+            hostiles.put(npc.entityId(), hostile);
+            WorldPerception.Contact contact = perception.observe(npc, hostile.target, now);
+            contacts.put(npc.entityId(), contact);
+            if (hostile.responseId != null) {
+                SquadKey key = squad(hostile); activeSquads.add(key);
+                Sighting previous = squadSightings.get(key);
+                if (contact.visible() && (previous == null || contact.seenAt() > previous.observedAt))
+                    squadSightings.put(key, new Sighting(contact.lastSeenPosition(), contact.seenAt()));
+            }
+        }
+        // Reports already delivered to the response survive the original observer's
+        // death or lease transfer, but never a new target identity or expired memory.
+        squadSightings.entrySet().removeIf(entry -> !activeSquads.contains(entry.getKey())
+            || now >= entry.getValue().observedAt + THREAT_MEMORY_TICKS);
+        perception.retain(hostiles.keySet());
+        for (Entity npc : npcs) {
+            Hostile hostile = hostiles.get(npc.entityId());
+            Plan plan = plan(npc, byId, players, eligibleOwners, law, now, hostile,
+                contacts.get(npc.entityId()), hostile == null ? null : squadSightings.get(squad(hostile)));
             if(Set.of("wander","flee","pursue").contains(plan.action) && npc.components().attachment()==null)
                 plan=walk(npc,plan,now);
             else walks.remove(npc.entityId());
@@ -167,6 +206,12 @@ public final class WorldAi {
             }
         }
         return List.copyOf(changed);
+    }
+
+    private static SquadKey squad(Hostile hostile) {
+        Entity target = hostile.target;
+        return new SquadKey(hostile.responseId, target.entityId(), target.generation(),
+            target.ownerId(), target.ownerEpoch());
     }
 
     /** 当前任务只授权这个目标；仍须由 WorldService 检查序号、射速、武器规则及损伤事务。 */
@@ -181,30 +226,44 @@ public final class WorldAi {
         return "combat".equals(task.action) && task.generation == attacker.generation()
             && task.ownerEpoch == attacker.ownerEpoch() && Objects.equals(task.targetId, victim.entityId())
             && task.targetGeneration == victim.generation() && (task.expires == 0 || now < task.expires)
-            && position(attacker).distance(position(victim)) <= COMBAT_RADIUS;
+            && position(attacker).distance(position(victim)) <= COMBAT_RADIUS
+            && perception.visible(attacker, victim, now);
     }
 
-    private Plan plan(Entity npc, Map<String,Entity> byId, Map<String,Entity> players,
-                      Set<String> eligible, WorldLaw law, long now) {
-        if (!alive(npc)) { courses.remove(npc.entityId()); return idle(npc, "dead"); }
-        if (!simulated(npc, players, eligible, now)) { courses.remove(npc.entityId()); return idle(npc, "no_active_lease"); }
+    private Hostile hostile(Entity npc, Map<String,Entity> byId, WorldLaw law, long now) {
         WorldLaw.ResponseInfo response = law == null ? null : law.responseForEntity(npc.entityId());
         if (response != null) {
             Entity target = byId.get(response.targetEntityId());
             if (!"active".equals(response.phase()) || !"officer".equals(response.role())
-                || !activeActor(target, now) || target.generation() != response.targetGeneration()) {
+                || !activeActor(target, now) || target.generation() != response.targetGeneration()) return null;
+            return new Hostile(target, "police_pursuit", 0, response.responseId(), evidenceFor(target, now));
+        }
+        Threat threat = threatFor(npc, byId, now);
+        if (threat == null || !armed(npc) || npc.components().attachment() != null
+            || !npc.entityId().equals(threat.victimId) || npc.generation() != threat.victimGeneration) return null;
+        return new Hostile(byId.get(threat.sourceId), "self_defence", threat.expires, null, threat);
+    }
+
+    private Threat evidenceFor(Entity target, long now) {
+        Threat latest = null;
+        for (Threat threat : threats.values())
+            if (threat.sourceId.equals(target.entityId()) && threat.sourceGeneration == target.generation()
+                && threat.expires > now && (latest == null || threat.observedAt > latest.observedAt)) latest = threat;
+        return latest;
+    }
+
+    private Plan plan(Entity npc, Map<String,Entity> byId, Map<String,Entity> players,
+                      Set<String> eligible, WorldLaw law, long now, Hostile hostile,
+                      WorldPerception.Contact contact, Sighting report) {
+        if (!alive(npc)) { courses.remove(npc.entityId()); return idle(npc, "dead"); }
+        if (!simulated(npc, players, eligible, now)) { courses.remove(npc.entityId()); return idle(npc, "no_active_lease"); }
+        WorldLaw.ResponseInfo response = law == null ? null : law.responseForEntity(npc.entityId());
+        if (response != null) {
+            if (hostile == null) {
                 courses.remove(npc.entityId());
                 return idle(npc, "law_frozen");
             }
-            if (npc.components().attachment() != null) {
-                if (!canDrive(npc, byId, now)) { courses.remove(npc.entityId()); return idle(npc, "passenger"); }
-                return drive(npc, byId.get(npc.components().attachment().entityId()),
-                    "police_pursuit", target, position(target), 25, 0, now);
-            }
-            courses.remove(npc.entityId());
-            boolean inRange = position(npc).distance(position(target)) <= COMBAT_RADIUS && armed(npc);
-            return targeted(npc, inRange ? "combat" : "pursue", "police_pursuit", target,
-                position(target), inRange ? 0 : 2.5, null, 0);
+            return engage(npc, byId, hostile, contact, report, now);
         }
         Threat threat = threatFor(npc, byId, now);
         if (npc.components().attachment() != null) {
@@ -220,12 +279,59 @@ public final class WorldAi {
         Entity target = byId.get(threat.sourceId);
         boolean attacked = npc.entityId().equals(threat.victimId) && npc.generation() == threat.victimGeneration;
         if (attacked && armed(npc)) {
-            boolean inRange = position(npc).distance(position(target)) <= COMBAT_RADIUS;
-            return targeted(npc, inRange ? "combat" : "pursue", "self_defence", target,
-                position(target), inRange ? 0 : 2.5, null, threat.expires);
+            return engage(npc, byId, hostile, contact, null, now);
         }
         return targeted(npc, "flee", attacked ? "attacked" : "heard_danger", target,
             escapeDestination(npc, threat.origin), 3, null, threat.expires);
+    }
+
+    private Plan engage(Entity npc, Map<String,Entity> byId, Hostile hostile,
+                        WorldPerception.Contact contact, Sighting report, long now) {
+        if (npc.components().attachment() == null) courses.remove(npc.entityId());
+        if (npc.components().attachment() != null && !canDrive(npc, byId, now)) {
+            courses.remove(npc.entityId()); return idle(npc, "passenger");
+        }
+        Entity target = hostile.target;
+        if (contact.visible() && npc.components().attachment() == null && armed(npc)
+            && position(npc).distance(position(target)) <= COMBAT_RADIUS)
+            return knownTarget(npc, "combat", hostile.reason, target, contact.lastSeenPosition(),
+                contact.lastSeenPosition(), 0, null, hostile.expires);
+
+        Sighting known = contact.lastSeenPosition() == null ? null
+            : new Sighting(contact.lastSeenPosition(), contact.seenAt());
+        boolean shared = report != null && (known == null || report.observedAt > known.observedAt);
+        if (shared) known = report;
+        Threat evidence = hostile.evidence;
+        // A committed shot/damage supplies its historical source position, never
+        // the attacker's subsequent transform while hidden behind geometry.
+        if (evidence != null && (known == null || evidence.observedAt > known.observedAt)) {
+            known = new Sighting(evidence.sourcePosition, evidence.observedAt); shared = false;
+        }
+        if (known == null || now >= known.observedAt + THREAT_MEMORY_TICKS) {
+            courses.remove(npc.entityId()); return idle(npc, "target_not_visible");
+        }
+        long expires = expiry(hostile.expires, known.observedAt + THREAT_MEMORY_TICKS);
+        String reason = contact.visible() ? hostile.reason : shared ? "squad_last_seen" : "last_known_position";
+        if (position(npc).distance(known.position) <= 1.5) {
+            courses.remove(npc.entityId());
+            return knownTarget(npc, "idle", "last_seen_search", target, known.position, null, 0, null, expires);
+        }
+        if (npc.components().attachment() != null) {
+            Plan route = drive(npc, byId.get(npc.components().attachment().entityId()), reason,
+                target, known.position, 25, expires, now);
+            return new Plan(route.generation, route.ownerEpoch, route.action, route.reason,
+                route.targetId, route.targetGeneration, route.targetId == null ? null : known.position,
+                route.destination, route.speed, route.vehicleId, route.expires);
+        }
+        return knownTarget(npc, "pursue", reason, target, known.position, known.position, 2.5, null, expires);
+    }
+
+    private static long expiry(long first, long second) { return first == 0 ? second : Math.min(first, second); }
+
+    private static Plan knownTarget(Entity npc, String action, String reason, Entity target, Vector known,
+                                    Vector destination, double speed, String vehicle, long expires) {
+        return new Plan(npc.generation(), npc.ownerEpoch(), action, reason, target.entityId(), target.generation(),
+            known, destination, speed, vehicle, expires);
     }
 
     private Plan drive(Entity npc, Entity vehicle, String reason, Entity target, Vector desired,
