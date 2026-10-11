@@ -43,3 +43,9 @@ Local verification covers generated-source consistency, original capacities, sha
 生成器固定原引擎及六份资源的哈希，归档密钥仅从本地匹配引擎在内存中解析，不输出密钥、动画成员或原资源。生成源码和可选报告使用统一输出保护、独立临时文件与原子替换，覆盖外部资源目录、源文件别名、硬链接和符号链接。原输入始终只读。
 
 本地检查覆盖生成一致性、原容量、共用弹药、空弹匣、装填守恒与过早/重复令牌拒绝、序号与代次、重连/重生、投掷扣弹、拾取距离/竞态/再生和护甲；输出隔离检查核对七份原输入前后哈希不变。这些检查不等同于实机画面验证。
+
+## Selection recovery hotfix / 武器切换修复（0.2.20）
+
+Normal inventory, reload and pose refusals retain the active connection and world baseline. Selecting an unowned local weapon, including a Railgun outside the server inventory, removes that unsupported local selection and restores the current authoritative selection. Asset requests and equip retries are bounded and backed off while native loading returns zero or temporary unarmed; a deliberate switch to another owned weapon can still proceed. State and shot sampling never advertise an unowned native weapon. Pending valid selections survive native zero results until confirmation or a matching refusal; local acknowledgement tokens isolate consecutive requests, without changing server wire fields. This does not grant Railgun ownership or add a new weapon to the session inventory.
+
+正常装备、换弹及姿态拒绝保留当前连接与世界基线。切换到战局未持有的本地武器（例如库存外的电磁枪）时，移除该本地选择并恢复当前服务端选择；资源请求和装备重试限频退避，原生暂时返回零或空手不会被当成新装备请求，主动切换另一把已持有武器仍可执行。状态及射击采样不再发送未持有武器。待确认合法选择跨原生零值保留，直至确认或匹配的拒绝；本地确认标识隔离连续请求，不改变服务端网络字段。此次修复不授予电磁枪，也不扩展战局库存。

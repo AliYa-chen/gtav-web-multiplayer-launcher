@@ -28,6 +28,7 @@ public final class CombatWorld {
     private final LinkedHashMap<String, Projectile> projectiles = new LinkedHashMap<>();
     private final List<Hazard> hazards = new ArrayList<>();
     private long projectileSequence;
+    private long missingPoseShotBlocks;
     private long joins;
     private final WorldRegistry world;
     private final WorldCollision collision;
@@ -91,7 +92,11 @@ public final class CombatWorld {
         this.world=world;this.collision=collision;this.vehicles=vehicles;this.peds=peds;peds.capture(world,0);
     }
     Map<String,Object> vehicleGeometryStatus(){return vehicles.metadata();}
-    Map<String,Object> pedGeometryStatus(){return peds.metadata();}
+    Map<String,Object> pedGeometryStatus(){
+        Map<String,Object> status=new LinkedHashMap<>(peds.metadata());
+        status.put("missing_pose_shot_blocks",missingPoseShotBlocks);
+        return status;
+    }
 
     public record Outcome(boolean accepted, List<Map<String, Object>> events) {}
 
@@ -865,6 +870,8 @@ public final class CombatWorld {
                     vector(point(origin,direction,hit)),new WorldRegistry.Vector(-direction[0],-direction[1],-direction[2]),0),false,-1);}
             }
         }
+        if(selected!=null && selected.entity.kind()==WorldRegistry.Kind.PED && !selected.verified && "shot".equals(purpose))
+            missingPoseShotBlocks++;
         return selected;
     }
     private boolean vehicleObstruction(WorldCollision.Segment segment,String target,String purpose){

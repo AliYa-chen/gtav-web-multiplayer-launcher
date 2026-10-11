@@ -499,7 +499,11 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
         }
       } else {
         const health = dead ? 0 : state.combat?.health ?? 200;
-        const nativeHealth = health > 0 ? 100 + Math.max(1, Math.round(health / 2)) : 0;
+        const threshold = state.combat?.native_health_threshold;
+        const originalHealth = Number.isSafeInteger(threshold) && threshold >= 1 && threshold <= 10000;
+        // Original NPC health includes the native dying threshold. Keep the
+        // remaining damage budget one-to-one; threshold equality is still alive.
+        const nativeHealth = health > 0 ? originalHealth ? threshold + health - 1 : 100 + Math.max(1, Math.round(health / 2)) : 0;
         const nativeDead = Boolean(ex.mpIsDead(replica.handle, 0)), actualHealth = ex.mpGetHealth(replica.handle);
         ex.mpBlockEvents(replica.handle, 1);
         // 枪械、火焰、爆炸与近战只消费服务端血量；撞击/摔落/溺水仍可上报环境候选。
@@ -528,14 +532,16 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
           // Only an established active owner submits native environmental
           // observations. They remain candidates; never replace server health.
           if (active && replica.active && !replica.dead && !replica.recovering && replica.serverHealth === health) {
-            const observed = nativeDead ? 0 : Math.max(0, Math.min(200, Math.round((actualHealth - 100) * 2)));
+            const observed = nativeDead ? 0 : originalHealth
+              ? Math.max(0, Math.min(state.combat.max_health, Math.floor(actualHealth - threshold + 1)))
+              : Math.max(0, Math.min(200, Math.round((actualHealth - 100) * 2)));
             if (observed < health && now - (replica.damageAt ?? -Infinity) >= 500) {
               replica.damageAt = now;
               post({ type: 'simulation_result', kind: 'entity_health', entity_id: entity.entity_id,
                 generation: entity.generation, owner_epoch: entity.owner_epoch, health: observed });
             }
           }
-          const restore = replica.dead || replica.recovering || nativeDead || actualHealth <= 100;
+          const restore = replica.dead || replica.recovering || nativeDead || (originalHealth ? actualHealth < threshold : actualHealth <= 100);
           if (restore && (!replica.recovering || now - replica.recoveryAt >= 500)) {
             replica.recoveryAt = now;
             ex.mpResurrect?.(replica.handle); ex.mpRevive?.(replica.handle);
@@ -586,8 +592,10 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
           replica.submittedAt = now;
           const view = entity.kind === 'vehicle'
             ? { engine_on: Boolean(ex.mpEngineRunning?.(replica.handle)), lights_on: state.vehicle?.lights_on === true }
-            : { ...state.ped, shooting: Boolean(ex.mpIsShooting(replica.handle)), actions: characterActions?.sample(replica.handle) || state.ped?.actions ||
-                { aiming: false, reloading: false, jumping: false, ducking: false, sprinting: false } };
+            : { weapon: state.ped?.weapon ?? 0xa2719263, shooting: Boolean(ex.mpIsShooting(replica.handle)),
+                actions: characterActions?.sample(replica.handle) || state.ped?.actions ||
+                  { aiming: false, reloading: false, jumping: false, ducking: false, sprinting: false },
+                ...(state.ped?.aim_target ? { aim_target: state.ped.aim_target } : {}) };
           const pedPose = packet.ped_pose && entity.kind === 'ped' ? pedPoseSampler?.sample(replica.handle, value.position) : null;
           if (packet.ped_pose && entity.kind === 'ped' && !pedPose) continue;
           post({ type: 'entity_input', entity_id: entity.entity_id, owner_epoch: entity.owner_epoch,

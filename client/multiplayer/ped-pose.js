@@ -37,7 +37,7 @@ self.createPedPoseSampler = function ({ ex, memory }) {
         const data = new DataView(memory.buffer);
         const minimum = [0, 4, 8].map(offset => data.getFloat32(scratch + offset, true));
         const maximum = [16, 20, 24].map(offset => data.getFloat32(scratch + offset, true));
-        if (minimum.every((v, i) => Number.isFinite(v) && Number.isFinite(maximum[i]) && v <= maximum[i]
+        if (minimum.every((v, i) => Number.isFinite(v) && Number.isFinite(maximum[i]) && v < maximum[i]
           && Math.abs(v - origin[i]) <= 4 && Math.abs(maximum[i] - origin[i]) <= 4))
           pose.bounds = { minimum, maximum };
       }

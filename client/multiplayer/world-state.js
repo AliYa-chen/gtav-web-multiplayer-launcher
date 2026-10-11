@@ -106,6 +106,8 @@ export function cleanWorldEntity(value) {
     if (!record(life) || !integer(life.max_health, 1, 10000) || !integer(life.health, 0, life.max_health)
       || life.alive !== (life.health > 0) || !integer(life.kills) || !integer(life.deaths)
       || (Object.hasOwn(life, 'armour') && (!Number.isFinite(life.armour) || life.armour < 0 || life.armour > 100))
+      || (Object.hasOwn(life, 'native_health_threshold') && (value.kind !== 'ped' || value.player_id !== null
+        || !integer(life.native_health_threshold, 1, 10000) || life.max_health + life.native_health_threshold - 1 > 10000))
       || !integer(life.respawn_at_tick) || (life.alive && life.respawn_at_tick !== 0)) return null;
   }
   if (value.kind === 'vehicle') {

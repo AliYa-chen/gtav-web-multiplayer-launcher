@@ -8,12 +8,77 @@ self.createEquipmentBridge = function ({ ex, memory, post }) {
   let reloadToken = '', reloadObserved = false, reloadWasActive = false, reloadFilled = false;
   let reloadRequestAt = -Infinity, nativeReloadStartedAt = -Infinity, reloadExpectedEnd = Infinity;
   let nearPickup = '', lastFrame = null;
+  let selectionRecovery = null, authoritativeSelected = UNARMED, pendingEquip = null, nextEquipToken = 0;
+  const ownedWeapons = new Set();
   const pending = new Map(), completed = new Set(), acknowledgements = new Set();
   function reset() {
     key = ''; ped = 0; initialized = false; pending.clear(); completed.clear(); acknowledgements.clear();
     lastSync = lastRequest = reloadRequestAt = -Infinity; lastSelected = appliedWeapon = null;
     reloadToken = ''; reloadObserved = reloadWasActive = reloadFilled = false; nativeReloadStartedAt = -Infinity;
     reloadExpectedEnd = Infinity; nearPickup = ''; lastFrame = null;
+    selectionRecovery = null; authoritativeSelected = UNARMED; pendingEquip = null; ownedWeapons.clear();
+  }
+  const desiredSelection = () => pendingEquip?.weapon ?? authoritativeSelected;
+  function retargetRecovery() {
+    const target = desiredSelection();
+    if (selectionRecovery && selectionRecovery.target !== target) {
+      selectionRecovery.target = target; selectionRecovery.requestedAt = -Infinity;
+      selectionRecovery.retryDelay = 500; selectionRecovery.assetRequestedAt = -Infinity;
+    }
+  }
+  function acceptInventory(state) {
+    const selectedChanged = authoritativeSelected !== state.selected_weapon;
+    authoritativeSelected = state.selected_weapon;
+    ownedWeapons.clear();
+    for (const slot of state.weapons) ownedWeapons.add(slot.weapon);
+    if (pendingEquip && (selectedChanged && pendingEquip.weapon === authoritativeSelected || !ownedWeapons.has(pendingEquip.weapon))) pendingEquip = null;
+    retargetRecovery();
+  }
+  function allowedWeapon(weapon) {
+    return initialized && Number.isInteger(weapon) && weapon > 0 && weapon <= 0xffffffff && ownedWeapons.has(weapon);
+  }
+  function stateWeapon(weapon) {
+    // Zero is a native loading result, not a new inventory selection. During
+    // a forced switch, temporary unarmed frames likewise do not select fists.
+    return allowedWeapon(weapon) && !(selectionRecovery && weapon !== selectionRecovery.target
+      && (weapon === UNARMED || selectionRecovery.issuedTargets.has(weapon))) ? weapon : desiredSelection();
+  }
+  function clearReloadObservation() {
+    reloadWasActive = reloadObserved = reloadFilled = false; reloadToken = '';
+    nativeReloadStartedAt = -Infinity; reloadExpectedEnd = Infinity; appliedWeapon = null;
+  }
+  function newRecovery(target, requestedAt = -Infinity) {
+    return { target, removed: null, requestedAt, retryDelay: 500, assetRequestedAt: -Infinity, cancelledReload: '',
+      issuedTargets: new Set(Number.isFinite(requestedAt) ? [target] : []) };
+  }
+  function recoverSelection(state, selected, now) {
+    let changed = false;
+    if (!selectionRecovery) {
+      selectionRecovery = newRecovery(desiredSelection());
+      clearReloadObservation();
+    }
+    if (selected && !ownedWeapons.has(selected) && selectionRecovery.removed !== selected) {
+      ex.mpRemoveWeapon?.(ped, selected | 0); selectionRecovery.removed = selected; changed = true;
+    }
+    if (state.reload && selectionRecovery.cancelledReload !== state.reload.token) {
+      request('reload_cancel', { reload_token: state.reload.token }, now);
+      selectionRecovery.cancelledReload = state.reload.token; reloadRequestAt = now;
+    }
+    // Equipping may wait for weapon assets. Reissuing on every 40 ms tick can
+    // keep restarting the native task; retain the transaction while it loads.
+    if (selectionRecovery.target !== UNARMED && ex.mpHasWeaponAsset && !ex.mpHasWeaponAsset(selectionRecovery.target | 0)) {
+      if (now - selectionRecovery.assetRequestedAt >= 500) {
+        ex.mpRequestWeaponAsset?.(selectionRecovery.target | 0, 31, 0); selectionRecovery.assetRequestedAt = now;
+      }
+      return changed;
+    }
+    if (now - selectionRecovery.requestedAt >= selectionRecovery.retryDelay) {
+      ex.mpSetCurrentWeapon(ped, selectionRecovery.target | 0, 1);
+      selectionRecovery.issuedTargets.add(selectionRecovery.target);
+      if (Number.isFinite(selectionRecovery.requestedAt)) selectionRecovery.retryDelay = Math.min(4000, selectionRecovery.retryDelay * 2);
+      selectionRecovery.requestedAt = now; changed = true;
+    }
+    return changed;
   }
   function vector(offset, values) {
     const view = new DataView(memory.buffer);
@@ -71,6 +136,17 @@ self.createEquipmentBridge = function ({ ex, memory, post }) {
       events.push(event.id);
       if (acknowledgements.has(event.id)) continue;
       acknowledgements.add(event.id);
+      if (event.action === 'equip' && pendingEquip && event.equip_token === pendingEquip.token
+        && event.weapon === pendingEquip.weapon && typeof event.accepted === 'boolean') {
+        const intent = pendingEquip; pendingEquip = null;
+        if (event.accepted === false) {
+          selectionRecovery ||= newRecovery(authoritativeSelected);
+          // The rejected owned weapon is an obsolete local task, not another
+          // deliberate selection which may cancel the authoritative fallback.
+          selectionRecovery.issuedTargets.add(intent.weapon); clearReloadObservation();
+        }
+        retargetRecovery();
+      }
       if (event.accepted === false && event.action === 'reload_begin' && event.reason !== 'reload_in_progress') {
         reloadObserved = false; reloadRequestAt = -Infinity;
       }
@@ -139,28 +215,40 @@ self.createEquipmentBridge = function ({ ex, memory, post }) {
     const identity = state.world_epoch + ':' + state.entity_id + ':' + state.generation + ':' + localPed;
     if (key !== identity) {
       reset(); key = identity; ped = localPed;
+      acceptInventory(state);
       ex.mpRemoveAllWeapons(ped, 1); ex.mpSetInfiniteAmmoClip?.(ped, 0);
       for (const slot of state.weapons) {
         ex.mpGiveWeapon(ped, slot.weapon | 0, 0, 0, 0);
         ex.mpSetInfiniteAmmo?.(ped, slot.infinite ? 1 : 0, slot.weapon | 0);
       }
       ex.mpSetCurrentWeapon(ped, state.selected_weapon | 0, 1);
+      if ((ex.mpSelectedWeapon(ped) >>> 0) !== state.selected_weapon)
+        selectionRecovery = newRecovery(state.selected_weapon, now);
       lastSelected = state.selected_weapon;
       reconcile(state, false); initialized = true; lastSync = now; return true;
     }
+    acceptInventory(state);
     receivePredictions(packet, state);
     renderPickups(state, packet, now);
     if (now - lastSync < 40) return false;
     lastSync = now;
-    const selected = (ex.mpSelectedWeapon(ped) >>> 0) || UNARMED;
-    const allowed = state.weapons.some(slot => slot.weapon === selected);
-    if (!allowed) {
-      ex.mpRemoveWeapon?.(ped, selected | 0);
-      ex.mpSetCurrentWeapon(ped, state.selected_weapon | 0, 1); return true;
+    const nativeSelected = ex.mpSelectedWeapon(ped) >>> 0;
+    const selected = nativeSelected || UNARMED;
+    const allowed = ownedWeapons.has(selected);
+    if (selectionRecovery && nativeSelected && selected === selectionRecovery.target) {
+      selectionRecovery = null; lastSelected = selected; clearReloadObservation();
+    } else if (selectionRecovery && allowed && nativeSelected && selected !== UNARMED
+      && !selectionRecovery.issuedTargets.has(selected)) {
+      // A deliberate switch to another owned weapon wins over the fallback.
+      selectionRecovery = null; clearReloadObservation();
     }
+    if (selectionRecovery || !allowed || !nativeSelected) return recoverSelection(state, nativeSelected, now);
     if (selected !== lastSelected) {
-      request('equip', { weapon: selected }, now); lastSelected = selected;
-      reloadWasActive = false; reloadObserved = false; reloadFilled = false; reloadToken = '';
+      // Retain a valid local selection while its equip intent crosses the
+      // transport. A temporary zero must not restore an older server snapshot.
+      pendingEquip = { weapon: selected, token: ++nextEquipToken };
+      request('equip', { weapon: selected, equip_token: pendingEquip.token }, now); lastSelected = selected;
+      clearReloadObservation();
     }
     const nativeReloading = Boolean(ex.mpIsReloading?.(ped));
     const slot = state.weapons.find(item => item.weapon === selected);
@@ -190,7 +278,7 @@ self.createEquipmentBridge = function ({ ex, memory, post }) {
     reloadWasActive = nativeReloading;
     return reconcile(state, nativeReloading);
   }
-  return { tick, reset, ready: () => initialized,
+  return { tick, reset, ready: () => initialized, allowedWeapon, stateWeapon,
     predictShot(weapon) { const id = ++nextPrediction; pending.set(id, { weapon }); return id; },
     cancelPrediction(id) { pending.delete(id); completed.add(id); } };
 };

@@ -149,7 +149,16 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   let wireRequestSequence = 0;
   const meleeRequests = new Map(), consumedMeleeEvents = new Set();
   const quietRejections = new Set(['rate_limited', 'cooldown', 'stale_seq', 'stale_input', 'stale_owner', 'stale_generation',
-    'stale_revision', 'invalid_revision', 'seat_unavailable', 'too_far', 'not_facing', 'player_dead', 'weapon_mismatch', 'not_ready', 'entry_not_ready', 'stale_collision']);
+    'stale_revision', 'invalid_revision', 'seat_unavailable', 'too_far', 'not_facing', 'player_dead', 'weapon_mismatch', 'not_ready', 'entry_not_ready', 'stale_collision',
+    'invalid_ped_pose', 'invalid_shot_time', 'unknown_shot_time', 'stale_shot_lifecycle', 'stale_epoch',
+    'stale_equipment_seq', 'stale_equipment_shot', 'stale_reload', 'weapon_changed', 'weapon_reloading',
+    'reload_in_progress', 'reload_not_needed', 'reload_not_ready', 'pickup_unavailable', 'pickup_out_of_range']);
+  // Gameplay refusals keep the current transport and world baseline. In
+  // particular, selecting a local weapon does not grant server ownership and
+  // must never turn a normal equipment rejection into a reconnect/load loop.
+  const equipmentRejections = new Set(['weapon_not_owned', 'weapon_has_no_ammo', 'out_of_ammo', 'empty_clip',
+    'reload_not_applicable', 'unsupported_reload', 'unknown_pickup', 'pickup_requires_on_foot',
+    'pickup_no_capacity', 'invalid_equipment_state', 'invalid_equipment_action']);
   let collisionNoticeShown = false;
   let pendingMelee = null, meleeTimer = 0;
   const meleeQueue = [];
@@ -180,6 +189,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
   let supportsCombatFeedback = false, supportsLagCompensation = false;
   let supportsWorldV2 = false, supportsEquipment = false, supportsPedPose = false;
   let equipment = null, equipmentSequence = 0;
+  const pendingEquipRequests = new Map();
   const shotPredictions = new Map();
   let supportsEntryReadiness = false, entryReady = false, pendingEntry = null;
   const serverFeatures = new Set();
@@ -643,6 +653,8 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     if (!state || state.player_id !== clientId) return false;
     if (equipment && state.world_epoch === equipment.world_epoch && state.entity_id === equipment.entity_id
       && (state.generation < equipment.generation || state.generation === equipment.generation && state.revision < equipment.revision)) return true;
+    if (!equipment || state.world_epoch !== equipment.world_epoch || state.entity_id !== equipment.entity_id
+      || state.generation !== equipment.generation) pendingEquipRequests.clear();
     equipment = state; equipmentSequence = Math.max(equipmentSequence, state.last_seq);
     emit(state); return true;
   }
@@ -703,8 +715,10 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
       if (!supportsEquipment || !equipment || !current.ready || !entity || equipment.generation !== entity.generation) return;
       const extras = { equip: ['weapon'], reload_begin: ['weapon'], reload_complete: ['reload_token'],
         reload_cancel: ['reload_token'], pickup_claim: ['pickup_id', 'pickup_generation'] }[data.action];
-      if (!extras || Object.keys(data).some(key => !['type', 'action', ...extras].includes(key))
+      if (!extras || Object.keys(data).some(key => !['type', 'action', ...extras,
+        ...(data.action === 'equip' ? ['equip_token'] : [])].includes(key))
         || extras.some(key => !Object.hasOwn(data, key))) return;
+      if (Object.hasOwn(data, 'equip_token') && (!Number.isSafeInteger(data.equip_token) || data.equip_token < 1)) return;
       if (extras.includes('weapon') && !unsignedHash(data.weapon)) return;
       if (extras.includes('reload_token') && (typeof data.reload_token !== 'string' || data.reload_token.length > 160)) return;
       if (extras.includes('pickup_id') && (typeof data.pickup_id !== 'string' || data.pickup_id.length > 96
@@ -712,7 +726,14 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
       const request = { world_epoch: current.world_epoch, entity_id: entity.entity_id, generation: entity.generation,
         seq: equipmentSequence + 1, action: data.action };
       for (const key of extras) request[key] = data[key];
-      if (send('equipment_request', request)) equipmentSequence++;
+      if (send('equipment_request', request)) {
+        equipmentSequence++;
+        if (data.action === 'equip' && data.equip_token) {
+          pendingEquipRequests.set(request.seq, { weapon: data.weapon, equip_token: data.equip_token,
+            world_epoch: request.world_epoch, entity_id: request.entity_id, generation: request.generation });
+          while (pendingEquipRequests.size > 128) pendingEquipRequests.delete(pendingEquipRequests.keys().next().value);
+        }
+      }
       return;
     }
     if (data?.type === 'collision_result') {
@@ -777,7 +798,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     clientId = null; room = null; welcomed = profiled = false;
     attemptedResumeId = null; resumed = resumeStateReady = false;
     supportsAppearance = supportsActions = supportsActionsV2 = supportsLagCompensation = supportsEquipment = supportsPedPose = false;
-    equipment = null; equipmentSequence = 0; shotPredictions.clear();
+    equipment = null; equipmentSequence = 0; pendingEquipRequests.clear(); shotPredictions.clear();
     supportsCombat = supportsResume = supportsHeartbeat = supportsSnapshot = false;
     supportsCombatFeedback = false;
     serverVersion = ''; supportsWorldV2 = false; supportsEntryReadiness = entryReady = false; pendingEntry = null; serverFeatures.clear(); world.reset(); entityInputSequences.clear(); entityReadyEpochs.clear(); lastWorldSyncAt = -Infinity;
@@ -1064,13 +1085,22 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
           prop_drawable: message.prop_drawable, prop_texture: message.prop_texture });
         break;
       }
-      case 'equipment_ack':
+      case 'equipment_ack': {
         if (!supportsEquipment || !profiled || message.player_id !== clientId || !Number.isSafeInteger(message.seq)
           || typeof message.accepted !== 'boolean') break;
+        const requested = pendingEquipRequests.get(message.seq);
+        const matching = requested && message.action === 'equip' && message.state
+          && requested.world_epoch === message.state.world_epoch && requested.entity_id === message.state.entity_id
+          && requested.generation === message.state.generation;
         if (message.state) receiveEquipment(message.state);
+        const currentRequest = matching && equipment && requested.world_epoch === equipment.world_epoch
+          && requested.entity_id === equipment.entity_id && requested.generation === equipment.generation;
+        if (currentRequest) pendingEquipRequests.delete(message.seq);
         emit({ type: 'equipment_ack', seq: message.seq, accepted: message.accepted,
-          action: message.action, reason: message.reason || '' });
+          action: message.action, reason: message.reason || '',
+          ...(currentRequest ? { weapon: requested.weapon, equip_token: requested.equip_token } : {}) });
         break;
+      }
       case 'pickup_state': case 'pickup_collected': {
         if (!supportsEquipment || !equipment || message.world_epoch !== equipment.world_epoch) break;
         const pickup = cleanEquipmentPickup(message.pickup);
@@ -1101,8 +1131,8 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
         if (!result.accepted) terminalPrediction(result.seq, 'cancelled');
         if (result.seq <= lastCombatResultSequence) break;
         lastCombatResultSequence = result.seq;
-        logCombat({ stage: 'result', client_id: clientId, seq: result.seq, weapon: result.weapon,
-          accepted: result.accepted, hit: result.hit, reason: result.reason || '',
+        logCombat({ stage: result.pending ? 'pending' : 'result', client_id: clientId, seq: result.seq, weapon: result.weapon,
+          accepted: result.accepted, hit: result.hit, pending: result.pending === true, reason: result.reason || '',
           ...(Object.hasOwn(result, 'victim_id') ? { victim_id: result.victim_id } : {}),
           ...(Object.hasOwn(result, 'damage') ? { damage: result.damage } : {}),
           ...(Object.hasOwn(result, 'health') ? { health: result.health } : {}),
@@ -1145,11 +1175,11 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
           }
           break;
         }
-        if (profiled && ['rate_limited', 'stale_seq', 'invalid_shot', 'invalid_movement', 'not_ready', 'player_dead', 'unsupported_weapon', 'weapon_mismatch', 'destroyed_vehicle',
+        if (profiled && (equipmentRejections.has(message.code) || ['rate_limited', 'stale_seq', 'invalid_shot', 'invalid_movement', 'not_ready', 'player_dead', 'unsupported_weapon', 'weapon_mismatch', 'destroyed_vehicle', 'projectile_limit',
           'stale_input', 'wrong_world', 'invalid_owner', 'not_owner', 'invalid_lease', 'invalid_revision', 'attached_entity', 'dead_entity',
           'seat_unavailable', 'invalid_seat', 'invalid_component', 'unsupported_interaction', 'stale_owner', 'simulation_not_ready',
           'player_input_required', 'health_increase_denied', 'unsupported_simulation', 'invalid_target', 'invalid_reason', 'not_facing', 'invalid_request',
-          'too_far', 'stale_revision', 'stale_generation', 'unknown_entity', 'snapshot_required', 'invalid_batch', 'invalid_message', 'static_entity'].includes(message.code)) {
+          'too_far', 'stale_revision', 'stale_generation', 'unknown_entity', 'snapshot_required', 'invalid_batch', 'invalid_message', 'static_entity'].includes(message.code))) {
           const chinese = message.code === 'unsupported_weapon' ? '服务器武器目录不识别当前武器，请更新服务端资源目录。'
             : message.code === 'weapon_mismatch' ? '武器切换尚未同步，请稍后重新射击。'
             : typeof message.message === 'string' ? message.message : '服务器未接受这次操作';

@@ -9,6 +9,12 @@ import offline.multiplayer.WorldRegistry.Vector;
 final class WorldService {
     private static final long BLISTA=0xeb70965fL, ASEA=0x94204d89L;
     private static final long UNARMED=0xa2719263L;
+    private static Combat initialNpcCombat(long model) {
+        PedHealthCatalog.Rule health = PedHealthCatalog.byModel(model);
+        if (health == null) throw new IllegalArgumentException("Unsupported original NPC health model: " + model);
+        int capacity = health.effectiveHealth();
+        return new Combat(capacity, capacity, 0, 0, 0, health.armour());
+    }
     private final WorldRegistry registry;
     private final CombatWorld combat;
     private final EquipmentWorld equipment;
@@ -119,14 +125,14 @@ final class WorldService {
         try{
             if(slot.type()==WorldPopulation.Type.WALKER){
                 Entity walker=registry.createTrusted(Kind.PED,0xc99f21c4L,null,Components.ped(Transform.at(point,heading),
-                    new PedView(null,Actions.idle(),UNARMED,false,null),new Combat(200,200,0,0,0)),null,0,now()).entities().get(0);
+                    new PedView(null,Actions.idle(),UNARMED,false,null),initialNpcCombat(0xc99f21c4L)),null,0,now()).entities().get(0);
                 created.add(walker.entityId());
             }else{
                 Entity car=registry.createTrusted(Kind.VEHICLE,slot.index()%2==0?BLISTA:ASEA,null,
                     Components.vehicle(Transform.at(point,heading),Vehicle.empty(3)),null,0,now()).entities().get(0);
                 created.add(car.entityId());
                 Entity driver=registry.createTrusted(Kind.PED,0xc99f21c4L,null,Components.ped(car.components().transform(),
-                    new PedView(null,Actions.idle(),UNARMED,false,null),new Combat(200,200,0,0,0)),null,0,now()).entities().get(0);
+                    new PedView(null,Actions.idle(),UNARMED,false,null),initialNpcCombat(0xc99f21c4L)),null,0,now()).entities().get(0);
                 created.add(driver.entityId());registry.assignNpcSeatTrusted(driver.entityId(),car.entityId(),"driver",now());
             }
             for(String id:created){populationEntities.add(id);entityCells.put(id,slot.cell());}
@@ -360,7 +366,7 @@ final class WorldService {
                 try{
                     for(WorldLaw.Spawn spawn:decision.spawns()){
                         Components components=spawn.kind()==Kind.VEHICLE?Components.vehicle(Transform.at(spawn.position(),spawn.heading()),Vehicle.empty(3)):
-                            Components.ped(Transform.at(spawn.position(),spawn.heading()),new PedView(null,Actions.idle(),spawn.weapon(),false,null),new Combat(200,200,0,0,0));
+                            Components.ped(Transform.at(spawn.position(),spawn.heading()),new PedView(null,Actions.idle(),spawn.weapon(),false,null),initialNpcCombat(spawn.model()));
                         created.add(registry.createTrusted(spawn.kind(),spawn.model(),null,components,null,0,now()).entities().get(0).entityId());
                     }
                     registry.assignNpcSeatTrusted(created.get(1),created.get(0),"driver",now());
@@ -687,9 +693,10 @@ final class WorldService {
         }else if("entity_health".equals(kind)){
             fields(input,"type","world_epoch","entity_id","owner_epoch","input_seq","kind","health");
             if(entity.playerId()!=null || entity.kind()!=Kind.PED || entity.components().combat()==null)throw new Problem("invalid_target","该候选只能作用于本租约NPC");
-            int health=(int)integer(input.get("health"),0,200);Combat life=entity.components().combat();
+            Combat life=entity.components().combat();
+            int health=(int)integer(input.get("health"),0,life.maxHealth());
             if(health>life.health())throw new Problem("health_increase_denied","模拟候选不能恢复NPC生命值");
-            registry.setCombatBatchTrusted(Map.of(entity.entityId(),new Combat(health,200,life.kills(),life.deaths()+(life.alive()&&health==0?1:0),0,life.armour())),now());
+            registry.setCombatBatchTrusted(Map.of(entity.entityId(),new Combat(health,life.maxHealth(),life.kills(),life.deaths()+(life.alive()&&health==0?1:0),0,life.armour())),now());
         }else if("vehicle_damage".equals(kind)){
             // Compatibility path for native collision/fire/weapon health observations.
             // This owner-scoped, monotonic candidate is not server weapon-damage proof:
@@ -794,7 +801,15 @@ final class WorldService {
             "engine_on",c.vehicle().view().engineOn(),"lights_on",c.vehicle().view().lightsOn()));
         if(c.object()!=null)components.put("object",map("dynamic",c.object().dynamic()));
         if(c.attachment()!=null)components.put("attachment",map("entity_id",c.attachment().entityId(),"seat",c.attachment().seat()));
-        if(c.combat()!=null)components.put("combat",map("health",c.combat().health(),"max_health",c.combat().maxHealth(),"armour",c.combat().armour(),"alive",c.combat().alive(),"kills",c.combat().kills(),"deaths",c.combat().deaths(),"respawn_at_tick",c.combat().respawnAtTick()));
+        if(c.combat()!=null) {
+            Map<String,Object> life=map("health",c.combat().health(),"max_health",c.combat().maxHealth(),"armour",c.combat().armour(),"alive",c.combat().alive(),"kills",c.combat().kills(),"deaths",c.combat().deaths(),"respawn_at_tick",c.combat().respawnAtTick());
+            if(entity.kind()==Kind.PED && entity.playerId()==null) {
+                PedHealthCatalog.Rule health=PedHealthCatalog.byModel(entity.model());
+                if(health==null)throw new IllegalStateException("Unsupported original NPC health model: "+entity.model());
+                life.put("native_health_threshold",health.dyingThreshold());
+            }
+            components.put("combat",life);
+        }
         WorldLaw.ResponseInfo response=law.responseForEntity(entity.entityId());
         Map<String,Object> value=map("entity_id",entity.entityId(),"kind",entity.kind().name().toLowerCase(Locale.ROOT),"player_id",entity.playerId(),"model",entity.model(),"revision",entity.revision(),
             "generation",entity.generation(),"owner_id",entity.ownerId(),"owner_epoch",entity.ownerEpoch(),"lease_until_tick",entity.leaseUntilTick(),"last_input_seq",entity.lastInputSequence(),

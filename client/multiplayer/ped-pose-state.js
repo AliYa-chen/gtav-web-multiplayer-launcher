@@ -25,7 +25,7 @@ export function cleanPedPose(value) {
     const bounds = value.bounds;
     if (!bounds || Array.isArray(bounds) || Object.keys(bounds).some(key => !['minimum', 'maximum'].includes(key))
       || ![bounds.minimum, bounds.maximum].every(v => Array.isArray(v) && v.length === 3 && v.every(n => Number.isFinite(n) && Math.abs(n) <= 16000))
-      || bounds.minimum.some((v, i) => v > bounds.maximum[i] || bounds.maximum[i] - v > 8)) return null;
+      || bounds.minimum.some((v, i) => v >= bounds.maximum[i] || bounds.maximum[i] - v > 8)) return null;
     result.bounds = { minimum: [...bounds.minimum], maximum: [...bounds.maximum] };
   }
   if (Object.hasOwn(value, 'water_height')) {

@@ -41,6 +41,12 @@ final class PedCollision {
     private final Map<Long,Model> models;
     private final Map<String,Pose> poses=new HashMap<>();
     private final LinkedHashMap<Long,Frame> history=new LinkedHashMap<>();
+    private enum RejectionReason { MODEL, BONES, MATRIX, ANCHOR, EDGES, BOUNDS, WATER, LIFECYCLE }
+    private static final class InvalidPose extends IllegalArgumentException {
+        final RejectionReason reason;
+        InvalidPose(RejectionReason reason) { this.reason = reason; }
+    }
+    private final Map<RejectionReason,Long> rejectionReasons=new java.util.EnumMap<>(RejectionReason.class);
     private WorldRegistry world;
     private String epoch="";
     private long accepted,rejected;
@@ -99,57 +105,76 @@ final class PedCollision {
     /** Validate before changing the authoritative transform; invalid input must not erase its last body. */
     boolean validObservation(long model,WorldRegistry.Transform transform,Object raw){
         try { parseObservation(model,transform,raw);return true; }
-        catch(WorldService.Problem|IllegalArgumentException failure){rejected++;return false;}
+        catch(InvalidPose failure){reject(failure.reason);return false;}
     }
-    private Observation parseObservation(long modelHash,WorldRegistry.Transform transform,Object raw)throws WorldService.Problem{
-        Model model=models.get(modelHash);
-        if(model==null||transform==null)throw new IllegalArgumentException();
-        Map<String,Object> value=WorldService.object(raw);
-        WorldService.fields(value,"bones","bounds","water_height","origin");
-        if(!(value.get("bones") instanceof List<?> entries)||entries.size()!=model.tags.size())throw new IllegalArgumentException();
-        Map<Integer,double[]> bones=new HashMap<>();V anchor=v(transform.position());
-        if(value.containsKey("origin")&&point(value.get("origin"),16000).sub(anchor).norm()>.05)throw new IllegalArgumentException();
-        for(Object entry:entries){
-            Map<String,Object> row=WorldService.object(entry);
-            WorldService.fields(row,"tag","matrix");
-            int tag=(int)WorldService.integer(row.get("tag"),1,65535);
-            double[] matrix=matrix(row.get("matrix"),16000);
-            if(!model.tags.contains(tag)||bones.put(tag,matrix)!=null||origin(matrix).sub(anchor).norm()>2.5)throw new IllegalArgumentException();
-        }
-        // Bone translations come from the original model hierarchy. Allow bounded
-        // animation/IK stretch, while rejecting detached limbs or collapsed skeletons.
-        for(Edge edge:model.edges){
-            double distance=origin(bones.get(edge.from)).sub(origin(bones.get(edge.to))).norm();
-            if(distance>edge.length*1.2+.025||distance<edge.length*.2-.01)throw new IllegalArgumentException();
-        }
-        Bounds bounds=null;Water water=null;
-        if(value.containsKey("bounds")){
-            Map<String,Object> rawBounds=WorldService.object(value.get("bounds"));
-            WorldService.fields(rawBounds,"minimum","maximum");
-            V minimum=point(rawBounds.get("minimum"),16000),maximum=point(rawBounds.get("maximum"),16000);
-            for(int axis=0;axis<3;axis++){
-                double lo=minimum.at(axis),hi=maximum.at(axis),at=anchor.at(axis);
-                if(lo>=hi||hi-lo>8||Math.abs(lo-at)>4||Math.abs(hi-at)>4)throw new IllegalArgumentException();
+    private void reject(RejectionReason reason) {
+        rejected++;
+        rejectionReasons.merge(reason,1L,Long::sum);
+    }
+    private Observation parseObservation(long modelHash,WorldRegistry.Transform transform,Object raw){
+        RejectionReason reason=RejectionReason.MODEL;
+        try {
+            Model model=models.get(modelHash);
+            if(model==null||transform==null)throw new IllegalArgumentException();
+            reason=RejectionReason.BONES;
+            Map<String,Object> value=WorldService.object(raw);
+            WorldService.fields(value,"bones","bounds","water_height","origin");
+            if(!(value.get("bones") instanceof List<?> entries)||entries.size()!=model.tags.size())throw new IllegalArgumentException();
+            Map<Integer,double[]> bones=new HashMap<>();V anchor=v(transform.position());
+            reason=RejectionReason.ANCHOR;
+            if(value.containsKey("origin")&&point(value.get("origin"),16000).sub(anchor).norm()>.05)throw new IllegalArgumentException();
+            for(Object entry:entries){
+                reason=RejectionReason.BONES;
+                Map<String,Object> row=WorldService.object(entry);
+                WorldService.fields(row,"tag","matrix");
+                int tag=(int)WorldService.integer(row.get("tag"),1,65535);
+                if(!model.tags.contains(tag)||bones.containsKey(tag))throw new IllegalArgumentException();
+                reason=RejectionReason.MATRIX;
+                double[] matrix=matrix(row.get("matrix"),16000);
+                reason=RejectionReason.ANCHOR;
+                if(origin(matrix).sub(anchor).norm()>2.5)throw new IllegalArgumentException();
+                bones.put(tag,matrix);
             }
-            bounds=new Bounds(minimum.vector(),maximum.vector());
+            // Bone translations come from the original model hierarchy. Allow bounded
+            // animation/IK stretch, while rejecting detached limbs or collapsed skeletons.
+            reason=RejectionReason.EDGES;
+            for(Edge edge:model.edges){
+                double distance=origin(bones.get(edge.from)).sub(origin(bones.get(edge.to))).norm();
+                if(distance>edge.length*1.2+.025||distance<edge.length*.2-.01)throw new IllegalArgumentException();
+            }
+            Bounds bounds=null;Water water=null;
+            if(value.containsKey("bounds")){
+                reason=RejectionReason.BOUNDS;
+                Map<String,Object> rawBounds=WorldService.object(value.get("bounds"));
+                WorldService.fields(rawBounds,"minimum","maximum");
+                V minimum=point(rawBounds.get("minimum"),16000),maximum=point(rawBounds.get("maximum"),16000);
+                for(int axis=0;axis<3;axis++){
+                    double lo=minimum.at(axis),hi=maximum.at(axis),at=anchor.at(axis);
+                    if(lo>=hi||hi-lo>8||Math.abs(lo-at)>4||Math.abs(hi-at)>4)throw new IllegalArgumentException();
+                }
+                bounds=new Bounds(minimum.vector(),maximum.vector());
+            }
+            reason=RejectionReason.WATER;
+            if(value.containsKey("water_height"))water=new Water(value.get("water_height")==null?null:
+                WorldService.number(value.get("water_height"),-16000,16000));
+            return new Observation(Map.copyOf(bones),bounds,water);
+        } catch(WorldService.Problem|IllegalArgumentException failure) {
+            throw new InvalidPose(reason);
         }
-        if(value.containsKey("water_height"))water=new Water(value.get("water_height")==null?null:
-            WorldService.number(value.get("water_height"),-16000,16000));
-        return new Observation(Map.copyOf(bones),bounds,water);
     }
     /** Called only after the containing player or NPC intent passed its epoch/generation/lease fence. */
     boolean acceptPose(Entity entity,Object raw,long now){
-        if(entity==null)return false;
+        if(entity==null){reject(RejectionReason.LIFECYCLE);return false;}
         try{
             if(entity.kind()!=WorldRegistry.Kind.PED||!alive(entity)||now<0
-                ||entity.ownerId()==null||entity.leaseUntilTick()<=now)throw new IllegalArgumentException();
+                ||entity.ownerId()==null||entity.leaseUntilTick()<=now)throw new InvalidPose(RejectionReason.LIFECYCLE);
             Observation observation=parseObservation(entity.model(),entity.components().transform(),raw);
             Pose previous=poses.get(entity.entityId());
-            if(previous!=null&&now<previous.received)throw new IllegalArgumentException();
+            if(previous!=null&&now<previous.received)throw new InvalidPose(RejectionReason.LIFECYCLE);
             poses.put(entity.entityId(),new Pose(lifetime(entity),world==null?null:CombatHistory.fence(entity,world),entity.components().transform(),now,
                 observation.bones,observation.bounds,observation.water));
             accepted++;return true;
-        }catch(WorldService.Problem|IllegalArgumentException failure){rejected++;return false;}
+        }catch(InvalidPose failure){reject(failure.reason);return false;}
     }
     void capture(WorldRegistry current,long now){
         world=current;
@@ -307,6 +332,11 @@ final class PedCollision {
         }
         return -1;
     }
-    Map<String,Object> metadata(){return WorldService.map("models",models.size(),"source","original_yft_ragdoll_primitives","engine_sha256",ENGINE_HASH,
-        "max_pose_age_ms",MAX_POSE_AGE_MILLIS,"accepted_poses",accepted,"rejected_poses",rejected,"active_poses",poses.size());}
+    Map<String,Object> metadata(){
+        Map<String,Long> reasons=new LinkedHashMap<>();
+        for(RejectionReason reason:RejectionReason.values())reasons.put(reason.name().toLowerCase(java.util.Locale.ROOT),rejectionReasons.getOrDefault(reason,0L));
+        return WorldService.map("models",models.size(),"source","original_yft_ragdoll_primitives","engine_sha256",ENGINE_HASH,
+            "max_pose_age_ms",MAX_POSE_AGE_MILLIS,"accepted_poses",accepted,"rejected_poses",rejected,
+            "rejection_reasons",reasons,"active_poses",poses.size());
+    }
 }

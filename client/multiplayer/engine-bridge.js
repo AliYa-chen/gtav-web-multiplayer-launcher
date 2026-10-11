@@ -411,6 +411,9 @@ self.prepareMultiplayerBridge = function (imports) {
         weaponSample = null; discardPendingShots(); return;
       }
       const { hash: weapon } = actualWeapon(ped);
+      if (packet.equipment_v1 && equipmentBridge?.allowedWeapon && !equipmentBridge.allowedWeapon(weapon)) {
+        weaponSample = null; discardPendingShots(); return;
+      }
       const rule = (packet.weapon_rules || []).find(value => value.weapon === weapon);
       if (ex.mpControlJustPressed?.(0, 47)) {
         post({ type: 'interaction_request', request_id: 'detonate:' + Math.floor(now), action: 'detonate' });
@@ -1414,8 +1417,10 @@ self.prepareMultiplayerBridge = function (imports) {
         const model = ex.mpGetModel(localPed) >>> 0;
         const heading = ((ex.mpHeading(localPed) % 360) + 360) % 360;
         const health = Math.max(0, Math.min(1000, ex.mpGetHealth(localPed)));
-        const weapon = actualWeapon(localPed).hash;
-        const shooting = !!ex.mpIsShooting(localPed);
+        const nativeWeapon = actualWeapon(localPed).hash;
+        const weapon = packet.equipment_v1 && equipmentBridge?.stateWeapon
+          ? equipmentBridge.stateWeapon(nativeWeapon) : nativeWeapon;
+        const shooting = nativeWeapon === weapon && !!ex.mpIsShooting(localPed);
         const actions = actionsFor(localPed);
         const ray = actions.aiming ? cameraRay() : null;
         const pedPose = packet.ped_pose && (now - lastState >= 50 || pendingShots.length) ? pedPoseSampler?.sample(localPed, position) : null;
@@ -1438,7 +1443,7 @@ self.prepareMultiplayerBridge = function (imports) {
               kills: authority.kills, deaths: authority.deaths } : {}) });
         }
         discardPendingShots((shot) => now - shot.at <= 1000
-          && shot.ped === localPed && shot.event.weapon === weapon);
+          && shot.ped === localPed && shot.event.weapon === nativeWeapon && shot.event.weapon === weapon);
         for (let sent = 0; sent < 4 && pendingShots.length && (!authority || authority.alive); sent++) {
           const shot = pendingShots.shift();
           // 同一武器的新状态随事件交给页面，网络层先发状态再发射击，避免换枪竞态。

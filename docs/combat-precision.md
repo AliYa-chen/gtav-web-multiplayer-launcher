@@ -14,6 +14,12 @@ Player and NPC bullets use the actual nearest hit component. Explosions and gas 
 
 The optional shot `server_time` identifies an exact recorded server baseline. The rewind window is 250 milliseconds, with capacity for every distinct millisecond in that window; there is no arbitrary timestamp interpolation. Future and unknown baselines are rejected. An older baseline actually published to that player safely uses current geometry. Entity generation, model, ownership epoch, life and attachment-parent identity fence historical and deferred hits, so an old shot cannot transfer to a respawned or migrated entity. Queued future shots execute against current geometry.
 
+### NPC health normalization (0.4.8)
+
+`tools/ped_health_metadata.py` pins the supported engine, model/personality tables and health configuration. `PedHealthCatalog` contains scalar values for the ten supported models, with no geometry. NPCs use `initialHealth - dyingThreshold + 1` as their remaining damage budget because the native terminal check is strictly below the dying threshold. The ambient `a_m_y_business_01` starts at native health 175 with threshold 100, giving 76 effective points; three confirmed close-range 26-point pistol torso hits exhaust it. The earlier fixed 200 points required eight such hits. NPC armour remains at the original zero value.
+
+Launcher 0.2.20 maps a positive effective value back to `dyingThreshold + health - 1` and inverts environmental observations without rescaling damage. NPC input views contain only permitted action fields; snapshot bone poses use the separate validated pose channel. Degenerate optional native bounds are omitted during streaming, and explicit invalid bounds remain rejected. Health diagnostics report pose rejection categories and conservative shot blocks when geometry lacks a fresh pose. Invalid or missing geometry never grants damage.
+
 ### Damage and protection
 
 Damage retains the source weapon's network player/NPC modifier and distance falloff. The supported network hit-part branch treats head bone 31086 separately, neck 39317 as torso, and the original limb tags with the network limb modifier. Player bullet head critical damage uses the source minimum/maximum distance and extra-damage values, including native strict comparisons. This is the supported ordinary bullet branch, not a claim of every scripted or task-dependent GTA damage branch.
@@ -47,6 +53,12 @@ Metadata generators pin original engine/resource hashes and reject unsupported v
 玩家与 NPC 子弹使用实际最近命中部件，爆炸与毒气使用同组部件的最近表面。有效姿态下的未命中不会退回虚构人体胶囊。地图遮挡需经过确认，延迟伤害提交前还会复查当前车辆阻挡。
 
 射击可选 `server_time` 必须对应记录过的精确服务端基线。回溯上限 250 毫秒，容量覆盖窗口内每个毫秒，不对任意客户端时间进行插值。未来或未知基线被拒绝；确实发送给该玩家但已经过期的基线改用当前几何。历史与延迟命中核对实体代次、模型、归属时期、生命及附着父实体身份，旧子弹不会转移到重生或迁移后的实体。排队等待发射的子弹使用执行时的当前几何。
+
+### NPC 生命换算（0.4.8）
+
+`tools/ped_health_metadata.py` 固定受支持引擎、模型/个性表及生命配置哈希，`PedHealthCatalog` 仅保存十种模型的标量，不含几何。原生死亡判定严格小于死亡阈值，因此 NPC 剩余可受伤生命为 `初始生命 - 死亡阈值 + 1`。环境 `a_m_y_business_01` 原生命 175、阈值 100，对应 76 点；三发确认无遮挡的近距离手枪躯干命中（每发 26 点）耗尽生命。此前固定 200 点需要八发。NPC 护甲仍为原配置 0。
+
+启动器 0.2.20 将正生命逐点映射为 `死亡阈值 + 有效生命 - 1`，环境伤害按同一公式反算，不再缩放扣血。NPC 动作 view 仅包含协议允许字段，快照骨骼姿态通过独立校验通道传输。流式加载中退化的可选原生包围盒被省略，显式无效包围盒仍拒绝。健康接口记录姿态拒绝分类和缺少新鲜姿态的保守射击阻挡计数；缺失/无效几何仍不授权伤害。
 
 ### 伤害与防护
 

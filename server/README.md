@@ -1,4 +1,12 @@
-# GTA V 统一世界实验服务端 0.4.7-world-experimental
+# GTA V 统一世界实验服务端 0.4.8-world-experimental
+
+## 0.4.8：NPC 生命值与命中上报修复
+
+按原版模型 → 个性 → 生命配置生成 NPC 生命目录。服务端剩余生命为 `初始生命 - 死亡阈值 + 1`，边界相等仍存活；普通男性 Business 行人由固定 200 点改为原配置对应的 76 点，普通护甲仍为 0。环境伤害候选按角色当前上限校验，不恢复固定 200 点。启动器 0.2.20 将有效生命逐点映射到原生死亡阈值以上，修复 NPC 动作上报夹带快照姿态及未持有武器引发重连的问题。
+
+角色几何状态增加姿态拒绝原因计数及缺失姿态阻挡射击计数；缺失/无效姿态仍不能授权伤害。此次 JAR 更新复用现有有效独立世界数据，不覆盖几何、地图或导航。版本配套与检查范围见[0.4.8 更新](../release-notes/server-v0.4.8.md#简体中文)。后续 P0 范围保持未完成。
+
+Version 0.4.8 fixes NPC damage budgets from original model/personality health metadata and publishes the native threshold for launcher 0.2.20. Armour remains unchanged. Pose diagnostics identify rejected observations without weakening damage validation. Existing independently generated world data is preserved. See the [release notes](../release-notes/server-v0.4.8.md).
 
 ## 0.4.7：原版伤害、精细命中与装备权威
 
