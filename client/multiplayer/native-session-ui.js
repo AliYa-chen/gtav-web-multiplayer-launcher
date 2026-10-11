@@ -43,11 +43,24 @@ self.createNativeSessionUI = function ({ ex, memory }) {
     const count = Number.isSafeInteger(summary.player_count) ? Math.max(0, Math.min(1024, summary.player_count)) : 0;
     // 配置经过页面与启动器校验；这里再次拒绝格式指令、HTML和不安全协议。
     const candidate = summary.remote_config?.oltitle;
-    const address = typeof candidate === 'string' && Array.from(candidate).length <= 160 && candidate.trim()
+    let address = typeof candidate === 'string' && Array.from(candidate).length <= 160 && candidate.trim()
       && !/[<>~&"'\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/.test(candidate)
       && (!/^[a-z][a-z\d+.-]*:/i.test(candidate) || /^https:\/\/[^\s]+$/i.test(candidate))
       && !/^https:\/\/[^/]*@/i.test(candidate)
       ? candidate : '-';
+    // Remote operator text has no reviewed font catalogue. Normalize Unicode
+    // HTTPS addresses to ASCII when URL is available; otherwise use a known
+    // native label. Player names follow their separate unchanged text path.
+    if (/[^\x20-\x7e]/.test(address)) {
+      let ascii = '';
+      if (/^https:\/\//i.test(address) && typeof URL === 'function') {
+        try {
+          const url = new URL(address);
+          if (url.protocol === 'https:' && !url.username && !url.password) ascii = url.href.replace(/\/$/, '');
+        } catch { /* Keep unverified text out of the native font. */ }
+      }
+      address = ascii && ascii.length <= 160 && !/[^\x20-\x7e]/.test(ascii) ? ascii : english ? 'Public session' : '公共戰局';
+    }
     return {
       titleMethod: 'SET_HEADER_TITLE', detailsMethod: 'SET_HEADING_DETAILS',
       title: english ? 'GTA V · Public Online Session' : 'GTA V · 公共在線戰局', name: cleanName(summary.name, english),

@@ -1,4 +1,10 @@
-# GTA V 统一世界实验服务端 0.4.8-world-experimental
+# GTA V 统一世界实验服务端 0.4.9-world-experimental
+
+## 0.4.9：入车姿态与移动错误提示修复
+
+已确认座位的骨骼姿态以原生车辆中心采样，并携带父车辆实体、代数、归属轮次和座位；服务端在附座/租约/真实车体包围范围校验后将全身几何投影到当前确认车中心。步行、骨骼边长和生命周期约束继续保持。角色姿态拒绝不再误标为移动超限；配套启动器 0.2.21，避免迟到纠正打断座内角色。原游戏资源及已有独立世界数据不变，范围见[0.4.9 更新](../release-notes/server-v0.4.9.md#简体中文)。
+
+Version 0.4.9 validates confirmed-seat poses against the current vehicle/seat identity and verified model collision bounds, then rebases the complete body to the confirmed vehicle centre. Walking limits remain unchanged. Pose refusal uses its own diagnostic code. Pair with launcher 0.2.21; preserve existing independent world data. See the [release notes](../release-notes/server-v0.4.9.md).
 
 ## 0.4.8：NPC 生命值与命中上报修复
 

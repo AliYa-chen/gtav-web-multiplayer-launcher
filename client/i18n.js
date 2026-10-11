@@ -75,6 +75,7 @@ const textPairs = [
   ['正在同步公共战局玩家', 'Synchronizing Public Session Players'],
   ['服务器投射物事件格式无效。', 'Invalid projectile event from the server.'], ['服务器投射物基线格式无效。', 'Invalid projectile baseline from the server.'],
   ['服务器角色状态格式无效。', 'Invalid character state from the server.'], ['服务器射击事件格式无效。', 'Invalid shot event from the server.'],
+  ['服务器装备状态无效。', 'Invalid equipment state from the server.'],
   ['服务器心跳格式无效。', 'Invalid server heartbeat.'], ['碰撞观测未通过服务器校验，本次判定已跳过。', 'The server rejected the collision observation. This result was skipped.'],
   ['服务器武器目录不识别当前武器，请更新服务端资源目录。', 'The server does not recognize this weapon. Update its weapon catalog.'],
   ['武器切换尚未同步，请稍后重新射击。', 'The weapon change has not synchronized yet. Try firing again shortly.'],
@@ -135,6 +136,65 @@ export function translateText(value) {
     .replace(/^\[wasm\] hang report (\d+): no engine log line for (\d+) s; blocked threads:/, '[wasm] 卡顿报告 $1：引擎已 $2 秒未输出日志；阻塞线程：');
 }
 
+// GTA's Chinese Scaleform font supports Traditional Chinese. Keep this exact
+// system-message catalog separate from browser UI translations and player text.
+const gameTextMessages = Object.freeze({
+  '连接超时，请检查服务器地址及端口后重试。': '連線逾時，請檢查伺服器位址及連接埠後重試。',
+  '已退出公共战局': '已退出公共戰局',
+  ' 正在重新连接…': ' 正在重新連線…',
+  '服务器长时间未响应。': '伺服器長時間未回應。',
+  '服务器战局不兼容，请使用 GTA V 公共战局服务器。': '伺服器戰局不相容，請使用 GTA V 公共戰局伺服器。',
+  '服务器消息格式无效。': '伺服器訊息格式無效。',
+  '服务器尚未完成连接确认。': '伺服器尚未完成連線確認。',
+  '服务器协议不兼容。': '伺服器協定不相容。',
+  '服务器武器规则格式无效。': '伺服器武器規則格式無效。',
+  '服务器战局脚本策略格式无效。': '伺服器戰局腳本策略格式無效。',
+  '服务器未提供已声明的战局脚本策略。': '伺服器未提供已宣告的戰局腳本策略。',
+  '服务器未提供入局确认状态。': '伺服器未提供入局確認狀態。',
+  '服务器玩家信息无效。': '伺服器玩家資訊無效。',
+  '服务器尚未确认玩家身份。': '伺服器尚未確認玩家身分。',
+  '加入战局中': '加入戰局中',
+  '已加入公共战局': '已加入公共戰局',
+  '服务器战局状态格式无效。': '伺服器戰局狀態格式無效。',
+  '正在同步公共战局玩家': '正在同步公共戰局玩家',
+  '服务器投射物事件格式无效。': '伺服器投射物事件格式無效。',
+  '服务器投射物基线格式无效。': '伺服器投射物基準格式無效。',
+  '服务器角色状态格式无效。': '伺服器角色狀態格式無效。',
+  '服务器射击事件格式无效。': '伺服器射擊事件格式無效。',
+  '服务器装备状态无效。': '伺服器裝備狀態無效。',
+  '服务器心跳格式无效。': '伺服器心跳格式無效。',
+  '碰撞观测未通过服务器校验，本次判定已跳过。': '碰撞觀測未通過伺服器驗證，這次判定已略過。',
+  '服务器武器目录不识别当前武器，请更新服务端资源目录。': '伺服器武器目錄無法識別目前武器，請更新伺服器資源目錄。',
+  '武器切换尚未同步，请稍后重新射击。': '武器切換尚未同步，請稍後重新射擊。',
+  '服务器未接受这次操作': '伺服器未接受這次操作',
+  '服务器未能完成操作。': '伺服器未能完成操作。',
+  '服务器消息类型不兼容，请检查服务器版本。': '伺服器訊息類型不相容，請檢查伺服器版本。',
+  '正在连接服务器': '正在連線至伺服器',
+  '无法连接服务器。': '無法連線至伺服器。',
+  '服务器连接超时。': '伺服器連線逾時。',
+  '服务器消息超过允许的大小。': '伺服器訊息超過允許的大小。',
+  '服务器消息无法解析。': '無法解析伺服器訊息。',
+  '连接失败，请检查服务器 IP 和端口。': '連線失敗，請檢查伺服器 IP 和連接埠。',
+  '战局连接已中断。': '戰局連線已中斷。',
+  '已取消连接。': '已取消連線。',
+});
+const gameTextAliases = new Map(Object.entries(gameTextMessages).flatMap(([source, chinese]) => {
+  const english = aliases.get(source)?.[1];
+  const pair = { chinese, english };
+  return [source, chinese, english].filter(value => typeof value === 'string').map(value => [value, pair]);
+}));
+export function translateGameText(value, language = getLanguage()) {
+  const text = String(value ?? ''), pair = gameTextAliases.get(text);
+  if (pair) return language === 'en' ? pair.english || 'The server could not complete this action. Please try again.' : pair.chinese;
+  const reconnect = /^(.*)(?: 正在重新连接…| 正在重新連線…| Reconnecting…)$/.exec(text);
+  if (reconnect) return translateGameText(reconnect[1], language) + translateGameText(' 正在重新连接…', language);
+  // Unknown Chinese diagnostics stay in browser/log surfaces. Never forward
+  // arbitrary Simplified Chinese into the native font or rewrite player text.
+  if (/\p{Script=Han}/u.test(text)) return language === 'en'
+    ? 'The server could not complete this action. Please try again.' : '伺服器未能完成操作，請稍後重試。';
+  return text;
+}
+
 // These are typed protocol errors, not arbitrary server/player text. Retain the
 // Chinese diagnostic for Chinese UI, and translate stable codes for English UI.
 // Unknown diagnostics never become an untranslated English product message.
@@ -146,7 +206,7 @@ const serverErrorMessages = Object.freeze({
   room_full: 'The public session is full. Please try again shortly.',
   server_full: 'The server is full. Please try again shortly.',
   world_full: 'The world has reached its entity limit. Please try again shortly.',
-  projectile_limit: 'Too many projectiles are active. Wait a moment and try again.',
+  projectile_limit: 'Wait for the active projectiles to finish before firing again.',
   duplicate_player: 'Your character is already present in this session.',
   invalid_message: 'The server could not verify this message. Update the launcher if this continues.',
   invalid_json: 'The server could not read this message. Reconnect if this continues.',
@@ -174,16 +234,29 @@ const serverErrorMessages = Object.freeze({
   invalid_ped_pose: 'Character pose is still synchronizing. Wait a moment and try again.',
   weapon_not_owned: 'This weapon is not available in your session inventory. Choose an available weapon.',
   weapon_has_no_ammo: 'This weapon has no supported firing ammunition.',
+  weapon_reloading: 'This weapon is reloading. Wait before firing again.',
+  weapon_changed: 'The weapon changed. Select it again after synchronization.',
   out_of_ammo: 'This weapon is out of ammunition. Collect an ammunition supply.',
   empty_clip: 'The magazine is empty. Reload before firing.',
   reload_not_applicable: 'This weapon does not use a magazine reload.',
   unsupported_reload: 'This weapon reload is not supported yet.',
+  reload_in_progress: 'This weapon is already reloading.',
+  reload_not_needed: 'The magazine is already full.',
+  reload_not_ready: 'Wait for the reload to finish before completing it.',
+  stale_reload: 'This reload has expired. Reload again if needed.',
   unknown_pickup: 'This supply point is no longer available.',
   pickup_requires_on_foot: 'Leave the vehicle to collect this supply.',
   pickup_no_capacity: 'You already have this equipment and its ammunition is full.',
+  pickup_out_of_range: 'Move closer to this supply point to collect it.',
+  pickup_unavailable: 'This supply point is not available yet. Try again shortly.',
   invalid_equipment_state: 'Equipment is available after your character is alive and synchronized.',
   invalid_equipment_action: 'This equipment action could not be verified.',
-  projectile_limit: 'Wait for the active projectiles to finish before firing again.',
+  stale_equipment_seq: 'This equipment action has expired. Please try it again.',
+  stale_equipment_shot: 'This equipment shot has expired. Please fire again.',
+  stale_shot_lifecycle: 'Your character changed during this shot. Wait for synchronization and try again.',
+  invalid_shot_time: 'The firing time could not be verified. Aim again and retry.',
+  unknown_shot_time: 'The firing time is still synchronizing. Try again shortly.',
+  stale_epoch: 'This action belongs to an earlier session. Wait for synchronization and try again.',
   wrong_world: 'This action belongs to an earlier session. Wait for synchronization and try again.',
   attached_entity: 'Leave the vehicle before moving this character independently.',
   dead_entity: 'This entity is no longer alive. Choose another target.',
@@ -223,6 +296,107 @@ export function localizeServerError(error, language = getLanguage()) {
   return typeof error?.chinese === 'string' ? error.chinese
     : typeof error?.message === 'string' ? error.message.slice(0, 300)
     : '服务器未能完成操作。';
+}
+
+// Stable protocol codes choose reviewed native wording. Server diagnostics
+// may contain Simplified Chinese, user input or exception details, so they are
+// never used as native display text, including for unknown future codes.
+const gameServerErrorMessages = Object.freeze({
+  invalid_owner: '目前實體所有者無權執行這項操作。',
+  not_owner: '您目前未控制此實體，請等待同步後重試。',
+  invalid_request: '無法驗證這項操作，請重試。',
+  too_far: '請靠近目標後重試。',
+  room_full: '公共戰局已滿，請稍後重試。',
+  server_full: '伺服器已滿，請稍後重試。',
+  world_full: '世界已達實體數量上限，請稍後重試。',
+  projectile_limit: '投射物數量已達上限，請稍後再射擊。',
+  duplicate_player: '您的角色已在這個戰局中。',
+  invalid_message: '伺服器無法驗證這則訊息，若持續發生請更新啟動器。',
+  invalid_json: '伺服器無法讀取這則訊息，若持續發生請重新連線。',
+  unknown_type: '這項操作需要相容的啟動器與伺服器版本。',
+  client_world_rules_required: '請更新啟動器後加入公共戰局。',
+  server_geometry_unavailable: '伺服器缺少角色碰撞資料，請聯絡伺服器管理員。',
+  capability_required: '請更新啟動器以使用這項戰局功能。',
+  public_session_only: '請選擇公共戰局以繼續。',
+  not_in_room: '請先加入公共戰局再執行這項操作。',
+  resume_denied: '無法恢復先前的戰局，請重新加入。',
+  invalid_resume: '無法恢復先前的戰局，請重新加入。',
+  resume_expired: '先前的戰局已逾期，請重新加入。',
+  invalid_hello: '無法驗證連線，請更新啟動器後重新連線。',
+  protocol_mismatch: '啟動器與伺服器版本不相容，請更新啟動器後重新連線。',
+  handshake_timeout: '連線確認逾時，請重新連線。',
+  rate_limited: '操作過快，請稍後重試。',
+  cooldown: '這項操作尚未就緒，請稍後重試。',
+  stale_seq: '這項操作已逾期，請重試。',
+  stale_input: '這項操作已逾期，請重試。',
+  stale_owner: '實體控制權已變更，請等待同步後重試。',
+  invalid_lease: '無法驗證實體控制權，請等待同步後重試。',
+  invalid_revision: '實體仍在同步中，請稍後重試。',
+  stale_revision: '實體已變更，請等待同步後重試。',
+  stale_generation: '目標已變更，請選擇目前目標後重試。',
+  invalid_ped_pose: '角色姿態仍在同步中，請稍後重試。',
+  weapon_not_owned: '戰局裝備中沒有這把武器，請選擇可用武器。',
+  weapon_has_no_ammo: '這把武器沒有支援的射擊彈藥。',
+  weapon_reloading: '武器正在裝填，請稍後再射擊。',
+  weapon_changed: '武器已變更，請等待同步後重新選擇。',
+  out_of_ammo: '武器彈藥已用盡，請領取彈藥補給。',
+  empty_clip: '彈匣已空，請裝填後再射擊。',
+  reload_not_applicable: '這把武器不需要彈匣裝填。',
+  unsupported_reload: '目前尚未支援這把武器的裝填操作。',
+  reload_in_progress: '武器已在裝填中。',
+  reload_not_needed: '彈匣已滿。',
+  reload_not_ready: '請等待裝填完成。',
+  stale_reload: '這次裝填已逾期，請視需要重新裝填。',
+  unknown_pickup: '這個補給點已失效。',
+  pickup_requires_on_foot: '請離開載具後領取補給。',
+  pickup_no_capacity: '您已有這項裝備，而且彈藥已滿。',
+  pickup_out_of_range: '請靠近補給點後領取。',
+  pickup_unavailable: '補給點尚未就緒，請稍後重試。',
+  invalid_equipment_state: '請等待角色存活且同步完成後使用裝備。',
+  invalid_equipment_action: '無法驗證這項裝備操作。',
+  stale_equipment_seq: '這項裝備操作已逾期，請重試。',
+  stale_equipment_shot: '這次裝備射擊已逾期，請重新射擊。',
+  stale_shot_lifecycle: '射擊期間角色已變更，請等待同步後重試。',
+  invalid_shot_time: '無法驗證射擊時間，請重新瞄準後重試。',
+  unknown_shot_time: '射擊時間仍在同步中，請稍後重試。',
+  stale_epoch: '這項操作屬於先前戰局，請等待同步後重試。',
+  wrong_world: '這項操作屬於先前戰局，請等待同步後重試。',
+  attached_entity: '請離開載具後再獨立移動角色。',
+  dead_entity: '實體已死亡，請選擇其他目標。',
+  destroyed_vehicle: '載具已毀損，無法使用。',
+  static_entity: '無法移動這個物件。',
+  invalid_movement: '伺服器已修正移動位置，請等待同步後重試。',
+  invalid_component: '所選實體不支援這項操作。',
+  invalid_batch: '伺服器無法驗證更新，請等待同步後重試。',
+  invalid_tick: '世界仍在同步中，請稍後重試。',
+  invalid_seat: '目前角色無法使用這個座位。',
+  seat_unavailable: '座位不存在或已被占用，請選擇其他座位。',
+  unknown_entity: '目標已失效，請選擇其他目標。',
+  unsupported_model: '伺服器不支援這個角色或載具。',
+  unsupported_weapon: '伺服器無法識別這把武器，請更新武器目錄。',
+  weapon_mismatch: '武器切換尚未同步，請稍後重新射擊。',
+  invalid_shot: '伺服器無法驗證這次射擊，請重新瞄準後重試。',
+  not_ready: '角色仍在同步中，請稍後重試。',
+  entry_not_ready: '角色與場景仍在載入中。',
+  entry_timeout: '戰局載入逾時，請重新連線。',
+  player_dead: '您已陣亡，請等待伺服器重生角色。',
+  unsupported_interaction: '目前無法使用這項互動。',
+  unsupported_simulation: '伺服器目前不支援這項操作。',
+  simulation_not_ready: '實體仍在載入中，請稍後重試。',
+  player_input_required: '請使用自己的角色執行這項操作。',
+  health_increase_denied: '生命值恢復必須由伺服器確認。',
+  invalid_target: '請選擇有效目標後重試。',
+  invalid_reason: '伺服器無法驗證這項操作的原因。',
+  not_facing: '請面向目標後重試。',
+  snapshot_required: '請等待世界同步完成後重試。',
+  invalid_collision: '伺服器無法驗證這次碰撞，判定已略過。',
+  stale_collision: '碰撞觀測已逾期，判定已略過。',
+  unconfirmed_arrest: '逮捕尚未獲得伺服器確認。',
+});
+export function localizeGameServerError(error, language = getLanguage()) {
+  if (language === 'en') return localizeServerError(error, language);
+  return typeof error?.code === 'string' && Object.hasOwn(gameServerErrorMessages, error.code)
+    ? gameServerErrorMessages[error.code] : '伺服器未能完成操作，請稍後重試。';
 }
 
 export function setLanguage(value) {

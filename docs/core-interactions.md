@@ -50,6 +50,10 @@ These repeated-shot fixes use existing native exports. The same local update als
 
 ### Vehicles: seats, motion and destruction
 
+Launcher 0.2.21/server 0.4.9 repair confirmed-seat poses. Previously a native seated PED origin was compared to the authoritative vehicle centre with the walking 5 cm tolerance; this falsely rejected ordinary seat offsets and the client then teleported the PED, interrupting its vehicle task. The client now samples a pose only in its exact confirmed native seat, uses that native vehicle's centre, and includes the vehicle entity/generation/owner epoch/seat identity. Confirmed seats consume delayed walking/pose corrections without moving the seated PED; ordinary on-foot corrections still apply.
+
+The server verifies attachment identity, the inverse seat map and parent lifecycle before translating the complete observed bones/bounds from the sampled vehicle centre to its current confirmed centre. The transport offset is bounded by the existing 250 ms pose lifetime and vehicle speed ceiling. The pelvis must stay within the original model's verified collision envelope; bone distance, skeleton edges and on-foot origin rules retain their existing limits. Authenticated seated players renew expired character leases through trusted state projection; a confirmed driver receives a new ready offer for an unleased car, without taking another owner's active lease. NPC pose acceptance still requires its active lease. Missing vehicle geometry, stale attachments and invalid bodies cannot authorize damage. Player state refusals now distinguish `invalid_ped_pose` from `invalid_movement`. Use the paired launcher/server versions; this is the existing three-model vehicle geometry scope, not all-model seat or damage coverage.
+
 Entering a seat immediately attaches the player's confirmed transform to the car. Passenger entry/exit no longer resets the driver's accumulated movement allowance, which could reject a moving car's next update. Detaching a character resets that character's movement budget and inherited velocity.
 
 When accepted damage reaches engine health −4,000 or body health 0, one registry transaction releases all occupants, stops the engine and motion, and revokes simulation ownership. A destroyed car cannot accept another occupant or a new simulation lease. Client presentation follows the destroyed state without recreating a native explosion or inventing occupant damage. Non-destroyed damaged vehicles retain their passengers.
@@ -126,6 +130,10 @@ The local checks exercise the real Java rules and WebSocket protocol, the JavaSc
 这两项连续射击修复使用已有 native 导出。同一本地更新另将服务端伤害改为原版元数据，并取消命中、伤害和击杀小提示，保留权威状态同步。启动器 0.2.19 接受超过 200 的原版规则值；旧启动器无法接受 0.4.7 的完整目录。本地采样、碰撞与 Java 战斗回归覆盖连续发射及目标重生，尚未捕获用户实际引擎会话来确认唯一根因。本版新增动作、装备及精细战斗范围见各组件更新说明。
 
 ### 载具：座位、运动与损毁
+
+启动器 0.2.21/服务端 0.4.9 修复已确认座位姿态。此前原生角色的座位坐标被拿来与服务端车辆中心按步行 5 厘米容差比较，正常座位偏移也会被拒绝；客户端随后直接移动角色，打断入车任务。现在只有角色实际处于已确认的原生座位时才采样，以原生车辆中心为锚，并携带车辆实体/代数/归属轮次/座位。已确认附座期间消费迟到的步行/姿态纠正，不移动座内角色；正常步行纠正仍执行。
+
+服务端校验附座身份、反向座位映射与父实体生命周期后，将全部观测骨骼/包围盒从采样车中心平移到当前确认车中心。偏移上限由既有 250 毫秒姿态寿命和车辆速度上限限定；骨盆须处于原模型验证碰撞包围范围内，骨骼距离、骨架边长与步行原点约束保持原值。已认证附座玩家经可信状态投影续期过期角色租约；确认司机对无有效租约车辆重新取得就绪邀请，不夺取其他所有者的有效租约，NPC 姿态仍要求有效租约。缺少车辆几何、过期附座及无效身体均不能授权伤害；状态拒绝准确区分 `invalid_ped_pose` 与 `invalid_movement`。需配套使用这两组件版本，范围仍为现有三种车辆几何，不表示全车型座位或伤害已完成。
 
 上车立即将角色确认位姿对齐车辆。乘客上下车不再重置司机累计的移动额度，避免下一份行驶更新被错误拒绝。角色脱离座位时重置自己的移动额度和继承车速。
 

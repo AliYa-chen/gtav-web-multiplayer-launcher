@@ -90,6 +90,15 @@ final class VehicleCollision {
         if(!(value instanceof String text) || !text.matches("[a-f0-9]{64}"))throw new IOException("无效载具碰撞来源摘要");return text;
     }
     boolean hasModel(long model){return models.containsKey(model);}
+    /** Seat roots must remain inside the original model's verified collision bounds. */
+    boolean containsSeatRoot(Entity vehicle,Vector point){
+        Model model=models.get(vehicle.model());if(model==null)return false;
+        V local=local(point,vehicle.components().transform());
+        double[] coordinates={local.x(),local.y(),local.z()};
+        for(int axis=0;axis<3;axis++)
+            if(coordinates[axis]<model.bounds[axis]-.05 || coordinates[axis]>model.bounds[axis+3]+.05)return false;
+        return true;
+    }
     Contact first(Entity entity,WorldCollision.Segment segment){return first(entity,segment,"shot");}
     Contact first(Entity entity,WorldCollision.Segment segment,String purpose){
         Model model=models.get(entity.model());if(model==null)return null;

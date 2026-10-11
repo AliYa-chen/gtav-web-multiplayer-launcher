@@ -25,7 +25,7 @@
 - 公共线路、名称、公告和下载信息统一来自[配置接口](https://oss.2t.hk/gtav/)，客户端不内置公网服务器地址。
 - 独立 Java 17+ 服务端统一保存玩家与实体身份、座位、所有权租约、战斗判定、重生、人口、天气及执法规则；获授权的客户端引擎执行指定的原生移动与车辆模拟。
 
-**版本：启动器 0.2.20，服务端 0.4.8-world-experimental。** 本次修复未持有武器切换导致在线加载重启，按原模型/个性元数据修正 NPC 生命值，并修复 NPC 姿态上报被拒绝的问题；未新增 NPC 护甲。完整 P0 仍未完成，见[下版本计划](docs/p0-next-release.md#简体中文)、[启动器更新](release-notes/launcher-v0.2.20.md#简体中文)、[服务端更新](release-notes/server-v0.4.8.md#简体中文)、[精细战斗](docs/combat-precision.md#简体中文)及[自动发布流程](docs/releases.md#简体中文)。
+**版本：启动器 0.2.21，服务端 0.4.9-world-experimental。** 本次修复按 F 入车被误报移动异常、位置纠正打断角色控制的问题；已确认座位的姿态随车辆处理并校验附座身份，游戏内中文系统提示统一使用原字体支持的繁体。完整 P0 仍未完成，见[下版本计划](docs/p0-next-release.md#简体中文)、[启动器更新](release-notes/launcher-v0.2.21.md#简体中文)、[服务端更新](release-notes/server-v0.4.9.md#简体中文)、[核心交互](docs/core-interactions.md#简体中文)及[自动发布流程](docs/releases.md#简体中文)。
 
 多人功能仍为实验状态。静态碰撞和行人导航覆盖出生区附近约 **600×600 米**，尚未覆盖整张地图。服务端没有完整 RAGE 物理运行时，全部单机脚本、工具、任务和载具武器也尚未迁移。本项目使用自有协议，不兼容原 GTA Online 或 FiveM。协议测试不能证明完整游戏同步已完成，`game_sync` 和 `native_clone_transport` 仍为 false。
 

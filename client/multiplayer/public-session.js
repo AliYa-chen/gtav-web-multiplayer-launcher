@@ -1,4 +1,4 @@
-import { getLanguage, translateText, localizeServerError, onLanguageChange } from '../i18n.js';
+import { getLanguage, translateText, translateGameText, localizeServerError, localizeGameServerError, onLanguageChange } from '../i18n.js';
 import { normalizeServerAddress } from './server-address.js';
 import { modelForPreset, normalizeAppearance, randomAppearance } from './appearance.js';
 import { createWorldState, cleanWorldTransform, cleanSessionPolicy } from './world-state.js';
@@ -256,7 +256,10 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
     latestStatusSource = { phase, text };
     const displayText = text && typeof text === 'object' && text.serverError
       ? localizeServerError(text.serverError) + translateText(text.suffix || '') : translateText(text);
-    const value = { phase, text: displayText, server: address, client_id: clientId,
+    const nativeText = text && typeof text === 'object' && text.serverError
+      ? localizeGameServerError(text.serverError) + translateGameText(text.suffix || '') : translateGameText(text);
+    const value = { phase, text: displayText, nativeText, server: address, client_id: clientId,
+      ...(typeof text?.serverError?.code === 'string' ? { error_code: text.serverError.code } : {}),
       connected: Boolean(room && profiled), members: room?.members.length || 0,
       peers: [...peers.keys()].filter((id) => id !== clientId).length };
     const encoded = JSON.stringify(value);
@@ -1175,7 +1178,7 @@ export async function startPublicSession(preferences, onStatus = () => {}, optio
           }
           break;
         }
-        if (profiled && (equipmentRejections.has(message.code) || ['rate_limited', 'stale_seq', 'invalid_shot', 'invalid_movement', 'not_ready', 'player_dead', 'unsupported_weapon', 'weapon_mismatch', 'destroyed_vehicle', 'projectile_limit',
+        if (profiled && (equipmentRejections.has(message.code) || ['rate_limited', 'stale_seq', 'invalid_shot', 'invalid_movement', 'invalid_ped_pose', 'not_ready', 'player_dead', 'unsupported_weapon', 'weapon_mismatch', 'destroyed_vehicle', 'projectile_limit',
           'stale_input', 'wrong_world', 'invalid_owner', 'not_owner', 'invalid_lease', 'invalid_revision', 'attached_entity', 'dead_entity',
           'seat_unavailable', 'invalid_seat', 'invalid_component', 'unsupported_interaction', 'stale_owner', 'simulation_not_ready',
           'player_input_required', 'health_increase_denied', 'unsupported_simulation', 'invalid_target', 'invalid_reason', 'not_facing', 'invalid_request',

@@ -272,6 +272,19 @@ final class WorldService {
     void publishedBaseline(String id,long tick){combat.publishedBaseline(id,tick);}
     CombatWorld.Outcome updateState(String id,Map<String,Object> message,long unused)throws CombatWorld.Rejection{
         CombatWorld.Outcome result=combat.updateState(id,message,now());
+        if(result.accepted()){
+            Entity player=registry.playerEntity(id);Attachment seat=player.components().attachment();
+            Entity vehicle=seat==null?null:registry.entity(seat.entityId());
+            // A connected driver may resume after both leases expired. Restore
+            // only its confirmed car, with a fresh fencing epoch and ready offer.
+            if(seat!=null && "driver".equals(seat.seat()) && id.equals(player.playerId()) && id.equals(player.ownerId())
+                && player.components().combat()!=null && player.components().combat().alive()
+                && vehicle!=null && vehicle.kind()==Kind.VEHICLE
+                && !vehicle.components().vehicle().destroyed()
+                && player.entityId().equals(vehicle.components().vehicle().seats().get("driver"))
+                && (vehicle.ownerId()==null || vehicle.leaseUntilTick()<=now()))try{offer(vehicle.entityId(),id);}
+                catch(WorldRegistry.Rejection error){throw new CombatWorld.Rejection(error.code,error.getMessage());}
+        }
         if(result.accepted() && worldParticipants.contains(id)){ensurePopulation(id);assignPopulation();}
         if(result.accepted())maintainAi();
         return result;

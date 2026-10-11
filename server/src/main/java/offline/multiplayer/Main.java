@@ -37,7 +37,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** 独立公共战局服务：鉴权恢复、权威移动校验、伤害、死亡、重生及状态分发。 */
 public final class Main {
-    private static final String VERSION = "0.4.8-world-experimental";
+    private static final String VERSION = "0.4.9-world-experimental";
     private static final List<String> CAPABILITIES = List.of("public_session", "chat", "player_state", "shoot_events", "appearance", "combat", "resume", "heartbeat", "snapshot", "actions", "actions_v2", "combat_feedback", "weapon_rules", "world_registry", "world_v2", "entity_batch", "melee_events", "world_environment", "shared_law", "server_ai", "projectiles", "action_queue", "session_policy", "physics_queries", "entry_readiness", "lag_compensation", "equipment_v1", "ped_pose");
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final int MAX_MESSAGE_BYTES = 64 * 1024;
@@ -716,7 +716,10 @@ public final class Main {
             CombatWorld.Outcome outcome = combat.updateState(session.id, checked, System.currentTimeMillis());
             if (!outcome.accepted()) {
                 if (client.combatCapable) outcome.events().forEach(client::send);
-                throw problem("invalid_movement", "移动距离超过服务端限制，已纠正角色位置");
+                String reason=outcome.events().stream().map(event->event.get("reason"))
+                    .filter(value->value instanceof String).map(String.class::cast).findFirst().orElse("invalid_movement");
+                throw problem(reason,"invalid_ped_pose".equals(reason)?"角色骨骼姿態仍在同步，請稍後重試":
+                    "移動距離超過伺服器限制，已校正角色位置");
             }
             outcome.events().forEach(this::broadcast);
         }

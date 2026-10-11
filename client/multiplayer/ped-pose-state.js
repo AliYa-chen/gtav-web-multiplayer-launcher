@@ -2,7 +2,7 @@
 export const PED_POSE_TAGS = Object.freeze([11816, 58271, 63931, 14201, 51826, 36864, 52301,
   57597, 24816, 24817, 24818, 64729, 45509, 61163, 18905, 10706, 40269, 28252, 57005, 39317, 31086]);
 export function cleanPedPose(value) {
-  if (!value || Array.isArray(value) || Object.keys(value).some(key => !['bones', 'origin', 'sample_tick', 'bounds', 'water_height'].includes(key))
+  if (!value || Array.isArray(value) || Object.keys(value).some(key => !['bones', 'origin', 'sample_tick', 'bounds', 'water_height', 'attachment'].includes(key))
     || !Array.isArray(value.bones) || value.bones.length !== PED_POSE_TAGS.length) return null;
   const seen = new Set(), bones = [];
   for (const bone of value.bones) {
@@ -12,6 +12,17 @@ export function cleanPedPose(value) {
     seen.add(bone.tag); bones.push({ tag: bone.tag, matrix: [...bone.matrix] });
   }
   const result = { bones };
+  if (Object.hasOwn(value, 'attachment')) {
+    const attachment = value.attachment;
+    if (!attachment || Array.isArray(attachment)
+      || Object.keys(attachment).some(key => !['entity_id', 'generation', 'owner_epoch', 'seat'].includes(key))
+      || typeof attachment.entity_id !== 'string' || !/^[A-Za-z0-9_.:-]{1,160}$/.test(attachment.entity_id)
+      || !Number.isSafeInteger(attachment.generation) || attachment.generation < 1
+      || !Number.isSafeInteger(attachment.owner_epoch) || attachment.owner_epoch < 1 || typeof attachment.seat !== 'string'
+      || !/^(driver|passenger:(?:[0-9]|1[0-5]))$/.test(attachment.seat)) return null;
+    if (!Object.hasOwn(value, 'origin')) return null;
+    result.attachment = { ...attachment };
+  }
   if (Object.hasOwn(value, 'origin')) {
     if (!Array.isArray(value.origin) || value.origin.length !== 3
       || value.origin.some(v => !Number.isFinite(v) || Math.abs(v) > 16000)) return null;

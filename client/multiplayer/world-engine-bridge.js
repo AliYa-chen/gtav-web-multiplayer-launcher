@@ -99,6 +99,20 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     return Boolean(vehicle && ex.mpGetVehiclePedIsIn?.(handle, 0) === vehicle
       && (!ex.mpGetPedInSeat || ex.mpGetPedInSeat(vehicle, seatNumber(seat), 0) === handle));
   }
+  function attachmentPoseFrame(entity, handle) {
+    const attachment = entity?.components?.attachment;
+    const parent = attachment && replicas.get(attachment.entity_id);
+    const vehicle = parent?.handle;
+    if (parent?.kind !== 'vehicle' || !vehicle || !handle || !ex.mpExists(vehicle) || !ex.mpExists(handle)
+      || !seatedAt(handle, vehicle, attachment.seat)) return null;
+    // The server anchors all attached peds to their vehicle, not the native
+    // seat offset. Sample the matching native vehicle centre so pose matrices
+    // retain their real seat offset and can be rebased to its confirmed pose.
+    ex.mpGetEntityCoords(BigInt(buffer), vehicle, 1);
+    const position = readVector(0);
+    return validPosition(position) ? { origin: position, attachment: { entity_id: attachment.entity_id,
+      generation: parent.generation, owner_epoch: parent.epoch, seat: attachment.seat } } : null;
+  }
   function attachmentKey(entity) {
     const attachment = entity.components.attachment;
     return attachment ? entity.generation + ':' + attachment.entity_id + ':' + attachment.seat : null;
@@ -581,8 +595,9 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
       if (active && state.attachment && packet.ped_pose && entity.kind === 'ped' && !dead && !replica.recovering
           && now - (replica.poseSubmittedAt ?? -Infinity) >= 100) {
         replica.poseSubmittedAt = now;
-        const parent = entities.get(state.attachment.entity_id);
-        const pose = pedPoseSampler?.sample(replica.handle, parent?.components?.transform?.position || position);
+        const frame = attachmentPoseFrame(entity, replica.handle);
+        const sampled = frame && pedPoseSampler?.sample(replica.handle, frame.origin);
+        const pose = sampled && { ...sampled, attachment: frame.attachment };
         if (pose) post({ type: 'simulation_result', kind: 'ped_pose', entity_id: entity.entity_id,
           owner_epoch: entity.owner_epoch, generation: entity.generation, ped_pose: pose });
       }
@@ -833,5 +848,6 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     ex.mpPedDensity?.(0); ex.mpScenarioDensity?.(0, 0);
     ex.mpVehicleDensity?.(0); ex.mpRandomVehicleDensity?.(0); ex.mpParkedVehicleDensity?.(0);
   }
-  return { update, sampleMelee, renderEffects, suppressPopulation, clear, entityHandle: (id) => replicas.get(id)?.handle || 0 };
+  return { update, sampleMelee, renderEffects, suppressPopulation, clear, attachmentPoseFrame,
+    entityHandle: (id) => replicas.get(id)?.handle || 0 };
 };

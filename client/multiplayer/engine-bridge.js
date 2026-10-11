@@ -1231,7 +1231,10 @@ self.prepareMultiplayerBridge = function (imports) {
           } else if (event?.type === 'correction' && revision >= lastRespawnRevision) {
             const ped = ex.mpGetPlayerPed(-1);
             completed = Boolean(ped && validPosition(event.position));
-            if (completed) {
+            // A confirmed seat owns the player's position through its vehicle.
+            // A delayed on-foot/pose correction must not teleport the seated
+            // ped, interrupt its native task, or drag its vehicle to an old root.
+            if (completed && !worldStatus.localEntity?.components?.attachment) {
               ex.mpSetCoordsNoOffset(ped, vector(0, event.position), 1, 1, 1);
               ex.mpSetHeading(ped, event.heading ?? 90);
               initialPlacement = true;
@@ -1423,7 +1426,17 @@ self.prepareMultiplayerBridge = function (imports) {
         const shooting = nativeWeapon === weapon && !!ex.mpIsShooting(localPed);
         const actions = actionsFor(localPed);
         const ray = actions.aiming ? cameraRay() : null;
-        const pedPose = packet.ped_pose && (now - lastState >= 50 || pendingShots.length) ? pedPoseSampler?.sample(localPed, position) : null;
+        const attached = worldStatus.localEntity?.components?.attachment;
+        const poseFrame = attached ? worldEntities?.attachmentPoseFrame(worldStatus.localEntity, localPed) : null;
+        const poseOrigin = attached ? poseFrame?.origin : position;
+        // A server-confirmed seat can precede native seating while a model or
+        // displaced occupant finishes loading. Do not submit an on-foot body
+        // as that seat's pose; the following world pass retries the attachment.
+        if (attached && !validPosition(poseOrigin)) { discardPendingShots(); return; }
+        const poseDue = now - lastState >= 50 || pendingShots.length;
+        const sampledPose = packet.ped_pose && poseDue ? pedPoseSampler?.sample(localPed, poseOrigin) : null;
+        if (attached && packet.ped_pose && poseDue && !sampledPose) { discardPendingShots(); return; }
+        const pedPose = sampledPose && (attached ? { ...sampledPose, attachment: poseFrame.attachment } : sampledPose);
         const localState = { position, model, heading, health, weapon, shooting, actions,
           ...(pedPose ? { ped_pose: pedPose } : {}),
           ...(ray && validPosition(ray.target) ? { aim_target: ray.target } : {}),

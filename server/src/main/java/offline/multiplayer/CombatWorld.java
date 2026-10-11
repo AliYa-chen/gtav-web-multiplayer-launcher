@@ -44,6 +44,9 @@ public final class CombatWorld {
     public synchronized boolean validPose(long model,WorldRegistry.Transform transform,Object pose) {
         return peds.validObservation(model,transform,pose);
     }
+    private boolean validPose(WorldRegistry.Entity entity,long model,WorldRegistry.Transform transform,Object pose,long now) {
+        return peds.validObservation(entity,model,transform,pose,now);
+    }
     public synchronized Map<String,Object> acceptedPose(WorldRegistry.Entity entity,long now) {
         return peds.acceptedPose(entity,now);
     }
@@ -89,7 +92,7 @@ public final class CombatWorld {
     CombatWorld(WorldRegistry world,WorldCollision collision) { this(world,collision,VehicleCollision.empty()); }
     CombatWorld(WorldRegistry world,WorldCollision collision,VehicleCollision vehicles) { this(world,collision,vehicles,PedCollision.empty()); }
     CombatWorld(WorldRegistry world,WorldCollision collision,VehicleCollision vehicles,PedCollision peds) {
-        this.world=world;this.collision=collision;this.vehicles=vehicles;this.peds=peds;peds.capture(world,0);
+        this.world=world;this.collision=collision;this.vehicles=vehicles;this.peds=peds;peds.vehicleGeometry(vehicles);peds.capture(world,0);
     }
     Map<String,Object> vehicleGeometryStatus(){return vehicles.metadata();}
     Map<String,Object> pedGeometryStatus(){
@@ -302,7 +305,7 @@ public final class CombatWorld {
         }
         WorldRegistry.Transform transform=WorldRegistry.Transform.at(vector(position),heading);
         if(entity.components().attachment()!=null && life.alive())transform=entity.components().transform();
-        if(life.alive() && !validPose(model,transform,input.get("ped_pose"))) {
+        if(life.alive() && !validPose(entity,model,transform,input.get("ped_pose"),now)) {
             player.stateSequence=sequence;
             return new Outcome(false,List.of(object("type","correction","player_id",player.id,
                 "position",previous,"heading",entity.components().transform().rotation().heading(),

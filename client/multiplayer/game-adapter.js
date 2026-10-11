@@ -1,5 +1,5 @@
 // 游戏页直接持有公共战局连接；引擎线程通过共享内存读取最新快照，避免阻塞帧循环。
-import { getLanguage, onLanguageChange, translateText, localizeServerError } from '../i18n.js';
+import { getLanguage, onLanguageChange, translateText, translateGameText, localizeServerError, localizeGameServerError } from '../i18n.js';
 
 export function installGameAdapter(worker, network = null, { watchOnlineConfiguration, onEntryState, entryAttempt = 0, reducedMotion = false } = {}) {
   // 正常在线游戏直接连接本页网络会话，避免同一端口多个标签页串用身份和外观。
@@ -62,12 +62,12 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
   let lastCombatNotice = '', lastCombatNoticeAt = -Infinity;
   let remoteConfig = { oltitle: '-', source: 'unavailable', stale: true };
   const stopRemoteConfiguration = watchOnlineConfiguration?.((value) => { remoteConfig = value; schedule(); });
-  const text = (zh, en, nativeZh = zh) => ({ zh, en, nativeZh });
+  const text = (zh, en, nativeZh) => ({ zh, en, nativeZh });
   function localize(value, native = false) {
-    if (value?.serverError) return localizeServerError(native && value.nativeChinese
-      ? { ...value.serverError, chinese: value.nativeChinese } : value.serverError);
-    if (value && typeof value === 'object') return getLanguage() === 'en' ? value.en : native ? value.nativeZh : value.zh;
-    return translateText(value || '');
+    if (value?.serverError) return native ? localizeGameServerError(value.serverError) : localizeServerError(value.serverError);
+    if (value && typeof value === 'object') return getLanguage() === 'en' ? value.en
+      : native ? value.nativeZh || translateGameText(value.zh) : value.zh;
+    return native ? translateGameText(value || '') : translateText(value || '');
   }
   const stopLanguage = onLanguageChange(() => { renderHud(); schedule(); });
   function mergeCombat(value) {
@@ -287,15 +287,19 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
           && data.entity_id === identity.entity_id && data.generation === identity.generation) session.entry_ready = true;
       entryState(); schedule(); return;
     } else if (data.type === 'network_status') {
-      networkMessage = data.connected ? text('服务器在线 · ' + (data.members || 1) + ' 位玩家', 'Server online · ' + (data.members || 1) + ' players')
-        : (data.text || text('服务器连接中断，正在自动重连…', 'Connection lost. Reconnecting automatically…'));
+      const networkText = data.text ? (typeof data.error_code === 'string'
+        ? { serverError: { code: data.error_code, chinese: data.text } }
+        : text(data.text, translateGameText(data.text, 'en'), translateGameText(data.nativeText || data.text, 'zh-CN'))) : null;
+      networkMessage = data.connected ? text('服务器在线 · ' + (data.members || 1) + ' 位玩家', 'Server online · ' + (data.members || 1) + ' players',
+        '伺服器上線 · ' + (data.members || 1) + ' 位玩家')
+        : (networkText || text('服务器连接中断，正在自动重连…', 'Connection lost. Reconnecting automatically…', '伺服器連線中斷，正在自動重新連線…'));
       const key = data.connected ? 'online:' + (data.members || 1) : 'offline';
       if (key !== lastNetworkNotice) {
         lastNetworkNotice = key;
         notify(data.connected ? text('公共战局已连接 · ' + (data.members || 1) + ' 位玩家', 'Connected to public session · ' + (data.members || 1) + ' players',
           '公共戰局已連線 · ' + (data.members || 1) + ' 位玩家')
           : text('连接中断，正在自动重新连接…', 'Connection lost. Reconnecting automatically…', '連線中斷，正在自動重新連線…'));
-      } else if (data.phase === 'notice' && data.text && !/武器/.test(data.text)) notify(String(data.text).slice(0, 200));
+      } else if (data.phase === 'notice' && networkText && !/武器/.test(data.text)) notify(networkText);
       renderHud();
       entryState();
       return;
@@ -357,8 +361,7 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
     } else if (data.type === 'interaction_result') {
       if (data.accepted === false && !['rate_limited', 'cooldown', 'stale_seq', 'stale_input', 'stale_generation',
         'stale_revision', 'stale_owner', 'invalid_revision', 'seat_unavailable', 'too_far', 'not_facing', 'player_dead', 'not_ready'].includes(data.reason)) {
-        notify({ serverError: { code: data.reason, chinese: '互动未完成，请稍后重试。' },
-          nativeChinese: '互動未完成，請稍後重試。' });
+        notify({ serverError: { code: data.reason, chinese: '互动未完成，请稍后重试。' } });
       }
       return;
     } else if (data.type === 'session') {
@@ -463,12 +466,12 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
       sendLocal({ type: 'bridge_ready' });
       reportStatus({ phase: 'engine_ready' });
     } else if (message.type === 'equipment_prompt') {
-      const names = { PICKUP_WEAPON_PISTOL: ['手枪弹药', 'pistol ammunition'],
-        PICKUP_WEAPON_CARBINERIFLE: ['步枪弹药', 'rifle ammunition'],
-        PICKUP_WEAPON_PUMPSHOTGUN: ['霰弹枪弹药', 'shotgun ammunition'],
-        PICKUP_WEAPON_RPG: ['火箭弹', 'rockets'], PICKUP_ARMOUR_STANDARD: ['护甲', 'armour'] };
-      const label = names[message.name] || ['补给', 'supplies'];
-      notify(text('按 E 领取' + label[0], 'Press E to collect ' + label[1]));
+      const names = { PICKUP_WEAPON_PISTOL: ['手枪弹药', 'pistol ammunition', '手槍彈藥'],
+        PICKUP_WEAPON_CARBINERIFLE: ['步枪弹药', 'rifle ammunition', '步槍彈藥'],
+        PICKUP_WEAPON_PUMPSHOTGUN: ['霰弹枪弹药', 'shotgun ammunition', '霰彈槍彈藥'],
+        PICKUP_WEAPON_RPG: ['火箭弹', 'rockets', '火箭彈'], PICKUP_ARMOUR_STANDARD: ['护甲', 'armour', '護甲'] };
+      const label = names[message.name] || ['补给', 'supplies', '補給'];
+      notify(text('按 E 领取' + label[0], 'Press E to collect ' + label[1], '按 E 領取' + label[2]));
     } else if (message.type === 'equipment_acknowledge') {
       for (const id of message.predictions || []) equipmentPredictions.delete(id);
       const consumed = new Set(message.events || []);
@@ -501,13 +504,15 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
     } else if (['local_state', 'local_shot', 'equipment_request', 'entity_ready', 'entity_input', 'interaction_request', 'simulation_result'].includes(message.type)) {
       sendLocal(message);
     } else if (message.type === 'game_status') {
-      gameMessage = message.role_recovering ? text('正在自动恢复在线角色…', 'Restoring online character automatically…')
-        : message.role_loading ? text('正在加载在线角色…', 'Loading online character…')
-        : message.alive === false ? text('已阵亡 · 等待服务器重生', 'You died · Waiting for server respawn')
+      gameMessage = message.role_recovering ? text('正在自动恢复在线角色…', 'Restoring online character automatically…', '正在自動恢復線上角色…')
+        : message.role_loading ? text('正在加载在线角色…', 'Loading online character…', '正在載入線上角色…')
+        : message.alive === false ? text('已阵亡 · 等待服务器重生', 'You died · Waiting for server respawn', '已陣亡 · 等待伺服器重生')
         : text('已显示 ' + message.peer_count + ' 位其他玩家' + (Number.isInteger(message.health)
           ? ' · 生命值 ' + message.health + ' · 击杀 ' + (message.kills || 0) + ' / 阵亡 ' + (message.deaths || 0) : ''),
           message.peer_count + ' other players visible' + (Number.isInteger(message.health)
-            ? ' · Health ' + message.health + ' · Kills ' + (message.kills || 0) + ' / Deaths ' + (message.deaths || 0) : ''));
+            ? ' · Health ' + message.health + ' · Kills ' + (message.kills || 0) + ' / Deaths ' + (message.deaths || 0) : ''),
+          '已顯示 ' + message.peer_count + ' 位其他玩家' + (Number.isInteger(message.health)
+            ? ' · 生命值 ' + message.health + ' · 擊殺 ' + (message.kills || 0) + ' / 陣亡 ' + (message.deaths || 0) : ''));
       renderHud();
       const phase = message.role_recovering ? 'recovering_avatar' : message.role_loading ? 'loading_avatar'
         : message.alive === false ? 'dead' : 'synchronizing';
@@ -551,7 +556,7 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
         ? 'Game synchronization stopped. Please retry.' : '游戏同步已停止，请重试。' });
       nativeHud = false;
       gameMessage = text('角色同步已暂停：' + message.message, 'Character synchronization paused: '
-        + String(message.message).replace('同步缓冲区分配失败', 'Could not allocate synchronization buffers'));
+        + String(message.message).replace('同步缓冲区分配失败', 'Could not allocate synchronization buffers'), '角色同步已暫停，請重試。');
       renderHud();
       const hud = document.getElementById('hud');
       if (hud) hud.style.color = '#f96';

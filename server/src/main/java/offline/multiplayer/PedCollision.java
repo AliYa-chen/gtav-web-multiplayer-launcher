@@ -48,6 +48,7 @@ final class PedCollision {
     }
     private final Map<RejectionReason,Long> rejectionReasons=new java.util.EnumMap<>(RejectionReason.class);
     private WorldRegistry world;
+    private VehicleCollision vehicles=VehicleCollision.empty();
     private String epoch="";
     private long accepted,rejected;
     private PedCollision(Map<Long,Model> models){this.models=Map.copyOf(models);}
@@ -102,10 +103,68 @@ final class PedCollision {
         }catch(WorldService.Problem|IllegalArgumentException failure){throw new IOException("无效角色碰撞数据: "+failure.getMessage(),failure);}
     }
     boolean hasModel(long model){return models.containsKey(model);}
+    void vehicleGeometry(VehicleCollision value){vehicles=value;}
     /** Validate before changing the authoritative transform; invalid input must not erase its last body. */
     boolean validObservation(long model,WorldRegistry.Transform transform,Object raw){
         try { parseObservation(model,transform,raw);return true; }
         catch(InvalidPose failure){reject(failure.reason);return false;}
+    }
+    boolean validObservation(Entity entity,long model,WorldRegistry.Transform transform,Object raw,long now){
+        // CombatWorld invokes this only for the authenticated current player.
+        // Its successful state projection renews the lease before acceptPose.
+        try { parseObservation(entity,model,transform,raw,now,true);return true; }
+        catch(InvalidPose failure){reject(failure.reason);return false;}
+    }
+    /** Native seat bones use the vehicle centre, never a walking ped origin. */
+    private Observation parseObservation(Entity entity,long model,WorldRegistry.Transform transform,Object raw,long now,boolean renewingPlayer){
+        if(entity.components().attachment()==null)return parseObservation(model,transform,raw);
+        try{
+            var attachment=entity.components().attachment();
+            Entity parent=world==null?null:world.entity(attachment.entityId());
+            Entity current=world==null?null:world.entity(entity.entityId());
+            if(current==null || !CombatHistory.fence(entity,world).equals(CombatHistory.fence(current,world))
+                || (!(renewingPlayer && entity.playerId()!=null) && (entity.ownerId()==null || entity.leaseUntilTick()<=now))
+                || parent==null || parent.kind()!=WorldRegistry.Kind.VEHICLE || parent.components().vehicle().destroyed()
+                || !entity.entityId().equals(parent.components().vehicle().seats().get(attachment.seat()))
+                || !transform.equals(parent.components().transform()))throw new InvalidPose(RejectionReason.LIFECYCLE);
+            Map<String,Object> value=WorldService.object(raw);
+            WorldService.fields(value,"bones","bounds","water_height","origin","attachment");
+            Map<String,Object> source=WorldService.object(value.get("attachment"));
+            WorldService.fields(source,"entity_id","generation","owner_epoch","seat");
+            if(!parent.entityId().equals(source.get("entity_id")) || !attachment.seat().equals(source.get("seat"))
+                || parent.generation()!=WorldService.integer(source.get("generation"),1,9_007_199_254_740_991L)
+                || parent.ownerEpoch()!=WorldService.integer(source.get("owner_epoch"),1,9_007_199_254_740_991L))
+                throw new InvalidPose(RejectionReason.LIFECYCLE);
+            V origin=point(value.get("origin"),16000),anchor=v(transform.position()),offset=anchor.sub(origin);
+            // Only an already confirmed seat can use this bounded transport lag.
+            // The original vehicle speed ceiling and the existing pose lifetime
+            // bound it; every accepted body is then anchored at the current car.
+            boolean movingParent=parent.ownerId()!=null && parent.leaseUntilTick()>now;
+            double allowance=movingParent?2+150*MAX_POSE_AGE_MILLIS/1000.0:.05;
+            if(offset.norm()>allowance)throw new InvalidPose(RejectionReason.ANCHOR);
+            Map<String,Object> normalized=new LinkedHashMap<>(value);normalized.remove("attachment");
+            normalized.put("origin",transform.position().values());
+            if(!(value.get("bones") instanceof List<?> rows))throw new InvalidPose(RejectionReason.BONES);
+            List<Map<String,Object>> bones=new ArrayList<>();
+            for(Object row:rows){
+                Map<String,Object> bone=WorldService.object(row);WorldService.fields(bone,"tag","matrix");
+                long tag=WorldService.integer(bone.get("tag"),1,65535);
+                double[] matrix=matrix(bone.get("matrix"),16000);List<Double> values=new ArrayList<>(12);
+                for(int i=0;i<12;i++)values.add(matrix[i]+(i>=9?offset.at(i-9):0));
+                bones.add(Map.of("tag",tag,"matrix",List.copyOf(values)));
+            }
+            normalized.put("bones",List.copyOf(bones));
+            if(value.containsKey("bounds")){
+                Map<String,Object> bounds=WorldService.object(value.get("bounds"));WorldService.fields(bounds,"minimum","maximum");
+                normalized.put("bounds",Map.of("minimum",point(bounds.get("minimum"),16000).add(offset).vector().values(),
+                    "maximum",point(bounds.get("maximum"),16000).add(offset).vector().values()));
+            }
+            Observation observation=parseObservation(model,transform,normalized);
+            double[] pelvis=observation.bones.get(11816);
+            if(pelvis==null || !vehicles.containsSeatRoot(parent,origin(pelvis).vector()))throw new InvalidPose(RejectionReason.ANCHOR);
+            return observation;
+        }catch(InvalidPose failure){throw failure;}
+        catch(WorldService.Problem|IllegalArgumentException failure){throw new InvalidPose(RejectionReason.ANCHOR);}
     }
     private void reject(RejectionReason reason) {
         rejected++;
@@ -168,7 +227,7 @@ final class PedCollision {
         try{
             if(entity.kind()!=WorldRegistry.Kind.PED||!alive(entity)||now<0
                 ||entity.ownerId()==null||entity.leaseUntilTick()<=now)throw new InvalidPose(RejectionReason.LIFECYCLE);
-            Observation observation=parseObservation(entity.model(),entity.components().transform(),raw);
+            Observation observation=parseObservation(entity,entity.model(),entity.components().transform(),raw,now,false);
             Pose previous=poses.get(entity.entityId());
             if(previous!=null&&now<previous.received)throw new InvalidPose(RejectionReason.LIFECYCLE);
             poses.put(entity.entityId(),new Pose(lifetime(entity),world==null?null:CombatHistory.fence(entity,world),entity.components().transform(),now,
