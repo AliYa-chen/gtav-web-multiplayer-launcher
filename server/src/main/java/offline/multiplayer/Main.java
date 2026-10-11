@@ -37,8 +37,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** 独立公共战局服务：鉴权恢复、权威移动校验、伤害、死亡、重生及状态分发。 */
 public final class Main {
-    private static final String VERSION = "0.4.6-world-experimental";
-    private static final List<String> CAPABILITIES = List.of("public_session", "chat", "player_state", "shoot_events", "appearance", "combat", "resume", "heartbeat", "snapshot", "actions", "combat_feedback", "weapon_rules", "world_registry", "world_v2", "entity_batch", "melee_events", "world_environment", "shared_law", "server_ai", "projectiles", "action_queue", "session_policy", "physics_queries", "entry_readiness");
+    private static final String VERSION = "0.4.7-world-experimental";
+    private static final List<String> CAPABILITIES = List.of("public_session", "chat", "player_state", "shoot_events", "appearance", "combat", "resume", "heartbeat", "snapshot", "actions", "actions_v2", "combat_feedback", "weapon_rules", "world_registry", "world_v2", "entity_batch", "melee_events", "world_environment", "shared_law", "server_ai", "projectiles", "action_queue", "session_policy", "physics_queries", "entry_readiness", "lag_compensation", "equipment_v1", "ped_pose");
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final int MAX_MESSAGE_BYTES = 64 * 1024;
 
@@ -373,7 +373,9 @@ public final class Main {
             StaticCollision geometry=data!=null && Files.isRegularFile(data.resolve("collision.bin"))?StaticCollision.load(data.resolve("collision.bin")):StaticCollision.empty();
             RoadNetwork roads=data!=null && Files.isRegularFile(data.resolve("roads.bin"))?RoadNetwork.load(data.resolve("roads.bin")):RoadNetwork.empty();
             PedNavigation pedestrian=data!=null && Files.isRegularFile(data.resolve("ped-navigation.bin"))?PedNavigation.load(data.resolve("ped-navigation.bin")):PedNavigation.empty();
-            combat=new WorldService(geometry,roads,pedestrian);world=combat;
+            VehicleCollision vehicles=data!=null && Files.isRegularFile(data.resolve("vehicle-models.json"))?VehicleCollision.load(data.resolve("vehicle-models.json")):VehicleCollision.empty();
+            PedCollision peds=data!=null && Files.isRegularFile(data.resolve("ped-collision.json"))?PedCollision.load(data.resolve("ped-collision.json")):PedCollision.empty();
+            combat=new WorldService(geometry,roads,pedestrian,vehicles,peds);world=combat;
             maxClients = config.maxClients();
             idleTimeoutSeconds = config.idleTimeoutSeconds();
             idleTimeoutNanos = TimeUnit.SECONDS.toNanos(idleTimeoutSeconds);
@@ -486,6 +488,16 @@ public final class Main {
                             requireWorld(client);WorldService.fields(message,"type","world_epoch","after_revision");
                             sendWorldSnapshot(client);
                         }
+                        case "equipment_request" -> {
+                            requireActiveWorld(client);
+                            if(!client.equipmentCapable)throw problem("capability_required","需要装备同步能力");
+                            Map<String,Object> result=world.equipmentRequest(client.id,message);
+                            client.send(result);
+                            if(result.get("event") instanceof Map<?,?> event) {
+                                @SuppressWarnings("unchecked") Map<String,Object> checked=(Map<String,Object>)event;
+                                broadcast(checked);
+                            }
+                        }
                         case "entry_ready" -> entryReady(client, message);
                         case "entity_ready" -> {requireActiveWorld(client);world.ready(client.id,message);}
                         case "entity_input" -> {requireActiveWorld(client);world.entityInput(client.id,message);}
@@ -509,6 +521,8 @@ public final class Main {
                     publishCollisionQueries();
                 } catch (LobbyProblem problem) {
                     reportError(client, message, problem.code, problem.getMessage(), 0);
+                } catch (EquipmentWorld.Rejection rejection) {
+                    reportError(client,message,rejection.code,rejection.getMessage(),0);
                 } catch (WorldService.Problem rejection) {
                     reportError(client,message,rejection.code,rejection.getMessage(),0);
                 } catch (WorldRegistry.Rejection rejection) {
@@ -545,6 +559,11 @@ public final class Main {
                 meleeEventsCapable = values.contains("melee_events") && worldCapable;
                 entryReadinessCapable = values.contains("entry_readiness") && worldCapable;
             }
+            if(!worldCapable || !(message.get("capabilities") instanceof List<?> capabilities)
+                || !capabilities.containsAll(List.of("equipment_v1","ped_pose","actions_v2")))
+                throw problem("client_world_rules_required", "此战局需要同步权威装备与角色碰撞姿态，请更新启动器后重新加入");
+            if(!world.pedGeometryReady())
+                throw problem("server_geometry_unavailable", "服务器尚未安装本版本的角色碰撞数据，请联系服务器维护者");
             boolean hasId = message.containsKey("client_id");
             boolean hasToken = message.containsKey("resume_token");
             if (hasId != hasToken) throw problem("resume_denied", "恢复连接需要完整的玩家身份和恢复凭据");
@@ -583,6 +602,7 @@ public final class Main {
             client.meleeEventsCapable = meleeEventsCapable;
             client.entryReadinessCapable = entryReadinessCapable;
             client.physicsCapable = worldCapable && message.get("capabilities") instanceof List<?> values && values.contains("physics_queries");
+            client.equipmentCapable = worldCapable && message.get("capabilities") instanceof List<?> values && values.contains("equipment_v1");
             Map<String, Object> profile = object("type", "profile", "client_id", session.id, "name", name);
             profile.putAll(combat.join(session.id));
             if (firstHello) {
@@ -597,6 +617,7 @@ public final class Main {
             profile.put("entity_generation", world.player(session.id).generation());
             if (resumeCapable) profile.put("resume_token", session.token);
             client.send(profile);
+            publishEquipment(client,true);
             broadcast(roomState());
             client.send(combat.worldState());
             broadcast(combat.combatState());
@@ -639,15 +660,27 @@ public final class Main {
             List<Map<String,Object>> messages=world.snapshotMessages(client.id,client.scope,client.streamSequence);
             Map<String,Object> end=messages.get(messages.size()-1);
             for(Map<String,Object> message:messages)client.send(message);
+            world.publishedBaseline(client.id,((Number)end.get("world_tick")).longValue());
             client.send(world.projectileState());
             client.worldRevision=((Number)end.get("cut_revision")).longValue();
             client.environmentRevision=((Number)((Map<?,?>)end.get("environment")).get("revision")).longValue();
             client.lawRevision=((Number)((Map<?,?>)end.get("law")).get("revision")).longValue();
             client.worldInitialized=true;
         }
+        private void publishEquipment(Client client,boolean force) {
+            if(!client.equipmentCapable || client.session==null)return;
+            sendEquipmentState(client,world.equipmentState(client.id),force);
+        }
+        private void sendEquipmentState(Client client,Map<String,Object> state,boolean force) {
+            String key=state.get("entity_id")+":"+state.get("generation")+":"+state.get("revision")+":"+state.get("last_seq")
+                +":"+Json.stringify(state.get("pickups"));
+            if(force || !key.equals(client.equipmentKey)){client.equipmentKey=key;client.send(state);}
+        }
         private void publishWorld() {
             for(Session session:sessions.values()) {
-                Client client=session.client;if(!session.connected() || !client.worldCapable || !client.worldInitialized)continue;
+                Client client=session.client;if(!session.connected())continue;
+                publishEquipment(client,false);
+                if(!client.worldCapable || !client.worldInitialized)continue;
                 try {
                     Map<String,Object> delta=world.delta(session.id,client.scope,client.worldRevision,client.environmentRevision,client.lawRevision,client.streamSequence+1);
                     if(delta!=null){
@@ -655,6 +688,7 @@ public final class Main {
                         client.environmentRevision=((Number)((Map<?,?>)delta.get("environment")).get("revision")).longValue();
                         client.lawRevision=((Number)((Map<?,?>)delta.get("law")).get("revision")).longValue();
                         client.streamSequence++;client.send(delta);
+                        world.publishedBaseline(client.id,((Number)delta.get("world_tick")).longValue());
                     }else client.worldRevision=world.cut().cutRevision();
                 }catch(WorldService.Problem problem){sendWorldSnapshot(client);}
             }
@@ -676,7 +710,7 @@ public final class Main {
         private void playerState(Client client, Map<String, Object> message) throws LobbyProblem, CombatWorld.Rejection {
             Session session = requireSession(client);
             requireEntryReady(client);
-            fields(message, List.of("type", "seq", "position", "heading", "model", "health", "weapon", "shooting", "appearance", "actions", "aim_target"));
+            fields(message, List.of("type", "seq", "position", "heading", "model", "health", "weapon", "shooting", "appearance", "actions", "aim_target", "ped_pose"));
             Map<String, Object> checked = new LinkedHashMap<>(message);
             if (message.containsKey("appearance")) checked.put("appearance", appearance(message.get("appearance")));
             CombatWorld.Outcome outcome = combat.updateState(session.id, checked, System.currentTimeMillis());
@@ -690,7 +724,7 @@ public final class Main {
         private void shotEvent(Client client, Map<String, Object> message) throws LobbyProblem, CombatWorld.Rejection {
             Session session = requireSession(client);
             requireEntryReady(client);
-            fields(message, List.of("type", "seq", "origin", "target", "weapon"));
+            fields(message, List.of("type", "seq", "origin", "target", "weapon", "server_time"));
             List<Map<String, Object>> events = combat.shoot(session.id, message, System.currentTimeMillis());
             shotEventsReceived++;
             events.forEach(this::broadcast);
@@ -730,6 +764,10 @@ public final class Main {
                 } catch (LobbyProblem ignored) {}
             }
             client.send(error);
+            if("equipment_request".equals(message.get("type")) && client.equipmentCapable && client.session!=null) {
+                client.send(object("type","equipment_ack","player_id",client.id,"seq",message.get("seq"),
+                    "action",message.get("action"),"accepted",false,"reason",code,"state",world.equipmentState(client.id)));
+            }
             if (shot && client.combatFeedbackCapable) {
                 Map<String, Object> result = object("type", "shot_result", "accepted", false,
                     "reason", code, "message", description);
@@ -832,7 +870,16 @@ public final class Main {
         }
 
         private void broadcast(Map<String, Object> message) {
-            if(List.of("shot_queued","shot_geometry_pending","shot_cancelled").contains(message.get("type")))return;
+            if("equipment_state".equals(message.get("type"))) {
+                Session owner=sessions.get(message.get("player_id"));
+                if(owner!=null && owner.connected() && owner.client.equipmentCapable)sendEquipmentState(owner.client,message,false);
+                return;
+            }
+            if(List.of("shot_queued","shot_geometry_pending","shot_cancelled").contains(message.get("type"))) {
+                Session owner=sessions.get(message.get("player_id"));
+                if(owner!=null && owner.connected() && owner.client.combatFeedbackCapable)owner.client.send(message);
+                return;
+            }
             // 只投影已由规则生成的结果，原始客户端 JSON 不能调用 Trusted 入口。
             boolean combatOnly = COMBAT_EVENTS.contains(message.get("type"));
             byte[] bytes = textFrame(message);
@@ -951,6 +998,8 @@ public final class Main {
         boolean combatCapable;
         boolean resumeCapable;
         boolean combatFeedbackCapable;
+        boolean equipmentCapable;
+        String equipmentKey="";
         boolean worldCapable,worldInitialized,meleeEventsCapable;
         boolean entryReadinessCapable, entryReady, physicsCapable;
         final java.util.Set<String> scope=new java.util.LinkedHashSet<>();
@@ -1237,13 +1286,16 @@ public final class Main {
     }
 
     /** 用于战局协议的小型严格 JSON 实现：限制深度、数值长度并拒绝重复键。 */
-    private static final class Json {
+    static final class Json {
         private final String input;
+        private final int maximumArrayLength;
         private int position;
-        private Json(String input) { this.input = input; }
+        private Json(String input,int maximumArrayLength) { this.input = input;this.maximumArrayLength=maximumArrayLength; }
 
-        static Object parse(String input) {
-            Json parser = new Json(input);
+        static Object parse(String input) {return parse(input,256);}
+        static Object parse(String input,int maximumArrayLength) {
+            if(maximumArrayLength<1 || maximumArrayLength>200_000)throw new IllegalArgumentException("无效 JSON 数组上限");
+            Json parser = new Json(input,maximumArrayLength);
             Object result = parser.value(0);
             parser.space();
             if (parser.position != input.length()) throw parser.fail("对象后存在多余内容");
@@ -1282,7 +1334,7 @@ public final class Main {
                 if (take(']')) return result;
                 do {
                     result.add(value(depth + 1));
-                    if (result.size() > 256) throw fail("数组元素过多");
+                    if (result.size() > maximumArrayLength) throw fail("数组元素过多");
                     space();
                     if (take(']')) return result;
                     expect(',');

@@ -11,7 +11,9 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
   let shots = [];
   let nextShotId = 0;
   let combat = [];
-  let world = null;
+  let world = null, equipment = null;
+  const equipmentPredictions = new Map();
+  let equipmentEvents = [], nextEquipmentEvent = 0;
   let worldEvents = [], nextWorldEventId = 0;
   let worldShots = [], nextWorldShotId = 0;
   const projectiles = new Map(), areaEffects = new Map();
@@ -20,10 +22,9 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
   const seenWorldEvents = new Set();
   let oldServerNotice = false;
   const combatById = new Map();
-  const confirmedHits = new Set();
   let controls = [], nextControlId = 0;
   let notices = [], nextNoticeId = 0;
-  let nativeHud = false, lastNetworkNotice = '', lastGamePhase = '', lastKills = null;
+  let nativeHud = false, lastNetworkNotice = '', lastGamePhase = '';
   let shared = null;
   let engineReady = false;
   let entry = { attempt_id: entryAttempt, cancelled: false, reduced_motion: reducedMotion === true };
@@ -84,6 +85,7 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
     if (typeof id !== 'string' || revision < (combatById.get(id)?.revision ?? 0)) return false;
     const health = event.type === 'death' ? 0 : event.health;
     if (Number.isInteger(health)) mergeCombat({ id, health, alive: health > 0, revision,
+      ...(Number.isFinite(event.armour) ? { armour: event.armour } : {}),
       ...(event.type === 'respawn' && Array.isArray(event.position) ? { spawn: event.position } : {}) });
     return true;
   }
@@ -94,15 +96,12 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
     peers.set(peer.player_id, peer);
   }
   function combatFeedback(data) {
-    if (data.accepted === false && ['rate_limited', 'cooldown', 'stale_seq', 'stale_input', 'stale_generation',
-      'invalid_revision', 'seat_unavailable', 'weapon_mismatch', 'not_ready', 'player_dead'].includes(data.reason)) return;
-    const victim = data.victim_id || data.target_entity_id;
-    if (data.hit === true && victim && Number.isSafeInteger(data.revision)) {
-      const key = victim + ':' + data.revision;
-      if (confirmedHits.has(key)) return;
-      confirmedHits.add(key);
-      while (confirmedHits.size > 256) confirmedHits.delete(confirmedHits.values().next().value);
-    }
+    // A successful shot result is authoritative state, not a HUD event. The
+    // server result still reaches the world/combat state handlers below; this
+    // adapter only surfaces rejected actions as actionable error notices.
+    if (data.accepted !== false) return;
+    if (['rate_limited', 'cooldown', 'stale_seq', 'stale_input', 'stale_generation',
+      'invalid_revision', 'seat_unavailable', 'weapon_mismatch', 'not_ready', 'player_dead', 'invalid_ped_pose'].includes(data.reason)) return;
     const rejected = {
       unsupported_weapon: text('当前武器暂不支持多人伤害同步，请使用普通枪械。', 'This weapon does not support multiplayer damage yet. Use a regular firearm.', '目前武器暫不支援多人傷害同步，請使用一般槍械。'),
       weapon_mismatch: text('武器切换尚未同步，请稍后重新射击。', 'Weapon switch is still synchronizing. Try firing again shortly.', '武器切換尚未同步，請稍後重新射擊。'),
@@ -112,33 +111,12 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
       invalid_shot: text('服务器未接受这次射击，请重新瞄准。', 'The server could not accept this shot. Aim again.', '伺服器未接受這次射擊，請重新瞄準。'),
       rate_limited: text('射击过快，请稍后重试。', 'Firing too quickly. Try again shortly.', '射擊過快，請稍後重試。'),
     };
-    const lines = data.accepted === false ? (rejected[data.reason] || text('服务器未接受这次射击。', 'The server could not accept this shot.', '伺服器未接受這次射擊。'))
-      : data.hit ? (data.health === 0 ? text('击杀已由服务器确认。', 'Kill confirmed by the server.', '擊殺已由伺服器確認。')
-        : text((data.action === 'melee' ? '拳击命中' : '命中玩家') + (Number.isInteger(data.damage) ? ' · 伤害 ' + data.damage : ''),
-          (data.action === 'melee' ? 'Melee hit' : 'Player hit') + (Number.isInteger(data.damage) ? ' · Damage ' + data.damage : ''),
-          (data.action === 'melee' ? '拳擊命中' : '命中玩家') + (Number.isInteger(data.damage) ? ' · 傷害 ' + data.damage : ''))) : null;
-    // 未命中仍由连接模块记录判定，但不让原生通知盖满整个战局。
-    if (!lines) return;
+    const lines = rejected[data.reason] || text('服务器未接受这次射击。', 'The server could not accept this shot.', '伺服器未接受這次射擊。');
     gameMessage = lines; renderHud();
-    const key = data.accepted === false ? 'reject:' + (data.reason || '') : data.health === 0 ? 'kill' : (data.action || 'shot') + ':hit';
+    const key = 'reject:' + (data.reason || '');
     const now = performance.now();
     if (key !== lastCombatNotice || now - lastCombatNoticeAt >= 1500) {
       lastCombatNotice = key; lastCombatNoticeAt = now; notify(lines);
-    }
-  }
-  function meleeFeedback(data) {
-    // 仅采用连接模块校验、服务端确认的命中事件；本地挥拳或动作播放不产生提示/伤害。
-    if (data.accepted !== true || data.hit !== true || !Number.isInteger(data.damage) || data.damage <= 0
-      || data.damage > 200 || !Number.isInteger(data.health) || data.health < 0 || data.health > 200) return;
-    if (data.attacker_id === session.client_id) {
-      combatFeedback({ ...data, action: 'melee' });
-    } else if (world.entities.some((entity) => entity.entity_id === data.target_entity_id
-      && entity.player_id === session.client_id && entity.generation === data.target_generation)) {
-      gameMessage = text('受到拳击 · 生命 ' + data.health + '/200', 'Melee damage received · Health ' + data.health + '/200'); renderHud();
-      // 生命值以每次命中的服务器结果显示，避免挥拳动作存在而扣血结果不可见。
-      notify(data.health === 0 ? text('拳击致死，等待服务器重生', 'Killed by melee. Waiting for server respawn.', '拳擊致死，等待伺服器重生')
-        : text('受到拳击 · 伤害 ' + data.damage + ' · 生命 ' + data.health + '/200', 'Melee damage received · Damage ' + data.damage + ' · Health ' + data.health + '/200',
-          '受到拳擊 · 傷害 ' + data.damage + ' · 生命 ' + data.health + '/200'));
     }
   }
   function renderHud() {
@@ -241,9 +219,41 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
     const packet = { ...session, peers: [...peers.values()], shots, combat, controls,
       notices: notices.map(({ id, value }) => ({ id, text: localize(value, true) })),
       language: getLanguage(), engine_ready: engineReady, entry, world, world_events: worldEvents,
+      equipment, equipment_predictions: [...equipmentPredictions.values()], equipment_events: equipmentEvents,
       remote_config: remoteConfig, world_shots: worldShots, world_projectiles: [...projectiles.values()],
       world_areas: [...areaEffects.values()], world_effects: effectEvents, collision_queries: [...collisionQueries.values()] };
-    const bytes = new TextEncoder().encode(JSON.stringify(packet));
+    const encoder = new TextEncoder();
+    let bytes = encoder.encode(JSON.stringify(packet));
+    if (bytes.length > shared.capacity) {
+      // Optional animation precision must never stall health, ownership or
+      // input acknowledgements. Keep nearby animation detail within the budget.
+      const candidates = [];
+      const origin = world?.entities?.find(entity => entity.player_id === session.client_id)?.components?.transform?.position;
+      function copyActions(actions, priority) {
+        if (!actions?.animation_phases?.length && !actions?.animation_blends?.length) return actions;
+        const copy = { ...actions };
+        for (const key of ['animation_phases', 'animation_blends']) if (copy[key]?.length) {
+          candidates.push({ actions: copy, priority, key,
+            bytes: encoder.encode(JSON.stringify(key) + ':' + JSON.stringify(copy[key])).length + 1 });
+        }
+        return copy;
+      }
+      packet.peers = packet.peers.map(peer => ({ ...peer, state: { ...peer.state,
+        actions: copyActions(peer.state?.actions, world?.ready ? Infinity : 0) } }));
+      if (world?.entities) packet.world = { ...world, entities: world.entities.map(entity => {
+        const c = entity.components;
+        if (!c?.ped) return entity;
+        const distance = origin && c.transform?.position ? Math.hypot(...c.transform.position.map((v, i) => v - origin[i])) : 0;
+        return { ...entity, components: { ...c, ped: { ...c.ped,
+          actions: copyActions(c.ped.actions, distance + (entity.player_id ? 0 : 1000)) } } };
+      }) };
+      let overflow = bytes.length - shared.capacity;
+      for (const candidate of candidates.sort((a, b) => b.priority - a.priority)) {
+        if (overflow <= 0) break;
+        delete candidate.actions[candidate.key]; overflow -= candidate.bytes;
+      }
+      bytes = encoder.encode(JSON.stringify(packet));
+    }
     if (bytes.length > shared.capacity) return;
     const header = new Int32Array(shared.memory.buffer, shared.block, 4);
     const payload = new Uint8Array(shared.memory.buffer, shared.block + 16, shared.capacity);
@@ -260,7 +270,18 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
 
   const receive = (data) => {
     if (!data || typeof data !== 'object') return;
-    if (data.type === 'entry_status') {
+    if (data.type === 'equipment_state') {
+      if (data.player_id !== session.client_id) return;
+      if (equipment && equipment.world_epoch === data.world_epoch && equipment.entity_id === data.entity_id
+        && (data.generation < equipment.generation || data.generation === equipment.generation && data.revision < equipment.revision)) return;
+      equipment = data; schedule(); return;
+    } else if (data.type === 'shot_prediction') {
+      equipmentPredictions.set(data.id, data); schedule(); return;
+    } else if (data.type === 'equipment_ack') {
+      equipmentEvents.push({ id: ++nextEquipmentEvent, ...data });
+      if (equipmentEvents.length > 32) equipmentEvents.shift();
+      schedule(); return;
+    } else if (data.type === 'entry_status') {
       const identity = entryIdentity();
       if (session.connected && world?.ready && identity && data.ready === true && data.world_epoch === world.world_epoch
           && data.entity_id === identity.entity_id && data.generation === identity.generation) session.entry_ready = true;
@@ -333,7 +354,6 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
       seenWorldEvents.add(data.event_id);
       if (seenWorldEvents.size > 256) seenWorldEvents.delete(seenWorldEvents.values().next().value);
       worldEvents.push({ id: ++nextWorldEventId, event: data });
-      meleeFeedback(data);
     } else if (data.type === 'interaction_result') {
       if (data.accepted === false && !['rate_limited', 'cooldown', 'stale_seq', 'stale_input', 'stale_generation',
         'stale_revision', 'stale_owner', 'invalid_revision', 'seat_unavailable', 'too_far', 'not_facing', 'player_dead', 'not_ready'].includes(data.reason)) {
@@ -353,13 +373,13 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
         appearance_spec: data.appearance_spec || {},
         weapon_rules: Array.isArray(data.weapon_rules) ? data.weapon_rules : [],
         session_policy: data.session_policy || null,
-        world_v2: data.world_v2 === true,
+        world_v2: data.world_v2 === true, equipment_v1: data.equipment_v1 === true, ped_pose: data.ped_pose === true,
         entry_readiness: data.entry_readiness === true, entry_ready: data.entry_ready === true,
         resumed: data.resumed === true,
         resume_state_ready: data.resume_state_ready === true,
         resume_state: data.resume_state || null,
         resume_position: data.resume_position || null, spawn: data.spawn || null };
-      if (!session.connected || previousId !== session.client_id) { collisionQueries.clear(); nativeEntry = null; entrySentAt = -Infinity; }
+      if (!session.connected || previousId !== session.client_id) { equipment = null; equipmentPredictions.clear(); equipmentEvents = []; collisionQueries.clear(); nativeEntry = null; entrySentAt = -Infinity; }
       if (session.client_id && previousId && session.client_id !== previousId) { peers.clear(); combatById.clear(); }
       if (session.connected && (data.world_v2 === false || data.melee_events === false) && !oldServerNotice) {
         oldServerNotice = true;
@@ -375,12 +395,15 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
       combat = [...combatById.values()];
     } else if (data.type === 'combat_state' && Array.isArray(data.players)) {
       for (const value of data.players) mergeCombat(value);
+    } else if (data.type === 'helmet_broken') {
+      const entity = world?.entities?.find(value => value.entity_id === data.entity_id);
+      if (data.world_epoch !== world?.world_epoch || entity?.player_id !== session.client_id
+        || entity.generation !== data.generation || entity.model !== data.model) return;
+      if (controls.some(value => value.event.event_id === data.event_id)) return;
+      controls.push({ id: ++nextControlId, event: data });
+      if (controls.length > 32) controls.shift();
     } else if (['damage', 'death', 'respawn', 'correction'].includes(data.type)) {
       if (!mergeControlCombat(data)) return;
-      if (data.type === 'damage' && data.attacker_id === session.client_id && Number.isSafeInteger(data.shot_seq)
-          && Number.isInteger(data.damage) && data.damage > 0 && Number.isInteger(data.health)) {
-        combatFeedback({ ...data, accepted: true, hit: true });
-      }
       controls.push({ id: ++nextControlId, event: data });
       if (controls.length > 32) controls.shift();
       if (data.type === 'respawn' && data.player_id === session.client_id) notify(text('已重生，正在恢复角色', 'Respawned. Restoring character.', '已重生，正在恢復角色'));
@@ -439,6 +462,17 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
       publish();
       sendLocal({ type: 'bridge_ready' });
       reportStatus({ phase: 'engine_ready' });
+    } else if (message.type === 'equipment_prompt') {
+      const names = { PICKUP_WEAPON_PISTOL: ['手枪弹药', 'pistol ammunition'],
+        PICKUP_WEAPON_CARBINERIFLE: ['步枪弹药', 'rifle ammunition'],
+        PICKUP_WEAPON_PUMPSHOTGUN: ['霰弹枪弹药', 'shotgun ammunition'],
+        PICKUP_WEAPON_RPG: ['火箭弹', 'rockets'], PICKUP_ARMOUR_STANDARD: ['护甲', 'armour'] };
+      const label = names[message.name] || ['补给', 'supplies'];
+      notify(text('按 E 领取' + label[0], 'Press E to collect ' + label[1]));
+    } else if (message.type === 'equipment_acknowledge') {
+      for (const id of message.predictions || []) equipmentPredictions.delete(id);
+      const consumed = new Set(message.events || []);
+      equipmentEvents = equipmentEvents.filter(event => !consumed.has(event.id)); schedule();
     } else if (message.type === 'shot_ack' && Array.isArray(message.ids)) {
       const consumed = new Set(message.ids);
       shots = shots.filter((shot) => !consumed.has(shot.id));
@@ -464,7 +498,7 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
       renderHud();
     } else if (message.type === 'collision_result') {
       collisionQueries.delete(message.query_id); sendLocal(message); schedule();
-    } else if (['local_state', 'local_shot', 'entity_ready', 'entity_input', 'interaction_request', 'simulation_result'].includes(message.type)) {
+    } else if (['local_state', 'local_shot', 'equipment_request', 'entity_ready', 'entity_input', 'interaction_request', 'simulation_result'].includes(message.type)) {
       sendLocal(message);
     } else if (message.type === 'game_status') {
       gameMessage = message.role_recovering ? text('正在自动恢复在线角色…', 'Restoring online character automatically…')
@@ -484,10 +518,6 @@ export function installGameAdapter(worker, network = null, { watchOnlineConfigur
           : phase === 'dead' ? text('已阵亡，等待服务器重生', 'You died. Waiting for server respawn.', '已陣亡，等待伺服器重生')
           : previous === 'recovering_avatar' ? text('角色已恢复，同步继续', 'Character restored. Synchronization resumed.', '角色已恢復，同步繼續')
             : text('公共战局已就绪', 'Public session ready.', '公共戰局已就緒'));
-      }
-      if (Number.isInteger(message.kills)) {
-        if (lastKills !== null && message.kills > lastKills) notify(text('击杀成功 · 总击杀 ' + message.kills, 'Kill confirmed · Total kills ' + message.kills, '擊殺成功 · 總擊殺 ' + message.kills));
-        lastKills = message.kills;
       }
       reportStatus({ phase, peers: message.peer_count,
         ...(message.client_id ? { client_id: message.client_id } : {}),

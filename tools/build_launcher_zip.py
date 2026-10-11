@@ -9,11 +9,12 @@ import json
 from pathlib import Path
 import zipfile
 from readonly_game_outputs import atomic_write_bytes, validate_output
+from online_engine_source import SOURCE_FILES
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_EXTENSIONS = {'.js', '.css', '.html', '.json', '.svg'}
 TOOLS = ('build_multiplayer_client.py', 'build_native_probe.py', 'inspect_native_bridge.py',
-         'readonly_game_outputs.py', 'build_launcher_zip.py')
+         'readonly_game_outputs.py', 'online_engine_source.py', 'build_launcher_zip.py')
 FORBIDDEN_SUFFIXES = {'.wasm', '.rpf', '.gfx', '.ytd', '.ydd', '.yft', '.ymt', '.fxc', '.jar', '.class',
                       '.ttf', '.otf', '.woff', '.woff2', '.bik', '.bk2', '.log', '.zip'}
 
@@ -22,6 +23,8 @@ def launcher_sources(root=ROOT, include_server=False):
     root = Path(root).resolve()
     sources = [root / 'serve_local.py', root / 'docs/启动器资源隔离.md']
     sources += [root / 'tools' / name for name in TOOLS]
+    # Explicitly include only our four small hooks, never engine decompilations.
+    sources += [root / 'engine/online' / name for name in SOURCE_FILES]
     for path in (root / 'client').rglob('*'):
         if path.is_file() and path.suffix in SOURCE_EXTENSIONS and 'runtime' not in path.relative_to(root / 'client').parts:
             sources.append(path)

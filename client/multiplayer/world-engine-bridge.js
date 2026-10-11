@@ -2,6 +2,9 @@
 // 统一实体适配器：只创建服务器登记对象，所有者代算 GTA 物理，其他端应用已确认组件。
 self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPlayerAnimation }) {
   const replicas = new Map();
+  const characterActions = self.createCharacterActionBridge?.({ ex, memory });
+  const pedPoseSampler = self.createPedPoseSampler?.({ ex, memory });
+  const ragdollPose = self.createRagdollPoseBridge?.({ ex, memory });
   const requestedModels = new Map();
   const seatConfig = new Map();
   let epoch = null, buffer = 0, requestNumber = 0, lastInteractionAt = -Infinity;
@@ -18,6 +21,11 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
   const MAX_EFFECT_MARKERS = 32, FLASH_DURATION_MS = 450;
   const meleeDict = 'melee@unarmed@streamed_core';
   const meleeClips = ['heavy_punch_a', 'heavy_punch_b', 'heavy_punch_c'];
+  // A native NPC exit is reported only after the server attachment has been
+  // observed in the exact native seat.  The pending window is deliberately
+  // short: a missing/late native handle must fall back to the server snapshot
+  // correction instead of becoming an unbounded client-side detach.
+  const NPC_EXIT_RETRY_MS = 1000, NPC_EXIT_MAX_ATTEMPTS = 3, NPC_EXIT_TIMEOUT_MS = 4000;
   const validPosition = (value) => Array.isArray(value) && value.length === 3
     && value.every((part) => Number.isFinite(part) && Math.abs(part) <= 16000);
   const data = () => new DataView(memory.buffer);
@@ -66,6 +74,16 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
   function destroyedVehicle(entity) {
     const vehicle = entity?.components?.vehicle;
     return Boolean(vehicle && (vehicle.engine_health <= -4000 || vehicle.body_health <= 0));
+  }
+  function combatDead(entity) {
+    const combat = entity?.components?.combat;
+    return combat?.alive === false || combat?.health <= 0;
+  }
+  function resetPedLifecycle(replica) {
+    characterActions?.reset(replica);
+    replica.aiKey = replica.aiAttemptKey = null;
+    replica.aiAppliedAt = replica.aiAttemptAt = replica.lawShotAt = -Infinity;
+    replica.task = null; replica.seatObservation = null; replica.exitPending = null;
   }
   function protectSeat(handle, attached) {
     if (!ex.mpSetPedConfigFlag || !ex.mpGetPedConfigFlag) return;
@@ -136,9 +154,20 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     }
   }
   function applyAiTask(entity, replica, entities, packet, now, localPed) {
-    // 尸体只应用服务器确认的位置；不能被 idle/standstill 重新激活动作。
-    if (entity.components.combat?.alive === false) return;
+    // 原生死亡/ragdoll任务由权威生命状态保留，不能被idle/standstill覆盖。
+    if (combatDead(entity) || replica.dead || replica.recovering) return;
     const task = entity.ai_task, active = entity.owner_id === packet.client_id && entity.ownership === 'active';
+    const c = entity.components;
+    const actionState = { ...c.ped, position: c.transform.position, heading: ex.mpHeading(replica.handle),
+      attachment: c.attachment, alive: c.combat?.alive, health: c.combat?.health ?? 200 };
+    const actionOptions = { now, poseReady: !c.attachment && !ex.mpGetVehiclePedIsIn?.(replica.handle, 0),
+      animating: now < (replica.animationUntil ?? -Infinity), readyWeapon: replica.lawWeapon === c.ped?.weapon };
+    if (!active && characterActions?.apply(replica, actionState, actionOptions)) {
+      characterActions.applyReload?.(replica, actionState, actionOptions);
+      characterActions.applyPhases?.(replica, actionState);
+      ragdollPose?.apply(replica, actionState, actionOptions);
+      replica.aiKey = null; return;
+    }
     const valid = task && task.entity_id === entity.entity_id && task.generation === entity.generation
       && task.owner_epoch === entity.owner_epoch
       && (task.expires_at_tick === 0 || task.expires_at_tick >= packet.world.world_tick);
@@ -152,7 +181,7 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     const target = task?.target_entity_id ? entities.get(task.target_entity_id) : null;
     const targetHandle = target?.player_id === packet.client_id ? localPed : target?.player_id
       ? playerReplica(target.player_id) : replicas.get(task?.target_entity_id)?.handle;
-    const targetReady = target && target.generation === task?.target_generation && target.components.combat?.alive !== false
+    const targetReady = target && target.generation === task?.target_generation && !combatDead(target)
       && targetHandle && ex.mpExists(targetHandle);
     const walking = ['wander', 'flee', 'pursue'].includes(action) && !entity.components.attachment && validPosition(task?.destination);
     const distance = walking ? Math.hypot(...task.destination.map((part, index) => part - entity.components.transform.position[index])) : 0;
@@ -187,6 +216,8 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
       post({ type: 'simulation_result', kind: 'npc_shot', entity_id: entity.entity_id, owner_epoch: entity.owner_epoch,
         generation: entity.generation, target_entity_id: target.entity_id, target_generation: target.generation });
     }
+    if (!active) characterActions?.applyReload?.(replica, actionState, actionOptions);
+    if (!active) characterActions?.applyPhases?.(replica, actionState);
   }
   function renderEffects(packet, now) {
     if (!packet?.connected || !packet.world?.ready) return;
@@ -308,9 +339,11 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     ex.mpGetEntityCoords(BigInt(buffer), localPed, 1);
     const position = readVector(0);
     const heading = ((ex.mpHeading(localPed) % 360) + 360) % 360;
-    const state = { position, heading, model: ex.mpGetModel(localPed) >>> 0, health: Math.max(0, Math.min(1000, ex.mpGetHealth(localPed))),
+    const pedPose = packet.ped_pose ? pedPoseSampler?.sample(localPed, position) : null;
+    const state = { ...(pedPose ? { ped_pose: pedPose } : {}), position, heading, model: ex.mpGetModel(localPed) >>> 0, health: Math.max(0, Math.min(1000, ex.mpGetHealth(localPed))),
       weapon, shooting: false,
-      actions: { aiming: false, reloading: false, jumping: false, ducking: Boolean(ex.mpIsDucking?.(localPed)), sprinting: false },
+      actions: characterActions?.sample(localPed, Boolean(ex.mpIsAiming?.(ex.mpPlayerId()))) ||
+        { aiming: false, reloading: false, jumping: false, ducking: Boolean(ex.mpIsDucking?.(localPed)), sprinting: false },
       ...(actor.components.appearance ? { appearance: actor.components.appearance } : {}) };
     post({ type: 'interaction_request', request_id: requestId, action: 'melee', actor_generation: actor.generation, state });
     lastMeleeSentAt = now; pendingMelee.shift();
@@ -321,7 +354,8 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
       if (consumedWorldEvents.has(item.id)) { acknowledge.push(item.id); continue; }
       const event = item.event, actor = entities.get(event?.attacker_entity_id);
       const obsolete = event?.world_epoch !== packet.world.world_epoch || !actor
-        || actor.generation !== event.attacker_generation || actor.components.combat?.alive === false;
+        || actor.generation !== event.attacker_generation || combatDead(actor)
+        || (!actor.player_id && replicas.get(actor.entity_id)?.dead);
       if (obsolete || actor.player_id === packet.client_id) { consumedWorldEvents.add(item.id); acknowledge.push(item.id); continue; }
       const handle = actor.player_id ? playerReplica(actor.player_id) : replicas.get(actor.entity_id)?.handle;
       let state = animationEvents.get(item.id);
@@ -365,7 +399,7 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     if (!buffer) return { active: false };
     if (!packet?.connected || !world?.ready) {
       if (!packet?.connected) clear();
-      for (const replica of replicas.values()) ex.mpFreeze(replica.handle, 1);
+      for (const replica of replicas.values()) ex.mpFreeze(replica.handle, replica.dead ? 0 : 1);
       return { active: false };
     }
     if (epoch !== world.world_epoch) { clear(); epoch = world.world_epoch; }
@@ -399,8 +433,11 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     for (const entity of ordered) {
       if (entity.player_id || !['ped', 'vehicle'].includes(entity.kind)) continue;
       const state = entity.components, position = state.transform?.position;
+      const dead = entity.kind === 'ped' && combatDead(entity);
       if (!validPosition(position)) continue;
       let replica = replicas.get(entity.entity_id);
+      if (replica && entity.kind === 'ped' && (entity.generation < replica.generation
+          || (entity.generation === replica.generation && entity.revision < replica.revision))) continue;
       if (replica && (replica.model !== entity.model || replica.generation !== entity.generation || !ex.mpExists(replica.handle))) {
         erase(replica); replicas.delete(entity.entity_id); replica = null;
       }
@@ -426,17 +463,19 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
         replica.epoch = entity.owner_epoch; replica.active = false; replica.revision = -1;
         replica.submittedAt = replica.readyAt = -Infinity;
         replica.driveStarted = false;
-        applyTransform(replica.handle, state.transform);
+        replica.seatObservation = null; replica.exitPending = null;
+        if (!dead || !replica.dead) applyTransform(replica.handle, state.transform);
       }
       const destroyed = destroyedVehicle(entity);
       const offered = !destroyed && entity.owner_id === packet.client_id && entity.ownership === 'offered';
       const active = !destroyed && entity.owner_id === packet.client_id && entity.ownership === 'active';
-      ex.mpFreeze(replica.handle, active ? 0 : 1);
+      const physicalAction = entity.kind === 'ped' && !state.attachment && Boolean(characterActions?.physical(state.ped?.actions));
+      ex.mpFreeze(replica.handle, active || dead || physicalAction ? 0 : 1);
       if (offered && now - replica.readyAt >= 1000) {
         replica.readyAt = now;
         post({ type: 'entity_ready', entity_id: entity.entity_id, owner_epoch: entity.owner_epoch });
       }
-      if (!active && replica.revision !== entity.revision) applyTransform(replica.handle, state.transform);
+      if (!active && !dead && replica.revision !== entity.revision) applyTransform(replica.handle, state.transform);
       if (entity.kind === 'vehicle') {
         ex.mpSetInvincible(replica.handle, active ? 0 : 1);
         if (state.vehicle && (!active || !replica.active || replica.serverEngine !== state.vehicle.engine_health
@@ -459,37 +498,67 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
           }
         }
       } else {
-        const health = state.combat?.health ?? 200;
+        const health = dead ? 0 : state.combat?.health ?? 200;
         const nativeHealth = health > 0 ? 100 + Math.max(1, Math.round(health / 2)) : 0;
-        if (health === 0) {
-          if (replica.serverHealth !== 0) ex.mpClearTasksImmediately?.(replica.handle);
-          if (replica.serverHealth !== 0 || replica.revision !== entity.revision) {
-            applyTransform(replica.handle, { ...state.transform, velocity: [0, 0, 0], angular_velocity: [0, 0, 0] });
-          }
-          ex.mpFreeze(replica.handle, 1);
-          replica.aiKey = null; replica.task = 'dead';
-        }
+        const nativeDead = Boolean(ex.mpIsDead(replica.handle, 0)), actualHealth = ex.mpGetHealth(replica.handle);
         ex.mpBlockEvents(replica.handle, 1);
-        ex.mpSetCanRagdoll?.(replica.handle, active && health > 0 ? 1 : 0);
-        ex.mpSetInvincible(replica.handle, active && health > 0 ? 0 : 1);
         // 枪械、火焰、爆炸与近战只消费服务端血量；撞击/摔落/溺水仍可上报环境候选。
         ex.mpSetProofs?.(replica.handle, 1, 1, 1, 0, 1, 0, 0, 0);
-        if (health === 0 || !active || !replica.active || replica.serverHealth !== health) {
-          if (health > 0 && ex.mpIsDead(replica.handle, 0)) { ex.mpResurrect?.(replica.handle); ex.mpRevive?.(replica.handle); }
-          if (ex.mpGetHealth(replica.handle) !== nativeHealth) ex.mpSetHealth(replica.handle, nativeHealth, 0);
-        }
-        replica.serverHealth = health;
-        if (active && health > 0) {
-          const observed = ex.mpIsDead(replica.handle, 0) ? 0 : Math.max(0, Math.min(200, Math.round((ex.mpGetHealth(replica.handle) - 100) * 2)));
-          if (observed < health && now - (replica.damageAt ?? -Infinity) >= 500) {
-            replica.damageAt = now;
-            post({ type: 'simulation_result', kind: 'entity_health', entity_id: entity.entity_id,
-              generation: entity.generation,
-              owner_epoch: entity.owner_epoch, health: observed });
+        if (dead) {
+          const firstDeath = !replica.dead;
+          // Remove a live AI task once, before health-zero installs the original
+          // death task. An already-dead native ped retains its existing task.
+          if (firstDeath) {
+            if (!nativeDead) ex.mpClearTasksImmediately?.(replica.handle);
+            resetPedLifecycle(replica); replica.task = 'dead';
+            post({ type: 'world_entity_status', entity_id: entity.entity_id, generation: entity.generation,
+              kind: 'ped', phase: 'authority_dead' });
+          }
+          // A revision/lease update is not another death or teleport. Allow the
+          // local corpse to settle until the server actually changes its pose.
+          const poseKey = JSON.stringify([position, state.transform.rotation]);
+          if (firstDeath || replica.deathPoseKey !== poseKey) applyTransform(replica.handle, state.transform);
+          replica.deathPoseKey = poseKey;
+          ex.mpSetCanRagdoll?.(replica.handle, 1); ex.mpSetInvincible(replica.handle, 0);
+          if (!nativeDead || actualHealth !== 0) ex.mpSetHealth(replica.handle, 0, 0);
+          replica.dead = true; replica.recovering = false;
+        } else {
+          ex.mpSetCanRagdoll?.(replica.handle, active || state.ped?.actions?.ragdoll ? 1 : 0);
+          ex.mpSetInvincible(replica.handle, active ? 0 : 1);
+          // Only an established active owner submits native environmental
+          // observations. They remain candidates; never replace server health.
+          if (active && replica.active && !replica.dead && !replica.recovering && replica.serverHealth === health) {
+            const observed = nativeDead ? 0 : Math.max(0, Math.min(200, Math.round((actualHealth - 100) * 2)));
+            if (observed < health && now - (replica.damageAt ?? -Infinity) >= 500) {
+              replica.damageAt = now;
+              post({ type: 'simulation_result', kind: 'entity_health', entity_id: entity.entity_id,
+                generation: entity.generation, owner_epoch: entity.owner_epoch, health: observed });
+            }
+          }
+          const restore = replica.dead || replica.recovering || nativeDead || actualHealth <= 100;
+          if (restore && (!replica.recovering || now - replica.recoveryAt >= 500)) {
+            replica.recoveryAt = now;
+            ex.mpResurrect?.(replica.handle); ex.mpRevive?.(replica.handle);
+            ex.mpClearTasksImmediately?.(replica.handle); resetPedLifecycle(replica);
+            applyTransform(replica.handle, state.transform);
+            ex.mpSetHealth(replica.handle, nativeHealth, 0);
+            replica.recovering = Boolean(ex.mpIsDead(replica.handle, 0));
+            if (!replica.recovering) {
+              post({ type: 'world_entity_status', entity_id: entity.entity_id, generation: entity.generation,
+                kind: 'ped', phase: replica.dead ? 'authority_alive' : 'native_life_reconciled' });
+              replica.dead = false; replica.deathPoseKey = null;
+            }
+          } else if (!restore && actualHealth !== nativeHealth) {
+            ex.mpSetHealth(replica.handle, nativeHealth, 0);
           }
         }
+        const armour = state.combat?.armour ?? 0;
+        if (Number.isFinite(armour) && armour >= 0 && armour <= 100 && ex.mpSetArmour
+          && (!ex.mpGetArmour || ex.mpGetArmour(replica.handle) !== Math.ceil(armour)))
+          ex.mpSetArmour(replica.handle, Math.ceil(armour));
+        replica.serverHealth = health;
         // 服务器发布任务；owner只执行引擎寻路/动画，不自行选择目标或决定战斗。
-        const weapon = state.ped?.weapon;
+        const weapon = !dead && !replica.recovering ? state.ped?.weapon : null;
         if (weapon && ex.mpHasWeaponAsset?.(weapon | 0) && replica.lawWeapon !== weapon) {
           ex.mpGiveWeapon?.(replica.handle, weapon | 0, 999, 0, 1);
           ex.mpSetCurrentWeapon?.(replica.handle, weapon | 0, 1); replica.lawWeapon = weapon;
@@ -498,17 +567,33 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
 
       }
       replica.active = active; replica.revision = entity.revision;
-      if (active && !state.attachment && state.combat?.alive !== false && now - replica.submittedAt >= 100) {
+      if (entity.kind === 'ped' && (dead || replica.recovering || !active || !entity.components.attachment)) {
+        // Ownership offers, generation changes and server-confirmed detaches
+        // invalidate any previously established native-seat observation.
+        replica.seatObservation = null; replica.exitPending = null;
+      }
+      if (active && state.attachment && packet.ped_pose && entity.kind === 'ped' && !dead && !replica.recovering
+          && now - (replica.poseSubmittedAt ?? -Infinity) >= 100) {
+        replica.poseSubmittedAt = now;
+        const parent = entities.get(state.attachment.entity_id);
+        const pose = pedPoseSampler?.sample(replica.handle, parent?.components?.transform?.position || position);
+        if (pose) post({ type: 'simulation_result', kind: 'ped_pose', entity_id: entity.entity_id,
+          owner_epoch: entity.owner_epoch, generation: entity.generation, ped_pose: pose });
+      }
+      if (active && !state.attachment && !dead && !replica.recovering && now - replica.submittedAt >= 100) {
         const value = transform(replica.handle);
         if (value) {
           replica.submittedAt = now;
           const view = entity.kind === 'vehicle'
             ? { engine_on: Boolean(ex.mpEngineRunning?.(replica.handle)), lights_on: state.vehicle?.lights_on === true }
-            : { ...state.ped, shooting: Boolean(ex.mpIsShooting(replica.handle)), actions: state.ped?.actions ||
+            : { ...state.ped, shooting: Boolean(ex.mpIsShooting(replica.handle)), actions: characterActions?.sample(replica.handle) || state.ped?.actions ||
                 { aiming: false, reloading: false, jumping: false, ducking: false, sprinting: false } };
+          const pedPose = packet.ped_pose && entity.kind === 'ped' ? pedPoseSampler?.sample(replica.handle, value.position) : null;
+          if (packet.ped_pose && entity.kind === 'ped' && !pedPose) continue;
           post({ type: 'entity_input', entity_id: entity.entity_id, owner_epoch: entity.owner_epoch,
             generation: entity.generation,
-            based_on_revision: entity.revision, transform: value, view });
+            based_on_revision: entity.revision, transform: value, view,
+            ...(pedPose ? { ped_pose: pedPose } : {}) });
         }
       }
     }
@@ -516,6 +601,10 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     // SetPedIntoVehicle refuses an occupied seat even after the server freed it.
     const occupants = [];
     for (const entity of entities.values()) if (entity.kind === 'ped') {
+      // Leave death/ejection to the original task. Seat correction and native
+      // leave tasks would otherwise replace a corpse's death/ragdoll task.
+      if (!entity.player_id && (combatDead(entity) || replicas.get(entity.entity_id)?.dead
+          || replicas.get(entity.entity_id)?.recovering)) continue;
       if (entity.player_id === packet.client_id && !localReady) continue;
       const handle = entity.player_id === packet.client_id ? localPed
         : entity.player_id ? playerReplica(entity.player_id) : replicas.get(entity.entity_id)?.handle;
@@ -535,6 +624,7 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
     // animation; treating that transition as a shuffle cancels the exit and
     // warps the player back without ever sending their leave request.
     const departing = new Set();
+    const npcDeparting = new Set();
     for (const { entity, handle } of occupants) {
       if (entity.player_id !== packet.client_id) continue;
       const attachment = entity.components.attachment, key = attachmentKey(entity);
@@ -549,6 +639,80 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
         leavePendingAt = now; request('leave_vehicle', entity);
       }
     }
+    // Observe a server-owned NPC leaving a seat before the correction pass.
+    // The observation must have been established while both the ped and its
+    // vehicle were active leases on this client. A missing native handle,
+    // initial loading mismatch or an ownership offer therefore never becomes
+    // an authoritative-looking exit candidate.
+    for (const { entity, handle } of occupants) {
+      if (entity.player_id) continue;
+      const replica = replicas.get(entity.entity_id), attachment = entity.components.attachment;
+      if (!replica || !attachment) continue;
+      const vehicleEntity = entities.get(attachment.entity_id), vehicleReplica = replicas.get(attachment.entity_id);
+      const vehicle = vehicleReplica?.handle;
+      const activeGroup = replica.active && entity.owner_id === packet.client_id && entity.ownership === 'active'
+        && vehicleReplica?.kind === 'vehicle' && vehicleReplica.active
+        && vehicleEntity?.owner_id === packet.client_id && vehicleEntity.ownership === 'active'
+        && vehicleEntity.generation === (vehicleReplica?.generation ?? -1);
+      const seat = attachment.seat, observed = replica.seatObservation;
+      const matches = observed && observed.worldEpoch === world.world_epoch
+        && observed.entityGeneration === entity.generation && observed.ownerEpoch === entity.owner_epoch
+        && observed.vehicleEntityId === attachment.entity_id
+        && observed.vehicleGeneration === vehicleEntity?.generation
+        && observed.vehicleOwnerEpoch === vehicleEntity?.owner_epoch
+        && observed.vehicleHandle === vehicle && observed.seat === seat;
+      if (activeGroup && vehicle && seatedAt(handle, vehicle, seat)) {
+        // A native seat that became correct again cancels a transient pending
+        // candidate; the next real exit must be armed by this exact seat.
+        replica.exitPending = null;
+        if (!matches) replica.seatObservation = { worldEpoch: world.world_epoch,
+          entityGeneration: entity.generation, ownerEpoch: entity.owner_epoch,
+          vehicleEntityId: attachment.entity_id, vehicleGeneration: vehicleEntity.generation,
+          vehicleOwnerEpoch: vehicleEntity.owner_epoch, vehicleHandle: vehicle, seat };
+        continue;
+      }
+      const nativeVehicleChanged = observed && vehicle
+        && (observed.vehicleHandle !== vehicle || observed.vehicleOwnerEpoch !== vehicleEntity?.owner_epoch);
+      const serverSeatChanged = observed && (observed.entityGeneration !== entity.generation
+        || observed.ownerEpoch !== entity.owner_epoch || observed.vehicleEntityId !== attachment.entity_id
+        || observed.vehicleGeneration !== vehicleEntity?.generation
+        || observed.vehicleOwnerEpoch !== vehicleEntity?.owner_epoch || observed.seat !== seat);
+      if (!activeGroup || !vehicle || nativeVehicleChanged || serverSeatChanged || !matches) {
+        // Do not carry a native observation across a lease, generation or
+        // loading transition. The server snapshot remains the only authority.
+        if (!activeGroup || !vehicle || nativeVehicleChanged || serverSeatChanged) {
+          replica.seatObservation = null; replica.exitPending = null;
+        }
+        continue;
+      }
+      if (seatedAt(handle, vehicle, seat) || !outsideVehicleSeats(handle, vehicle)) continue;
+      let pending = replica.exitPending;
+      const samePending = pending && pending.worldEpoch === world.world_epoch
+        && pending.entityGeneration === entity.generation && pending.ownerEpoch === entity.owner_epoch
+        && pending.vehicleEntityId === attachment.entity_id && pending.vehicleGeneration === vehicleEntity.generation
+        && pending.vehicleOwnerEpoch === vehicleEntity.owner_epoch && pending.vehicleHandle === vehicle
+        && pending.seat === seat;
+      if (!samePending) {
+        pending = replica.exitPending = { worldEpoch: world.world_epoch, entityGeneration: entity.generation,
+          ownerEpoch: entity.owner_epoch, vehicleEntityId: attachment.entity_id,
+          vehicleGeneration: vehicleEntity.generation, vehicleOwnerEpoch: vehicleEntity.owner_epoch,
+          vehicleHandle: vehicle, seat, startedAt: now, sentAt: -Infinity, attempts: 0 };
+      }
+      if (now - pending.startedAt > NPC_EXIT_TIMEOUT_MS || pending.attempts >= NPC_EXIT_MAX_ATTEMPTS) {
+        // Require one fresh, correctly seated observation before re-arming;
+        // otherwise a failed native warp could emit periodic false exits.
+        replica.exitPending = null; replica.seatObservation = null;
+        continue;
+      }
+      npcDeparting.add(handle);
+      if (now - pending.sentAt >= NPC_EXIT_RETRY_MS) {
+        pending.sentAt = now; pending.attempts++;
+        post({ type: 'simulation_result', kind: 'npc_exit_vehicle', entity_id: entity.entity_id,
+          owner_epoch: entity.owner_epoch, generation: entity.generation,
+          vehicle_entity_id: attachment.entity_id, vehicle_generation: vehicleEntity.generation,
+          vehicle_owner_epoch: vehicleEntity.owner_epoch, seat });
+      }
+    }
     // Two replicated occupants can cross seats while their server attachments
     // remain valid. Release only the mismatched native occupants first; this
     // makes both target seats available for the following attach pass.
@@ -557,7 +721,7 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
       const vehicle = attachment ? replicas.get(attachment.entity_id)?.handle : 0;
       const current = ex.mpGetVehiclePedIsIn?.(handle, 0) || 0;
       const managed = current && [...replicas.values()].some((entry) => entry.kind === 'vehicle' && entry.handle === current);
-      if (attachment && vehicle && managed && !departing.has(handle)
+      if (attachment && vehicle && managed && !departing.has(handle) && !npcDeparting.has(handle)
           && !seatedAt(handle, vehicle, attachment.seat)) {
         if (entity.player_id === packet.client_id) { lastSeat = null; leavePendingAt = -Infinity; }
         ex.mpLeaveVehicle?.(handle, current, 16);
@@ -569,7 +733,9 @@ self.createWorldEntityBridge = function ({ ex, memory, post, playerReplica, onPl
       const vehicle = attachment ? replicas.get(attachment.entity_id)?.handle : 0;
       const seatKey = attachmentKey(entity);
       const correctSeat = attachment && seatedAt(handle, vehicle, attachment.seat);
-      if (vehicle && !correctSeat && !departing.has(handle)) ex.mpSetPedIntoVehicle?.(handle, vehicle, seatNumber(attachment.seat));
+      if (vehicle && !correctSeat && !departing.has(handle) && !npcDeparting.has(handle)) {
+        ex.mpSetPedIntoVehicle?.(handle, vehicle, seatNumber(attachment.seat));
+      }
       if (entity.player_id === packet.client_id) {
         if (!attachment) lastSeat = null;
         else if (seatedAt(handle, vehicle, attachment.seat)) lastSeat = seatKey;

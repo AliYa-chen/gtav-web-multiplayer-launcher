@@ -49,11 +49,11 @@ Pursuit uses the existing pedestrian navigation, blocked-route handling, and own
 
 ### Compatibility and remaining scope
 
-This is a server-only change compatible with the existing launcher 0.2.16 client bridge. It does not require a launcher rebuild, engine adaptation, resource extraction, or writes to game resources. Existing independent world data remains in place.
+The original 0.4.4 perception update was server-only and compatible with the launcher 0.2.16 bridge. The later local 0.4.7 damage catalogue requires launcher 0.2.19. Neither change writes to game resources; existing independent world data remains in place.
 
-NPC weapons retain the simplified 1,500 ms cooldown and 10-point damage model. Full field-of-view angles, cover selection, tactical maneuvers/formations, dynamic vehicle occlusion, full-map collision/navigation, and broader police dispatch are unfinished. Static collision and pedestrian navigation remain limited to the existing spawn-area coverage. This update does not claim native GTA Online behavior or complete gameplay synchronization.
+NPC weapons retain the simplified 1,500 ms simulation-report cooldown. Local server 0.4.7 removes the fixed 10-point damage: the confirmed weapon now uses original damage, player/NPC modifiers and range falloff, with final obstruction checks. See [damage sources](weapon-damage.md). Full field-of-view angles, cover selection, tactical maneuvers/formations, dynamic vehicle occlusion, full-map collision/navigation, and broader police dispatch are unfinished. Static collision and pedestrian navigation remain limited to the existing spawn-area coverage.
 
-The README marks only confirmed sight, remembered-position pursuit, and response-scoped sighting exchange as complete. Current validation evidence belongs in the [0.4.4 release notes](../release-notes/server-v0.4.4.md). The release workflow deploys US experimental before US main and records actual results; China deployment requires separate explicit authorization.
+The README marks only confirmed sight, remembered-position pursuit, and response-scoped sighting exchange as complete. Perception validation is recorded in the [0.4.4 release notes](../release-notes/server-v0.4.4.md); the local damage checks are in the [0.4.7 notes](../release-notes/server-v0.4.7.md). The release workflow deploys US experimental before US main and records actual results; China deployment requires separate explicit authorization.
 
 ---
 
@@ -106,8 +106,8 @@ The README marks only confirmed sight, remembered-position pursuit, and response
 
 ### 兼容与剩余范围
 
-本轮只修改服务端，兼容启动器 0.2.16 的现有客户端桥。不需要重新构建启动器、适配引擎、提取资源或写入玩家游戏目录。已有独立世界数据保持原样。
+原 0.4.4 感知更新只修改服务端，兼容启动器 0.2.16 的客户端桥；后续本地 0.4.7 伤害目录需要启动器 0.2.19。两次改动均不写入玩家游戏资源，已有独立世界数据保持原样。
 
-NPC 武器仍采用 1,500 毫秒冷却和 10 点伤害的简化模型。完整视野角度、掩体选择、战术机动/队形、动态车辆遮挡、全地图碰撞/导航和扩大警方调度范围仍未完成。静态碰撞与步行导航继续限于已有出生区覆盖。本轮不宣称还原原 GTA Online 行为或完成真实玩法同步。
+NPC 武器仍保留 1,500 毫秒的模拟报告冷却。本地服务端 0.4.7 移除固定 10 点伤害，改用已确认武器的原版伤害、玩家/NPC 系数及距离衰减，并保留最终遮挡检查。见[伤害来源](weapon-damage.md#简体中文)。完整视野角度、掩体选择、战术机动/队形、动态车辆遮挡、全地图碰撞/导航和扩大警方调度范围仍未完成。静态碰撞与步行导航继续限于已有出生区覆盖。
 
-README 仅将已确认视线、记忆位置追踪和同一响应内目击共享标为完成。本轮实际验证记录见 [0.4.4 更新说明](../release-notes/server-v0.4.4.md)。既有工作流按美国实验、正式顺序部署并记录实际结果；中国线路需要另行明确授权。
+README 仅将已确认视线、记忆位置追踪和同一响应内目击共享标为完成。感知验证见 [0.4.4 更新说明](../release-notes/server-v0.4.4.md)，本地伤害检查见 [0.4.7 更新说明](../release-notes/server-v0.4.7.md)。既有工作流按美国实验、正式顺序部署并记录实际结果；中国线路需要另行明确授权。

@@ -49,7 +49,8 @@ if (mode === 'full') {
           socket.send(JSON.stringify({ type: 'hello', name: 'Release health check', capabilities: [
             'combat', 'actions', 'combat_feedback', 'weapon_rules', 'world_v2', 'entity_batch',
             'melee_events', 'world_environment', 'shared_law', 'server_ai', 'projectiles',
-            'action_queue', 'session_policy', 'physics_queries'] }));
+            'action_queue', 'session_policy', 'physics_queries', 'actions_v2',
+            'equipment_v1', 'ped_pose', 'lag_compensation'] }));
         } else if (value.type === 'profile') {
           assert.equal(typeof value.entity_id, 'string');
           assert.equal(typeof value.client_id, 'string');

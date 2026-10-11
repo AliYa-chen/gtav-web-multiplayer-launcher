@@ -25,7 +25,7 @@ Click a video preview to watch on YouTube.
 - Public-session endpoints, names, announcements, and download metadata come from the [configuration API](https://oss.2t.hk/gtav/). Public server addresses are not compiled into the client.
 - A standalone Java 17+ server owns player/entity identity, seats, ownership leases, combat decisions, respawning, population, weather, and law rules. Authorized client engines execute assigned native movement and vehicle simulation.
 
-**Component versions: launcher 0.2.18; server 0.4.6-world-experimental.** This release fixes short-step remote locomotion, dropped firing intents, unobstructed projectile expiry, and vehicle seat/destruction lifecycle. See [core interactions and FiveM source comparison](docs/core-interactions.md), [native cloud entry](docs/native-cloud-entry.md) and [automated releases](docs/releases.md).
+**Versions: launcher 0.2.19; server 0.4.7-world-experimental.** This release adds validated native action/phase/blend transport, original PED hit components, ordinary armour and protective head props, bounded rewind, server-owned ammunition/reloads/pickups and continuous gas exposure. It also retains repeated-shot, seat, sticky and death-presentation fixes. Full P0 remains incomplete; see the [next-release work](docs/p0-next-release.md). See [damage sources and limits](docs/weapon-damage.md), the [launcher notes](release-notes/launcher-v0.2.19.md), [server notes](release-notes/server-v0.4.7.md), [core interactions](docs/core-interactions.md), [further FiveM references](docs/fivem-interactions-followup.md) and [automated releases](docs/releases.md).
 
 Multiplayer remains experimental. Static collision and pedestrian navigation cover roughly **600 × 600 metres around the test spawn**, not the whole map. There is no complete server-side RAGE physics runtime or migration of every single-player script, tool, mission, or vehicle weapon. This uses a custom protocol and does not implement native GTA Online or FiveM compatibility. Protocol tests do not establish complete gameplay synchronization; `game_sync` and `native_clone_transport` remain false.
 
@@ -43,19 +43,21 @@ Multiplayer remains experimental. Static collision and pedestrian navigation cov
 | Foundation | ✅ | Windows/macOS release packages, public source, MIT License, and bilingual development/integration guides. |
 | P0 — urgent stability | ✅ | Remove the identified fullscreen-glow crash path for synchronized rockets/grenades in 0.2.16; use bounded ordinary model markers and avoid native explosion replay. [Fix details](docs/explosive-rendering.md). |
 | P0 — entry experience | ✅ | Original-game cloud/camera entry with a random 5–10 second sky hold, snapshot/avatar/collision gates, server ACK, retry/cancel and input recovery; automated checks passed. [Scope](docs/native-cloud-entry.md). |
-| P0 — character interactions | ✅ | Sample-based short-step locomotion, bounded stop timing, shortest-angle heading, action precedence and lifecycle resets. [Implementation and limits](docs/core-interactions.md#players-short-steps-and-action-priority). |
-| P0 — weapon interactions | ✅ | Bounded client shot queues, current-aim sampling and weapon range; fix physical projectiles disappearing on an unobstructed static-only query. |
-| P0 — vehicle interactions | ✅ | Preserve driver movement allowance during passenger changes; confirmed destruction releases occupants and simulation ownership. |
-| P0 — character actions | ❌ | Moving aim/strafe blending, cover, rolling, climbing, swimming and complete ragdoll synchronization. |
-| P0 — combat detail | ❌ | Verified hit components, armour, lag compensation, authoritative ammunition/reloads and pickups. |
+| P0 — character interactions | ✅ | Sample-based short-step locomotion, combined movement/aim, bounded stopping, shortest-angle heading and native task/lifecycle resets. [Implementation and limits](docs/core-interactions.md#players-short-steps-and-action-priority). |
+| P0 — weapon interactions | ✅ | Bounded shot queues and collision recovery; original metadata for supported bullet, basic-melee and discrete blast damage, with player/NPC modifiers. Sticky charges follow confirmed shared characters and expire on parent lifecycle changes. Hit, damage and kill popups are removed. [Scope](docs/weapon-damage.md). |
+| P0 — vehicle interactions | ✅ | Preserve driver movement allowance, reconcile established native NPC exits and release occupants/ownership on destruction. Three models add 1,512 verified contact triangles, 15 conservative unknown bounds and moving-vehicle sticky following. [Scope](docs/vehicle-damage.md). |
+| P0 — death presentation | ✅ | Original cosmetic blood on confirmed health-loss edges, player/NPC native death-task preservation and the local player's death-camera shake/depth-of-field effect. |
+| P0 — character actions | ❌ | Native action/compatible phase/blend, cover aim, same-ladder progress and living-ragdoll presentation are implemented. Complete networks/transitions, climb/vault attachment and corpse pose remain [deferred](docs/p0-next-release.md). [Current scope](docs/character-actions.md). |
+| P0 — combat detail | ❌ | Original rigid-part hits, ordinary armour/head-prop protection, 250 ms rewind, server ammunition/reload tokens, supplies and continuous gas are implemented. Persistent burning and complete native damage branches remain [deferred](docs/p0-next-release.md). [Current scope](docs/combat-precision.md). |
 | Research foundation | ✅ | REA/static inventory and 22 YSC structures verified; script behavior/runtime compatibility remains unproven. [Evidence](docs/rea-online-feasibility.md). |
 | P1 — AI and world coverage | ✅ | Gate NPC combat on confirmed line of sight, pursue remembered positions, and share sightings within the same police response; shared sightings do not authorize shooting. [Scope and limits](docs/npc-perception.md). |
 | P1 — AI and world coverage | ❌ | Complete NPC weapon behavior, field of view, cover selection, and tactical coordination. |
 | P1 — AI and world coverage | ❌ | Expand collision/navigation coverage and police dispatch beyond the current local area toward the full map. |
-| P2 — vehicles and equipment | ❌ | Validate model-specific vehicle hit geometry, then synchronize bullet/blast damage and tyres, windows, doors and fuel tanks; add repairs and terrain-safe exits. |
+| P2 — vehicles and equipment | ❌ | Complete all-model/component geometry, bullet/blast vehicle damage, tyres, windows, doors, fuel tanks, fire/explosion rules, repairs and terrain-safe exits. Current engine/body reports remain lease-checked client candidates. |
 | P2 — vehicles and equipment | ❌ | Add server-owned inventory, weapon/item pickups, ammunition consumption, and armor. |
 | P3 — tools and special weapons | ❌ | Implement fuel trails, fire extinguishers, fire propagation, night vision, and stun effects. |
-| P3 — tools and special weapons | ❌ | Support sticky bombs on moving vehicles, mounted vehicle weapons, and their permissions. |
+| P3 — tools and special weapons | ❌ | Complete bone/component sticky attachments, all-model vehicle coverage, mounted weapons and their permissions. |
+| P3 — death presentation | ❌ | Complete scripted overhead/pull-away death camera and general ragdoll synchronization. |
 | P4 — public interactions and events | ❌ | Add shared item use, scene occupancy, and common interaction rules. |
 | P4 — common free-mode lifecycle | ❌ | Session entry/exit, character/world readiness and shared event lifetime; inspect `freemode` as a dependency reference, not an executable Java script. |
 | P4 — cooperative mission framework | ❌ | Original server task definitions, instance membership, objective revisions, deadlines, late join and phase recovery; `fm_mission_controller` is an audited candidate. |
@@ -83,6 +85,8 @@ Current limits remain eight players per process, 256 world entities and approxim
 ## How multiplayer works
 
 The original game WASM is player-provided. This project creates an isolated adapted runtime, connects it to a project-owned JavaScript synchronization bridge, and uses a Java server to decide shared world state and rules. Python scripts audit/build the adaptation; packaged clients reproduce it in Rust without a Python dependency. Ordinary feature development mostly changes JavaScript and Java; new engine-facing capabilities require additional native-interface analysis.
+
+Story/sandbox use an offline copy identical to the original; public sessions use the launcher's adapted online copy. The four owned hooks now build from WAT source. A local recovery tool exports full online WAT plus 91,111 named-function and 298 multiplayer-interface indexes, with standard-section round-trip checks. Original C++ source is not recovered. See [engine source and extension workflow](docs/online-engine-source.md).
 
 See [architecture, builds, and maintenance](docs/multiplayer-development.md) or [website integration](docs/website-integration.md) for the implementation and extension workflow.
 

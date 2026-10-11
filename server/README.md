@@ -1,4 +1,12 @@
-# GTA V 统一世界实验服务端 0.4.6-world-experimental
+# GTA V 统一世界实验服务端 0.4.7-world-experimental
+
+## 0.4.7：原版伤害、精细命中与装备权威
+
+本版按原版武器、近战动作和爆炸元数据计算伤害，新增十种角色的 21 个真实刚性部位、普通护甲与头部道具保护、最多 250 毫秒战斗历史、服务端弹药/弹匣/换弹令牌、五个共享补给点和持续毒气曝光。已确认车体/角色黏弹跟随及受租约校验 NPC 离车继续保留；三种车体共 1,512 个三角形和 15 个未知范围，覆盖仍不完整。
+
+需要启动器 0.2.19，以及 `world_v2`、`actions_v2`、`equipment_v1`、`ped_pose` 能力；旧客户端加入前明确拒绝。服务端 `world-data/ped-collision.json` 必须由只读导出器独立生成并通过版本校验，缺失时返回 `server_geometry_unavailable`；车体数据为 `vehicle-models.json`。派生几何不提交、不进入 JAR/Release，常规 JAR 更新保留现有世界数据。
+
+完整动作网络、攀爬附着、尸体逐骨骼同步、持续燃烧接入、完整近战/爆炸/载具物理仍未完成。`Burning` 和 `FireCatalog` 是已核验但未接入战局的准备模块，不能当作已启用火焰玩法。详见[本版说明](../release-notes/server-v0.4.7.md#简体中文)、[精细战斗](../docs/combat-precision.md#简体中文)、[装备权威](../docs/equipment-authority.md#简体中文)与[下版本计划](../docs/p0-next-release.md#简体中文)。以下为历史版本记录。
 
 ## 0.4.6：武器与载具交互
 

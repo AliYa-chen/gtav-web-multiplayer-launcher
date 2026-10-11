@@ -16,6 +16,8 @@ self.prepareMultiplayerBridge = function (imports) {
   return function bind(instance) {
     const ex = instance.exports;
     const memory = imports.env.memory;
+    const pedPoseSampler = self.createPedPoseSampler?.({ ex, memory });
+    const ragdollPose = self.createRagdollPoseBridge?.({ ex, memory });
     const CAPACITY = 512 * 1024;
     // 公共战局测试区：所有玩家使用同一中心点，按顺序错开两米防止重叠。
     const TEST_SPAWN = [711.5, -1088.1, 22.4];
@@ -37,6 +39,8 @@ self.prepareMultiplayerBridge = function (imports) {
     const consumedControls = new Set();
     const consumedNotices = new Set();
     const authorityStates = new Map();
+    const damagePresentation = new Map();
+    let damageWorld = '', deathCameraLife = '';
     const weaponRequests = new Map();
     // 已在此版本注册目录核实的单机事件入口。核心加载/输入/暂停脚本继续运行。
     const LOCAL_EVENT_SCRIPTS = new Set(['respawn_controller', 'randomchar_controller', 'buddydeathresponse',
@@ -66,6 +70,13 @@ self.prepareMultiplayerBridge = function (imports) {
     let modelDefaultsPending = false;
     let noticeBuffer = 0, lastNoticeAttempt = -Infinity, nativeHudAvailable = null;
     let shotSampleAt = -Infinity, weaponSample = null, pendingShots = [];
+    function discardPendingShots(keep = () => false) {
+      pendingShots = pendingShots.filter(shot => {
+        if (keep(shot)) return true;
+        if (Number.isSafeInteger(shot.prediction_id)) equipmentBridge?.cancelPrediction(shot.prediction_id);
+        return false;
+      });
+    }
     let worldReadinessAt = -Infinity, worldReadinessSignature = '';
     const entryCamera = self.createOnlineEntryCamera?.({ ex, memory });
     let entryStatusAt = -Infinity, entrySignature = '', entryControlsHeld = false, entryFrozenPed = 0, entryCompletedKey = '';
@@ -89,7 +100,7 @@ self.prepareMultiplayerBridge = function (imports) {
       if (entryFrozenPed && entryFrozenPed !== ped && ex.mpExists(entryFrozenPed)) ex.mpFreeze?.(entryFrozenPed, 0);
       entryFrozenPed = ped; ex.mpFreeze?.(ped, 1);
       ex.mpSetPlayerControl?.(ex.mpPlayerId(), 0, 0); entryControlsHeld = true;
-      pendingShots = []; weaponSample = null;
+      discardPendingShots(); weaponSample = null;
     }
     function updateEntry(now, canStart = false) {
       if (!entryEnabled()) return;
@@ -132,6 +143,8 @@ self.prepareMultiplayerBridge = function (imports) {
     const sessionUI = self.createNativeSessionUI?.({ ex, memory });
     const environmentBridge = self.createWorldEnvironmentBridge?.({ ex, memory, post: (value) => post(value) });
     const collisionBridge = self.createWorldCollisionBridge?.({ ex, memory, post: (value) => post(value) });
+    const characterActions = self.createCharacterActionBridge?.({ ex, memory });
+    const equipmentBridge = self.createEquipmentBridge?.({ ex, memory, post: (value) => post(value) });
     const worldEntities = self.createWorldEntityBridge?.({ ex, memory, post: (value) => post(value),
       playerReplica: (id) => replicas.get(id)?.ped || 0,
       onPlayerAnimation: (id, now, duration) => {
@@ -181,6 +194,11 @@ self.prepareMultiplayerBridge = function (imports) {
     // GTA 人形角色保留约 100 点内部生命基线；战局血量为 0～200。
     // 存活状态保持在基线之上，只有服务端宣布死亡时写入 native 0。
     const nativeCombatHealth = (health) => health > 0 ? 100 + Math.max(1, Math.round(health / 2)) : 0;
+    function applyArmour(ped, armour) {
+      if (!ped || !Number.isFinite(armour) || armour < 0 || armour > 100 || !ex.mpSetArmour) return;
+      const displayed = Math.ceil(armour);
+      if (!ex.mpGetArmour || ex.mpGetArmour(ped) !== displayed) ex.mpSetArmour(ped, displayed);
+    }
     function view() { return new DataView(memory.buffer); }
     function vector(offset, position) {
       const data = view();
@@ -235,8 +253,74 @@ self.prepareMultiplayerBridge = function (imports) {
       const update = { id, revision: Number.isSafeInteger(event.revision) ? event.revision : 0 };
       if (event.type === 'death') Object.assign(update, { health: 0, alive: false });
       else if (Number.isInteger(event.health)) Object.assign(update, { health: event.health, alive: event.health > 0 });
+      if (Number.isFinite(event.armour)) update.armour = event.armour;
       if (event.type === 'respawn' && validPosition(event.position)) update.spawn = [...event.position];
       mergeAuthority(update);
+    }
+    function clearDeathCameraEffect() {
+      if (!deathCameraLife) return;
+      try { ex.mpDeathCameraEffect?.(0); deathCameraLife = ''; }
+      catch { /* Retry cosmetic cleanup; never stop life reconciliation. */ }
+    }
+    function clearDamagePresentation() {
+      clearDeathCameraEffect();
+      damagePresentation.clear(); damageWorld = '';
+    }
+    function updateDamagePresentation(localPed) {
+      const worldKey = packet.client_id + ':' + (packet.world?.world_epoch || 'legacy');
+      if (damageWorld !== worldKey) { clearDamagePresentation(); damageWorld = worldKey; }
+      const active = new Set();
+      let localLife = null;
+      function observe(id, generation, ped, value) {
+        if (!Number.isInteger(value?.health) || value.health < 0 || value.health > 200
+            || !Number.isSafeInteger(value.revision) || value.revision < 0) return;
+        active.add(id);
+        const life = worldKey + ':' + id + ':' + generation;
+        const previous = damagePresentation.get(id);
+        if (id === packet.client_id) localLife = value.alive === false || value.health === 0 ? life : '';
+        if (previous?.life === life && value.revision < previous.revision) return;
+        const handleReady = Boolean(ped && ex.mpExists(ped));
+        const freshLife = !previous || previous.life !== life;
+        const freshHandle = !freshLife && previous.ped !== ped;
+        if (handleReady && (freshLife || freshHandle || (previous.alive === false && value.health > 0))) {
+          try { ex.mpClearVisibleDamage?.(ped); } catch { /* A cosmetic resource can still be loading. */ }
+        }
+        // A baseline is not a new hit. A generation or native-handle replacement
+        // must not replay old wounds; later authoritative health edges can draw
+        // one original blood decal. Zone 0 is a cosmetic torso default, never a
+        // claimed hit component, bone identity or damage multiplier.
+        const hurt = !freshLife && !freshHandle && value.revision > previous.revision
+          && value.health < previous.health;
+        if (handleReady && hurt) {
+          try { ex.mpApplyCosmeticTorsoBlood?.(ped, 0, .5, .5, 0); } catch { /* Health/death remains authoritative. */ }
+        }
+        damagePresentation.set(id, { life, ped, health: value.health, revision: value.revision,
+          alive: value.alive !== false && value.health > 0 });
+      }
+      if (packet.world?.ready) {
+        for (const entity of packet.world.entities || []) {
+          if (entity.kind !== 'ped' || !entity.components?.combat) continue;
+          const id = entity.player_id || entity.entity_id;
+          const baseline = { ...entity.components.combat, revision: entity.combat_revision ?? entity.revision };
+          const authority = authorityStates.get(id);
+          const value = authority && authority.revision >= baseline.revision ? authority : baseline;
+          observe(id, entity.generation, entity.player_id === packet.client_id ? localPed
+            : entity.player_id ? replicas.get(id)?.ped || 0 : worldEntities?.entityHandle(entity.entity_id) || 0, value);
+        }
+      } else {
+        for (const [id, value] of authorityStates) if (id === packet.client_id || replicas.has(id)) {
+          observe(id, 'legacy', id === packet.client_id ? localPed : replicas.get(id)?.ped || 0, value);
+        }
+      }
+      for (const id of damagePresentation.keys()) if (!active.has(id)) damagePresentation.delete(id);
+      if (!localLife) clearDeathCameraEffect();
+      else if (localLife && localPed && ex.mpExists(localPed) && localLife !== deathCameraLife) {
+        clearDeathCameraEffect();
+        if (!deathCameraLife) {
+          try { ex.mpDeathCameraEffect?.(1); deathCameraLife = localLife; }
+          catch { /* Retry the intro effect without interrupting native death. */ }
+        }
+      }
     }
     function actualWeapon(ped) {
       if (ex.mpGetCurrentPedWeapon) {
@@ -284,6 +368,7 @@ self.prepareMultiplayerBridge = function (imports) {
       return fallback;
     }
     function actionsFor(ped) {
+      if (characterActions) return characterActions.sample(ped, Boolean(ex.mpIsAiming?.(ex.mpPlayerId())));
       return { aiming: Boolean(ex.mpIsAiming?.(ex.mpPlayerId())), reloading: Boolean(ex.mpIsReloading?.(ped)),
         jumping: Boolean(ex.mpIsJumping?.(ped)), ducking: Boolean(ex.mpIsDucking?.(ped)),
         sprinting: Boolean(ex.mpIsSprinting?.(ped)) };
@@ -293,6 +378,21 @@ self.prepareMultiplayerBridge = function (imports) {
       return Number.isInteger(rule?.cooldown_ms) && rule.cooldown_ms >= 1 && rule.cooldown_ms <= 10000
         ? Math.max(10, rule.cooldown_ms) : 50;
     }
+    function rebaseWeaponSample(ped, now) {
+      // Capture corrected counters immediately. Waiting one callback would lose
+      // its real shot, while a null baseline could replay a still-high pulse.
+      weaponSample = null;
+      if (!ped || !ex.mpExists(ped)) return;
+      const weapon = actualWeapon(ped).hash;
+      if (!weapon) return;
+      let clip = null;
+      if (ex.mpGetAmmoInClip?.(ped, weapon | 0, BigInt(scratch + 116))) clip = view().getInt32(scratch + 116, true);
+      const total = ex.mpGetAmmo?.(ped, weapon | 0);
+      weaponSample = { ped, weapon, shooting: Boolean(ex.mpIsShooting(ped)),
+        clip: Number.isInteger(clip) && clip >= 0 ? clip : null,
+        ammo: Number.isInteger(total) && total >= 0 ? total : null,
+        firedAt: now, pendingDecreases: [], waitingAmmo: [], waitingClip: [] };
+    }
     // 每个有效 owner 回调只读取本地武器脉冲；较重的实体更新仍每 40ms 执行。
     function sampleShots(now) {
       if (now - shotSampleAt < 5 || !packet?.connected || !initialPlacement || modelRestore || !entryFinished()) {
@@ -300,7 +400,7 @@ self.prepareMultiplayerBridge = function (imports) {
         // intent captured before it. Never carry a pre-disconnect shot into a
         // resumed world with the same client id.
         if (!packet?.connected || (sessionId && sessionId !== packet.client_id)) {
-          pendingShots = []; weaponSample = null;
+          discardPendingShots(); weaponSample = null;
         }
         return;
       }
@@ -308,7 +408,7 @@ self.prepareMultiplayerBridge = function (imports) {
       const authority = authorityStates.get(packet.client_id);
       const ped = ex.mpGetPlayerPed(-1);
       if (!ped || authority?.alive === false || (ex.mpGetModel(ped) >>> 0) !== avatarTarget) {
-        weaponSample = null; pendingShots = []; return;
+        weaponSample = null; discardPendingShots(); return;
       }
       const { hash: weapon } = actualWeapon(ped);
       const rule = (packet.weapon_rules || []).find(value => value.weapon === weapon);
@@ -338,14 +438,18 @@ self.prepareMultiplayerBridge = function (imports) {
       const waitingClip = same ? weaponSample.waitingClip.filter(at => now - at <= 300) : [];
       const matchedAmmo = Math.min(ammoDelta, waitingAmmo.length), matchedClip = Math.min(clipDelta, waitingClip.length);
       waitingAmmo.splice(0, matchedAmmo); waitingClip.splice(0, matchedClip);
-      const freshAmmo = reloading ? 0 : ammoDelta - matchedAmmo, freshClip = reloading ? 0 : clipDelta - matchedClip;
+      // A reload flag must not suppress a concurrent native firing pulse or
+      // total-ammo consumption while shooting. The clip reset alone remains
+      // ambiguous during reload and does not establish another shot.
+      const freshAmmo = reloading && !shooting ? 0 : ammoDelta - matchedAmmo;
+      const freshClip = reloading ? 0 : clipDelta - matchedClip;
       const decrease = Math.max(freshAmmo, freshClip);
       for (let i = 0; i < Math.min(8, freshClip - freshAmmo); i++) waitingAmmo.push(now);
       for (let i = 0; i < Math.min(8, freshAmmo - freshClip); i++) waitingClip.push(now);
       if (waitingAmmo.length > 8) waitingAmmo.splice(0, waitingAmmo.length - 8);
       if (waitingClip.length > 8) waitingClip.splice(0, waitingClip.length - 8);
       const decreased = decrease > 0;
-      const rising = !reloading && shooting && (!same || !weaponSample.shooting);
+      const rising = shooting && (!same || !weaponSample.shooting);
       const priorFiredAt = same ? weaponSample.firedAt : -Infinity;
       const pendingDecreases = same ? weaponSample.pendingDecreases.filter(at => now - at <= 300) : [];
       // 射击位可能比扣弹提前；记住尚未扣弹的已发送脉冲，匹配后续计数而非再算一发。
@@ -369,8 +473,15 @@ self.prepareMultiplayerBridge = function (imports) {
       // 只提交当前瞄准方向与目录射程；命中与世界遮挡均由服务端重新验证。
       const ray = cameraRay(Number.isFinite(rule?.range) && rule.range > 0 ? Math.min(1500, rule.range) : 100);
       if (!validPosition(ray.origin) || !validPosition(ray.target)) return;
-      for (let index = 0; index < count; index++) pendingShots.push({ at: now, ped, event: { ...ray, weapon } });
-      if (pendingShots.length > 8) pendingShots.splice(0, pendingShots.length - 8);
+      for (let index = 0; index < count; index++) {
+        const prediction_id = packet.equipment_v1 ? equipmentBridge?.predictShot(weapon) : null;
+        pendingShots.push({ at: now, ped, event: { ...ray, weapon },
+          ...(Number.isSafeInteger(prediction_id) ? { prediction_id } : {}) });
+      }
+      if (pendingShots.length > 8) {
+        const discarded = new Set(pendingShots.slice(0, pendingShots.length - 8));
+        discardPendingShots(shot => !discarded.has(shot));
+      }
     }
     function requestModel(hash, now) {
       if (now - (requested.get(hash) ?? -Infinity) >= 1000) {
@@ -518,6 +629,7 @@ self.prepareMultiplayerBridge = function (imports) {
       // 这个 native 内部读取 FindPlayerPed；没有有效角色时保留事件，不能调用空角色。
       let ped = ex.mpGetPlayerPed(-1);
       if (!ped || !validPosition(position)) return null;
+      clearDeathCameraEffect();
       if (ex.mpResurrectLocalPlayer) {
         ex.mpResurrectLocalPlayer(vector(0, position), heading, 0, 0, 0, 0, 0);
       } else if (ex.mpResurrect) ex.mpResurrect(ped);
@@ -525,6 +637,7 @@ self.prepareMultiplayerBridge = function (imports) {
       if (!ped) return null;
       if (ex.mpRevive) ex.mpRevive(ped);
       if (ex.mpClearTasksImmediately) ex.mpClearTasksImmediately(ped);
+      try { ex.mpClearVisibleDamage?.(ped); } catch { /* Recovery must not depend on a cosmetic effect. */ }
       ex.mpSetInvincible(ped, 1);
       ex.mpSetHealth(ped, nativeCombatHealth(health), 0);
       ex.mpSetCoordsNoOffset(ped, vector(0, position), 1, 1, 1);
@@ -615,6 +728,18 @@ self.prepareMultiplayerBridge = function (imports) {
       }
       if (replica) { replicaRemovals++; lifecycle(reason); }
     }
+    function resetReplicaTasks(replica) {
+      // A new generation, seat or teleport cannot inherit the previous native
+      // task stack. Reset both that stack and every cache that could suppress
+      // installation of the new authoritative pose.
+      ex.mpClearTasksImmediately?.(replica.ped);
+      characterActions?.reset(replica);
+      if (replica.actions?.ducking) ex.mpSetDucking?.(replica.ped, 0);
+      replica.actions = null; replica.motion = null; replica.moving = false;
+      replica.moveAiming = false; replica.moveDirection = null; replica.moveSpeed = 0;
+      replica.animationUntil = -Infinity; replica.behaviorAt = -Infinity;
+      replica.idleAt = -Infinity; replica.aimAt = -Infinity; replica.reloadActive = false;
+    }
     function ensureReplicaBlip(id, replica, now) {
       if (!ex.mpAddBlipForEntity || now - (replica.blipCheckedAt ?? -Infinity) < 500) return;
       replica.blipCheckedAt = now;
@@ -688,6 +813,9 @@ self.prepareMultiplayerBridge = function (imports) {
       const dead = state.alive === false || state.health <= 0;
       if (dead) {
         if (!replica.dead || !ex.mpIsDead(replica.ped, 0) || ex.mpGetHealth(replica.ped) !== 0) {
+          // Remove the live locomotion task before the original health-zero
+          // death event. Once dead, retain that native death/ragdoll task.
+          if (!ex.mpIsDead(replica.ped, 0)) resetReplicaTasks(replica);
           ex.mpFreeze(replica.ped, 0);
           ex.mpSetInvincible(replica.ped, 0);
           if (ex.mpSetCanRagdoll) ex.mpSetCanRagdoll(replica.ped, 1);
@@ -707,20 +835,19 @@ self.prepareMultiplayerBridge = function (imports) {
           native_dead: Boolean(ex.mpIsDead(replica.ped, 0)) });
         if (ex.mpResurrect) ex.mpResurrect(replica.ped);
         if (ex.mpRevive) ex.mpRevive(replica.ped);
-        if (ex.mpClearTasksImmediately) ex.mpClearTasksImmediately(replica.ped);
+        resetReplicaTasks(replica);
         ex.mpSetInvincible(replica.ped, 1); ex.mpFreeze(replica.ped, 1);
         ex.mpSetHealth(replica.ped, state.server_authority ? nativeCombatHealth(state.health) : state.health, 0);
         if (ex.mpIsDead(replica.ped, 0)) { replica.recovering = true; return; }
         replica.dead = false; replica.recovering = false; replica.health = null; replica.position = [...state.position];
-        replica.actions = null; replica.motion = null; replica.moving = false;
-        replica.animationUntil = -Infinity; replica.behaviorAt = -Infinity;
-        replica.idleAt = -Infinity; replica.heading = state.heading;
-        replica.reloadActive = false;
+        replica.heading = state.heading;
         ex.mpSetCoordsNoOffset(replica.ped, vector(72, state.position), 1, 1, 1);
         lifecycle('replica_authority_restored');
       }
-      // 无敌只阻止扣血，不会退出已经触发的 ragdoll；存活替身保持可见站姿。
-      if (ex.mpSetCanRagdoll && (!replica.ragdollProtected || ex.mpIsRagdoll?.(replica.ped))) {
+      const physicalAction = !state.attachment && Boolean(characterActions?.physical(state.actions));
+      // Accepted ragdoll owns the living pose. Unrelated local impacts may not
+      // start it; authoritative death follows the separate path above.
+      if (!state.actions?.ragdoll && ex.mpSetCanRagdoll && (!replica.ragdollProtected || ex.mpIsRagdoll?.(replica.ped))) {
         ex.mpSetCanRagdoll(replica.ped, 0); replica.ragdollProtected = true;
       }
       ex.mpSetInvincible(replica.ped, 1);
@@ -728,9 +855,17 @@ self.prepareMultiplayerBridge = function (imports) {
       // 挂接乘客跟随车辆，死亡时另行解除冻结；冻结不会取消已安装的动画任务。
       ex.mpBlockEvents(replica.ped, 1);
       const attachedVehicle = state.attachment ? worldEntities?.entityHandle(state.attachment.entity_id) : 0;
-      const seated = Boolean(attachedVehicle && ex.mpGetVehiclePedIsIn?.(replica.ped, 0) === attachedVehicle);
+      const nativeVehicle = ex.mpGetVehiclePedIsIn?.(replica.ped, 0) || 0;
+      const seated = Boolean(attachedVehicle && nativeVehicle === attachedVehicle);
+      const seatIndex = state.attachment?.seat === 'driver' ? -1 : Number(String(state.attachment?.seat).split(':')[1]);
+      const seatReady = seated && Number.isInteger(seatIndex) && seatIndex >= -1 && seatIndex <= 15
+        && ex.mpGetPedInSeat?.(attachedVehicle, seatIndex, 0) === replica.ped;
+      // The world bridge releases and corrects native seats after this pass.
+      // Wait for the exact seat, or a completed exit: otherwise Leave/SetPed
+      // would replace a task whose reload/jump edge we had already consumed.
+      replica.poseBlocked = state.attachment ? !seatReady : Boolean(nativeVehicle);
       // 服务器已占座不代表本机车辆资源已就绪；等待实际挂接期间仍禁止自主移动。
-      ex.mpFreeze(replica.ped, seated ? 0 : 1);
+      ex.mpFreeze(replica.ped, seated || (!replica.poseBlocked && physicalAction) ? 0 : 1);
       if (state.weapon) {
         const equipped = actualWeapon(replica.ped);
         // Give/Select 无成功返回，资源加载或其他任务收枪后需验证实际装备并限频重试。
@@ -749,13 +884,14 @@ self.prepareMultiplayerBridge = function (imports) {
         replica.weapon = confirmed.ready ? confirmed.hash : 0;
       }
       const distance = Math.hypot(...state.position.map((value, i) => value - replica.position[i]));
-      const actions = state.actions || {};
-      const animating = now < (replica.animationUntil ?? -Infinity);
       const motionKey = state.motion_revision ?? state.seq;
       const identity = state.motion_identity ?? id;
       const attachment = state.attachment ? state.attachment.entity_id + ':' + state.attachment.seat : '';
       let motion = replica.motion;
-      if (!motion || motion.identity !== identity || motion.attachment !== attachment || distance > 20) {
+      if (motion && (motion.identity !== identity || motion.attachment !== attachment || distance > 20)) {
+        resetReplicaTasks(replica); motion = null;
+      }
+      if (!motion) {
         motion = replica.motion = { identity, attachment, key: motionKey, at: now,
           position: [...state.position], direction: [0, 0], speed: 0, until: -Infinity };
         replica.moving = false; replica.behaviorAt = -Infinity; replica.idleAt = -Infinity;
@@ -772,54 +908,81 @@ self.prepareMultiplayerBridge = function (imports) {
         }
         motion.position = [...state.position]; motion.at = now; motion.key = motionKey;
       }
+      const actions = state.actions || {};
+      const poseReady = !replica.poseBlocked;
+      if (!poseReady) {
+        // Preserve pending edges until native seating actually ends, including
+        // an asynchronous leave that spans several identical server snapshots.
+        replica.actions = null; replica.reloadActive = false;
+        replica.aimAt = -Infinity; replica.idleAt = -Infinity;
+      }
+      const animating = now < (replica.animationUntil ?? -Infinity);
+      const specialAction = Boolean(characterActions?.apply(replica, state, { now, poseReady, animating }));
+      const readyWeapon = replica.weapon === state.weapon;
+      const layeredReload = characterActions?.layeredReloadSupported === true;
+      const canMoveAim = actions.aiming && readyWeapon && validPosition(state.aim_target)
+        && Boolean(ex.mpTaskGoToCoordWhileAiming);
       // GTA keeps locomotion while firing. Blocking it here leaves a remote
       // shooter frozen while coordinates are still reconciled, which appears as
       // a sliding/teleporting torso to the observer.
-      const locomotionAllowed = !animating && !attachment
-        && !actions.aiming && !actions.reloading && !actions.jumping;
+      const locomotionAllowed = poseReady && !animating && !specialAction && !attachment
+        && (!actions.aiming || canMoveAim) && (!actions.reloading || layeredReload) && !actions.jumping;
       const moving = locomotionAllowed && now < motion.until && motion.speed > 0;
       if (locomotionAllowed && (replica.actions?.aiming || replica.actions?.reloading || replica.actions?.jumping)) {
         replica.idleAt = -Infinity;
       }
-      if (typeof actions.ducking === 'boolean' && actions.ducking !== replica.actions?.ducking && ex.mpSetDucking) ex.mpSetDucking(replica.ped, actions.ducking ? 1 : 0);
-      if (!animating && !attachment && actions.jumping && !replica.actions?.jumping && ex.mpTaskJump) ex.mpTaskJump(replica.ped, 0, 0, 0);
-      const readyWeapon = replica.weapon === state.weapon;
-      if (!animating && !actions.jumping && actions.reloading && readyWeapon && !replica.reloadActive && ex.mpTaskReloadWeapon) {
+      if (poseReady && !specialAction && typeof actions.ducking === 'boolean' && actions.ducking !== replica.actions?.ducking && ex.mpSetDucking) ex.mpSetDucking(replica.ped, actions.ducking ? 1 : 0);
+      if (poseReady && !specialAction && !animating && !attachment && actions.jumping && !replica.actions?.jumping && ex.mpTaskJump) ex.mpTaskJump(replica.ped, 0, 0, 0);
+      if (!layeredReload && poseReady && !specialAction && !animating && !actions.jumping && actions.reloading && readyWeapon && !replica.reloadActive && ex.mpTaskReloadWeapon) {
         ex.mpTaskReloadWeapon(replica.ped, 1); replica.reloadActive = true;
       } else if (!actions.reloading) replica.reloadActive = false;
-      const aimPressed = actions.aiming && !replica.actions?.aiming;
-      if (!animating && !actions.jumping && actions.aiming && readyWeapon && !actions.reloading && validPosition(state.aim_target) && ex.mpTaskAimGunAtCoord
-          && (aimPressed || now - (replica.aimAt ?? -Infinity) >= 250)) {
+      const aimPressed = actions.aiming && (!replica.actions?.aiming || replica.actions?.reloading || replica.actions?.jumping);
+      if (poseReady && !specialAction && !animating && !attachment && !moving && !actions.jumping && actions.aiming && readyWeapon && !actions.reloading && validPosition(state.aim_target) && ex.mpTaskAimGunAtCoord
+          && (aimPressed || replica.moveAiming || now - (replica.aimAt ?? -Infinity) >= 250)) {
         ex.mpTaskAimGunAtCoord(replica.ped, vector(72, state.aim_target), 500, 0, 0); replica.aimAt = now;
       }
-      replica.actions = { ...actions };
-      if (moving && ex.mpTaskGoStraight) {
+      if (poseReady) replica.actions = { ...actions };
+      if (moving && (canMoveAim || ex.mpTaskGoStraight)) {
         const directionChanged = !replica.moveDirection
           || motion.direction[0] * replica.moveDirection[0] + motion.direction[1] * replica.moveDirection[1] < .94;
-        const speed = actions.sprinting ? 3 : motion.speed;
-        if (!replica.moving || directionChanged || Math.abs(speed - (replica.moveSpeed || 0)) > .5
-            || now - replica.behaviorAt >= 300) {
-          // The native is GoToPointAndStandStill. A tiny endpoint is already in
-          // its stopping region by the time interpolation reaches it. Keep an
+        const sampledBlend = Number.isFinite(actions.move_blend) && actions.move_blend > .05 ? actions.move_blend : null;
+        const speed = sampledBlend ?? (actions.sprinting ? 3 : motion.speed);
+        if (!replica.moving || replica.moveAiming !== Boolean(canMoveAim) || directionChanged
+            || Math.abs(speed - (replica.moveSpeed || 0)) > .5
+            || now - replica.behaviorAt >= (canMoveAim ? 250 : 300)) {
+          // Plain movement uses GoToPointAndStandStill; its nearby endpoint can
+          // already be in the stopping region. Give both motion tasks an
           // animation-only target ahead while authoritative coordinates remain
           // frozen and corrected below; never extrapolate the rendered position.
           const ahead = Math.max(2, speed * .75);
           const destination = state.position.map((value, index) => index < 2
             ? Math.max(-16000, Math.min(16000, value + motion.direction[index] * ahead)) : value);
-          ex.mpTaskGoStraight(replica.ped, vector(72, destination), speed, 650, state.heading, .05);
+          if (canMoveAim) {
+            // Preserve locomotion and aim together. shoot=false is mandatory:
+            // accepted rounds use the existing zero-damage visual relay only.
+            ex.mpTaskGoToCoordWhileAiming(replica.ped, vector(72, destination), vector(24, state.aim_target),
+              speed, 0, .05, .05, 0, 0, 1, 0);
+            replica.aimAt = now;
+          } else ex.mpTaskGoStraight(replica.ped, vector(72, destination), speed, 650, state.heading, .05);
           replica.moving = true; replica.behaviorAt = now;
+          replica.moveAiming = Boolean(canMoveAim);
           replica.moveDirection = [...motion.direction]; replica.moveSpeed = speed;
         }
-      } else if (locomotionAllowed) {
+        if (Number.isFinite(actions.move_blend) && actions.move_blend > .05) {
+          ex.mpSetDesiredMoveBlend?.(replica.ped, actions.move_blend);
+        }
+      } else if (locomotionAllowed && !actions.aiming) {
         if (ex.mpTaskStandStill && (replica.moving || now - (replica.idleAt ?? -Infinity) >= 1000)) {
           ex.mpTaskStandStill(replica.ped, -1); replica.idleAt = now;
         }
-        replica.moving = false;
+        replica.moving = false; replica.moveAiming = false;
       } else {
         // Aim/reload/jump/melee/vehicle tasks own the pose until they finish.
         // Reset the walk cache so returning to motion installs a new task now.
-        replica.moving = false;
+        replica.moving = false; replica.moveAiming = false;
       }
+      if (layeredReload) characterActions.applyReload(replica, state, { poseReady, animating, readyWeapon });
+      characterActions?.applyPhases?.(replica, state);
       const amount = distance > 20 ? 1 : Math.min(1, delta / 100);
       replica.position = state.position.map((value, i) => replica.position[i] + (value - replica.position[i]) * amount);
       if (!state.attachment) {
@@ -827,17 +990,22 @@ self.prepareMultiplayerBridge = function (imports) {
         ex.mpGetEntityCoords(BigInt(scratch + 72), replica.ped, 1);
         const actual = readVector(72);
         const drift = Math.hypot(...replica.position.map((value, index) => value - actual[index]));
-        if (!validPosition(actual) || drift > .002) {
+        if (!validPosition(actual) || drift > (physicalAction ? .35 : .002)) {
           ex.mpSetCoordsNoOffset(replica.ped, vector(72, replica.position), 1, 1, drift > 20 ? 1 : 0);
         }
-        ex.mpSetVelocity?.(replica.ped, vector(72, [0, 0, 0]));
+        if (!physicalAction) ex.mpSetVelocity?.(replica.ped, vector(72, [0, 0, 0]));
+        else if (motionKey !== replica.physicalMotionKey && validPosition(state.velocity)) {
+          ex.mpSetVelocity?.(replica.ped, vector(72, state.velocity)); replica.physicalMotionKey = motionKey;
+        }
         const headingDelta = ((state.heading - replica.heading + 540) % 360) - 180;
         replica.heading = (replica.heading + headingDelta * amount + 360) % 360;
         const actualHeading = ex.mpHeading(replica.ped);
-        if (!Number.isFinite(actualHeading) || Math.abs(((replica.heading - actualHeading + 540) % 360) - 180) > .1) {
+        if (!state.actions?.ragdoll && (!Number.isFinite(actualHeading) || Math.abs(((replica.heading - actualHeading + 540) % 360) - 180) > .1)) {
           ex.mpSetHeading(replica.ped, replica.heading);
         }
       }
+      ragdollPose?.apply(replica, state, { now, poseReady });
+      if (state.server_authority) applyArmour(replica.ped, state.armour ?? 0);
       const nativeHealth = state.server_authority ? nativeCombatHealth(state.health) : state.health;
       if (ex.mpSetHealth && Number.isInteger(state.health) && ex.mpGetHealth(replica.ped) !== nativeHealth) {
         ex.mpSetHealth(replica.ped, nativeHealth, 0); replica.health = nativeHealth;
@@ -853,9 +1021,9 @@ self.prepareMultiplayerBridge = function (imports) {
           && entity.player_id !== packet.client_id && members.has(entity.player_id)).map((entity) => {
           const c = entity.components, q = c.transform.rotation;
           const heading = (Math.atan2(2 * (q[3] * q[2] + q[0] * q[1]), 1 - 2 * (q[1] ** 2 + q[2] ** 2)) * 180 / Math.PI + 360) % 360;
-          return { player_id: entity.player_id, state: { position: c.transform.position, heading, model: entity.model,
+          return { player_id: entity.player_id, state: { position: c.transform.position, velocity: c.transform.velocity, heading, model: entity.model,
             motion_revision: entity.revision, motion_identity: packet.world.world_epoch + ':' + entity.generation,
-            ...c.ped, ...(c.appearance ? { appearance: c.appearance } : {}), health: c.combat?.health ?? 200,
+            ...c.ped, ...(c.appearance ? { appearance: c.appearance } : {}), health: c.combat?.health ?? 200, armour: c.combat?.armour ?? 0,
             alive: c.combat?.alive !== false, revision: entity.combat_revision ?? entity.revision, server_authority: true,
             attachment: c.attachment } };
         });
@@ -867,7 +1035,7 @@ self.prepareMultiplayerBridge = function (imports) {
       smoothingTime = now;
       for (const peer of peers.slice(0, 32)) {
         const combat = authorityStates.get(peer.player_id);
-        updateReplica(peer.player_id, !packet.world?.ready && combat ? { ...peer.state, health: combat.health, alive: combat.alive,
+        updateReplica(peer.player_id, !packet.world?.ready && combat ? { ...peer.state, health: combat.health, armour: combat.armour ?? 0, alive: combat.alive,
           revision: combat.revision, server_authority: true } : peer.state, now, delta);
       }
       const shotAcknowledged = new Set();
@@ -909,7 +1077,7 @@ self.prepareMultiplayerBridge = function (imports) {
         // Aim replaces GoStraight in the native task stack. A visual-only shot
         // must not interrupt walking or another action on every automatic round.
         // Explicit aiming already owns its pose; use this only as an idle fallback.
-        if (!replica.moving && !replica.motion?.attachment && now >= (replica.animationUntil ?? -Infinity)
+        if (!replica.poseBlocked && !replica.moving && !replica.motion?.attachment && now >= (replica.animationUntil ?? -Infinity)
             && !replica.actions?.aiming && !replica.actions?.reloading && !replica.actions?.jumping) {
           try {
             ex.mpTaskAimGunAtCoord?.(replica.ped, vector(72, shot.event.target), 250, 0, 0);
@@ -933,6 +1101,7 @@ self.prepareMultiplayerBridge = function (imports) {
         const handler = Number(ex.mpGetCurrentHandler());
         if (Number(ex.mpGetActiveThread()) !== thread || !handler) return;
         if (stopped) {
+          if (owner?.thread === thread && owner.handler === handler) clearDeathCameraEffect();
           entryCamera?.cancel();
           try { updateEntry(now, false); if (!entryCameraStatus.cleanup_pending) releaseEntryInput(); } catch { /* Retry cleanup on its owner. */ }
           return;
@@ -956,8 +1125,12 @@ self.prepareMultiplayerBridge = function (imports) {
         if (!useOwner(thread, handler, now)) return;
         if (entryEnabled() && packet?.connected && !packet.entry.cancelled && !entryFinished()) holdEntryInput(ex.mpGetPlayerPed(-1));
         worldEntities?.renderEffects?.(packet, now);
-        sampleShots(now);
         const meleePed = ex.mpGetPlayerPed(-1);
+        if (!packet?.equipment_v1 || equipmentBridge?.ready()) sampleShots(now);
+        const changedAmmo = equipmentBridge?.tick({ packet, localPed: meleePed, now,
+          localReady: entryFinished() && initialPlacement && avatarInitialized && !avatarChangeRequested && !modelRestore
+            && Boolean(meleePed && (ex.mpGetModel(meleePed) >>> 0) === avatarTarget) });
+        if (changedAmmo) rebaseWeaponSample(meleePed, now);
         collisionBridge?.tick(packet, now, meleePed, {
           localReady: entryFinished() && initialPlacement && avatarInitialized && !avatarChangeRequested && !modelRestore,
         });
@@ -971,15 +1144,19 @@ self.prepareMultiplayerBridge = function (imports) {
         environmentBridge?.update(packet, now);
         processNotices(now);
         if (!packet?.connected) {
+          clearDamagePresentation();
           for (const replica of replicas.values()) erase(replica);
           replicas.clear();
           visualShots.clear();
           worldEntities?.clear();
           environmentBridge?.reset();
+          equipmentBridge?.reset();
           // 断线恢复同一身份时保留本地角色和位置，不重复随机换模/出生。
           return;
         }
         if (sessionId !== packet.client_id) {
+          equipmentBridge?.reset();
+          clearDamagePresentation();
           for (const replica of replicas.values()) erase(replica, 'new_session');
           replicas.clear(); retryAfter.clear();
           sessionId = packet.client_id; initialPlacement = false;
@@ -990,7 +1167,7 @@ self.prepareMultiplayerBridge = function (imports) {
           lifeOverride = null; lastAuthorityAlive = null; lastRespawnRevision = -1;
           modelMismatch = null; modelRestore = null; lastGoodLocal = null;
           modelDefaultsPending = false;
-          weaponSample = null; pendingShots = [];
+          weaponSample = null; discardPendingShots();
           authorityStates.clear();
         }
         for (const player of packet.combat || []) mergeAuthority(player);
@@ -1009,6 +1186,7 @@ self.prepareMultiplayerBridge = function (imports) {
           localReady: entryFinished() && initialPlacement && avatarInitialized && !avatarChangeRequested && !modelRestore
             && (!currentPed || (ex.mpGetModel(currentPed) >>> 0) === avatarTarget),
         }) || { active: false };
+        updateDamagePresentation(currentPed);
         // 等待服务器恢复快照，避免刷新时先随机换装或上报单机出生坐标。
         if (packet.resumed && !packet.resume_state_ready) return;
         const resumeState = packet.resumed ? packet.resume_state : null;
@@ -1029,6 +1207,23 @@ self.prepareMultiplayerBridge = function (imports) {
           if (event?.type === 'respawn' && event.player_id === packet.client_id) {
             if (revision > lastRespawnRevision) {
               completed = Boolean(recoverLocal(event.position, event.heading ?? 90, event.health ?? 200, revision, now));
+            }
+          } else if (event?.type === 'helmet_broken') {
+            const entity = packet.world?.entities?.find(value => value.entity_id === event.entity_id);
+            if (packet.world?.world_epoch === event.world_epoch && entity?.player_id === packet.client_id
+              && entity.generation === event.generation && entity.model === event.model) {
+              const ped = ex.mpGetPlayerPed(-1);
+              completed = Boolean(ped && avatarInitialized && initialPlacement && !modelRestore && appearancePed === ped
+                && (ex.mpGetModel(ped) >>> 0) === event.model);
+              if (completed) {
+                if (ex.mpGetPropIndex(ped, 0) === event.prop_drawable && ex.mpGetPropTextureIndex(ped, 0) === event.prop_texture)
+                  ex.mpClearProp(ped, 0);
+                const cleared = appearance => appearance?.props?.[0]?.[0] === event.prop_drawable
+                  && appearance.props[0][1] === event.prop_texture
+                  ? { ...appearance, props: appearance.props.map((row, index) => index ? [...row] : [-1, -1]) } : appearance;
+                localAppearance = cleared(localAppearance);
+                if (lastGoodLocal) lastGoodLocal = { ...lastGoodLocal, appearance: cleared(lastGoodLocal.appearance) };
+              }
             }
           } else if (event?.type === 'correction' && revision >= lastRespawnRevision) {
             const ped = ex.mpGetPlayerPed(-1);
@@ -1075,13 +1270,20 @@ self.prepareMultiplayerBridge = function (imports) {
               if (ex.mpScreenFadeIn) ex.mpScreenFadeIn(250);
               lastRecoveryFadeAt = now;
             }
-          } else ex.mpSetInvincible(localPed, 0);
+          } else {
+            if (lastAuthorityAlive !== false && !ex.mpIsDead(localPed, 0)) {
+              ex.mpClearTasksImmediately?.(localPed);
+              ex.mpFreeze?.(localPed, 0); ex.mpSetCanRagdoll?.(localPed, 1);
+            }
+            ex.mpSetInvincible(localPed, 0);
+          }
+          applyArmour(localPed, authority.armour ?? 0);
           const nativeHealth = nativeCombatHealth(authority.health);
           if (!worldStatus.awaitingLife && ex.mpGetHealth(localPed) !== nativeHealth) ex.mpSetHealth(localPed, nativeHealth, 0);
           lastAuthorityAlive = authority.alive;
         }
         if (worldStatus.awaitingLife && ex.mpIsDead(localPed, 0)) {
-          pendingShots = [];
+          discardPendingShots();
           roleWaiting(now, true);
           return; // 等服务器确认环境死亡／逮捕，不能单机自行复活。
         }
@@ -1153,7 +1355,7 @@ self.prepareMultiplayerBridge = function (imports) {
           if (modelRestore && avatarInitialized) {
             ex.mpSetCoordsNoOffset(localPed, vector(0, modelRestore.position), 1, 1, 1);
             ex.mpSetHeading(localPed, modelRestore.heading ?? 90);
-            if (modelRestore.weapon) {
+            if (modelRestore.weapon && !packet.equipment_v1) {
               ex.mpGiveWeapon(localPed, modelRestore.weapon | 0, 999, 0, 1);
               ex.mpSetCurrentWeapon(localPed, modelRestore.weapon | 0, 1);
             }
@@ -1177,6 +1379,7 @@ self.prepareMultiplayerBridge = function (imports) {
         }
         // 换模会创建新的 ped，不能沿用旧句柄上写过的权威血量。
         if (authority) {
+          applyArmour(localPed, authority.armour ?? 0);
           ex.mpSetInvincible(localPed, authority.alive && !worldStatus.active ? 1 : 0);
           if (!worldStatus.awaitingLife && ex.mpGetHealth(localPed) !== nativeCombatHealth(authority.health)) ex.mpSetHealth(localPed, nativeCombatHealth(authority.health), 0);
         }
@@ -1215,7 +1418,9 @@ self.prepareMultiplayerBridge = function (imports) {
         const shooting = !!ex.mpIsShooting(localPed);
         const actions = actionsFor(localPed);
         const ray = actions.aiming ? cameraRay() : null;
+        const pedPose = packet.ped_pose && (now - lastState >= 50 || pendingShots.length) ? pedPoseSampler?.sample(localPed, position) : null;
         const localState = { position, model, heading, health, weapon, shooting, actions,
+          ...(pedPose ? { ped_pose: pedPose } : {}),
           ...(ray && validPosition(ray.target) ? { aim_target: ray.target } : {}),
           ...(localAppearance ? { appearance: localAppearance } : {}) };
         if (!authority || authority.alive) lastGoodLocal = { position: [...position], heading, weapon };
@@ -1232,16 +1437,19 @@ self.prepareMultiplayerBridge = function (imports) {
               native_health: ex.mpGetHealth(localPed), native_dead: Boolean(ex.mpIsDead(localPed, 0)),
               kills: authority.kills, deaths: authority.deaths } : {}) });
         }
-        pendingShots = pendingShots.filter((shot) => now - shot.at <= 1000
+        discardPendingShots((shot) => now - shot.at <= 1000
           && shot.ped === localPed && shot.event.weapon === weapon);
         for (let sent = 0; sent < 4 && pendingShots.length && (!authority || authority.alive); sent++) {
           const shot = pendingShots.shift();
           // 同一武器的新状态随事件交给页面，网络层先发状态再发射击，避免换枪竞态。
-          post({ type: 'local_shot', event: shot.event, state: localState });
+          post({ type: 'local_shot', event: shot.event, state: localState,
+            ...(Number.isSafeInteger(shot.prediction_id) ? { prediction_id: shot.prediction_id } : {}) });
         }
       } catch (error) {
         // 不能把 JS 异常抛回 scrThread::Run；它必须继续执行原来的 TLS 清理路径。
+        equipmentBridge?.reset();
         stopped = true; entryCompletedKey = ''; entryCache.character = entryCache.scene = false;
+        try { clearDamagePresentation(); } catch { /* Preserve original native cleanup. */ }
         entryCamera?.cancel();
         try { post({ type: 'bridge_error', message: String(error) }); } catch { /* 不向 WASM 抛异常 */ }
         try { updateEntry(performance.now(), false); } catch { /* Preserve pending owner cleanup. */ }

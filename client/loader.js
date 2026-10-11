@@ -14,7 +14,7 @@ self.onmessage = (ev) => {
 	const progress = (channel, values, zh, en, error = false) => channel.postMessage({ ...values,
 		[error ? 'error' : 'label']: language === 'en' ? en : zh,
 		[error ? 'errorTranslations' : 'labelTranslations']: { 'zh-CN': zh, en } });
-	if (m.multiplayer) importScripts('/multiplayer/world-environment.js', '/multiplayer/native-session-ui.js', '/multiplayer/world-collision.js', '/multiplayer/world-engine-bridge.js', '/multiplayer/online-entry-camera.js', '/multiplayer/engine-bridge.js');
+	if (m.multiplayer) importScripts('/multiplayer/world-environment.js', '/multiplayer/native-session-ui.js', '/multiplayer/world-collision.js', '/multiplayer/character-actions.js', '/multiplayer/ped-pose.js', '/multiplayer/ragdoll-pose.js', '/multiplayer/equipment-bridge.js', '/multiplayer/world-engine-bridge.js', '/multiplayer/online-entry-camera.js', '/multiplayer/engine-bridge.js');
 	// ?cores=N (debug): pretend to be a machine with N logical cores; the engine sizes its worker pools from it
 	if (m.cores) Object.defineProperty(navigator, 'hardwareConcurrency', { value: m.cores });
 	// The GPU worker must be up before the engine blocks this thread: Chrome fetches the script of a worker nested in a worker through

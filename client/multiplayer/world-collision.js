@@ -1,7 +1,7 @@
 'use strict';
 // 服务端指定轨迹，当前租约观察者仅返回本地流式地图的碰撞候选；从不计算伤害或选择受害者。
 self.createWorldCollisionBridge = function ({ ex, memory, post }) {
-  const MAX_DISTANCE = 180, MAX_ACTIVE = 8, MAX_JOBS = 32, MAX_SEGMENTS = 16;
+  const MAX_DISTANCE = 180, MAX_ACTIVE = 8, MAX_PENDING = 64, MAX_JOBS = 32, MAX_SEGMENTS = 16;
   // 世界、物体、植被；角色由服务器胶囊独立判定。载具精确动态碰撞尚未接入此查询。
   const FLAGS = 1 | 16 | 256;
   const supported = ['mpAlloc', 'mpGetEntityCoords', 'mpStartShapeTestLOS', 'mpStartShapeTestSweptSphere',
@@ -19,6 +19,13 @@ self.createWorldCollisionBridge = function ({ ex, memory, post }) {
   const output = offset => [0, 4, 8].map(i => view().getFloat32(scratch + offset + i, true));
   function finish(job, complete, reason) {
     if (!jobs.has(job.query.query_id)) return;
+    // A timed-out/invalid job may still have native shape tests in flight.
+    // Keep polling those handles until the native side releases them, but
+    // quarantine them from the active budget so a stalled query cannot block
+    // every later projectile. They remain bounded by MAX_PENDING below.
+    for (const entry of pending.values()) {
+      if (entry.job === job) entry.abandoned = true;
+    }
     jobs.delete(job.query.query_id);
     seen.add(job.query.query_id);
     while (seen.size > 512) seen.delete(seen.values().next().value);
@@ -92,7 +99,15 @@ self.createWorldCollisionBridge = function ({ ex, memory, post }) {
       if (!point(observer)) { finish(job, false, 'collision_not_loaded'); continue; }
       if (job.query.segments.some(segment => distance(observer, segment.from) > MAX_DISTANCE
         || distance(observer, segment.to) > MAX_DISTANCE)) { finish(job, false, 'outside_streaming_range'); continue; }
-      while (job.next < job.query.segments.length && pending.size < MAX_ACTIVE && launched < 4) {
+      const activePending = () => {
+        let count = 0;
+        for (const entry of pending.values()) {
+          if (!entry.abandoned && jobs.get(entry.id) === entry.job) count++;
+        }
+        return count;
+      };
+      while (job.next < job.query.segments.length && activePending() < MAX_ACTIVE
+        && pending.size < MAX_PENDING && launched < 4) {
         const index = job.next++, segment = job.query.segments[index];
         let handle = 0;
         try {
@@ -101,7 +116,7 @@ self.createWorldCollisionBridge = function ({ ex, memory, post }) {
             : ex.mpStartShapeTestLOS(from, to, FLAGS, 0, 0);
         } catch { /* 无法创建查询时不能宣称这条轨迹无遮挡。 */ }
         if (!Number.isInteger(handle) || !handle || pending.has(handle)) { finish(job, false, 'native_query_failed'); break; }
-        pending.set(handle, { id: job.query.query_id, job, index }); job.remaining++; launched++;
+        pending.set(handle, { id: job.query.query_id, job, index, abandoned: false }); job.remaining++; launched++;
       }
     }
   }

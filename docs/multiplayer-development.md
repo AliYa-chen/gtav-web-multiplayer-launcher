@@ -6,6 +6,8 @@ The multiplayer implementation consists of **project-owned JavaScript, Java, Rus
 
 The repository does not contain the original engine's C/C++ source or a toolchain that recompiles the complete engine from source. Project code and documentation use [MIT](../LICENSE); the original engine and game content are outside that grant. See [NOTICE](../NOTICE.md).
 
+Story/sandbox load the byte-identical offline copy; public sessions load the checked adapted online copy. Our hook instructions now have maintained WAT source, and the full online engine can be recovered to local WAT with a verified function/interface index. See [online engine source and recovery](online-engine-source.md) for the scope and extension workflow.
+
 ## 1. Where multiplayer logic lives
 
 | Layer | Implementation | Responsibility |
@@ -47,13 +49,15 @@ Current supported original SHA-256:
 11ca8d2c04c5e843d18ff4aea4899d72c86973c6b031df334e67c446b2ae83e0
 ```
 
-Current 0.2.15 online runtime SHA-256:
+Current unreleased 0.2.19 online runtime SHA-256:
 
 ```text
-24489ede2e5d031573aa9dc2504db7b1d69b0e6afcc9358657f6c2fc6b52d003
+b239ffab61b0c92f10db00ffeeaca37fa23b5a891614ea9d941b8eb456d6f4e5
 ```
 
 These identify engine bytes, not the whole client release. A JavaScript-only change can require a new launcher build without changing the online WASM hash. The offline runtime remains byte-identical to its original input.
+
+The four project-owned instruction fragments in [`engine/online/`](../engine/online/script-tick.wat) are compiled by [`online_engine_source.py`](../tools/online_engine_source.py), then applied by the reference builder. The packaged Rust launcher still consumes the generated checked description; it does not compile WAT or distribute a complete engine. Full recovered WAT remains an ignored local analysis artifact.
 
 ## 3. Original implementation versus reverse engineering
 

@@ -111,6 +111,10 @@ def local_archive_key(audit: WasmAudit, sample: Path) -> bytes:
 def archive_entries(path: Path, key: bytes):
     count, names_size, encryption = rpf_header(path)
     with path.open("rb") as stream:
+        # Native fiPackfile stores the name-offset shift in header bits 28..30.
+        # Most supplied archives use zero; streamedpeds_mp uses one.
+        stream.seek(8)
+        name_shift = (struct.unpack("<I", stream.read(4))[0] >> 28) & 7
         stream.seek(16)
         entries, names = stream.read(count*16), stream.read(names_size)
     if encryption == 0x0ffffff9:
@@ -121,7 +125,7 @@ def archive_entries(path: Path, key: bytes):
         record = entries[index*16:index*16+16]
         if struct.unpack_from("<I", record, 4)[0] == 0x7fffff00:
             continue
-        name_offset = struct.unpack_from("<H", record)[0]
+        name_offset = struct.unpack_from("<H", record)[0] << name_shift
         name_end = names.find(b"\0", name_offset)
         if not 0 <= name_offset <= name_end < len(names):
             raise ValueError(f"Invalid archive filename: {path} entry {index}")

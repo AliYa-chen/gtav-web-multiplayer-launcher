@@ -17,6 +17,7 @@ import sys
 
 sys.dont_write_bytecode = True
 from inspect_native_bridge import DEFAULT_WASM, ROOT, Reader, WasmAudit
+from online_engine_source import COMPILER_VERSION, load_online_sources
 from readonly_game_outputs import atomic_write_bytes, atomic_write_text, validate_outputs
 
 ORIGINAL_SHA256 = "11ca8d2c04c5e843d18ff4aea4899d72c86973c6b031df334e67c446b2ae83e0"
@@ -47,6 +48,91 @@ ADDITIONAL_EXPORTS = {
     "mpFree": (91002, "emscripten_builtin_free", ["i64"], []),
 }
 ENTITY_EXPORTS = {
+    "mpGetPedBoneIndex": (57639, "ped_commands::CommandGetPedBoneIndex(int, int)", ["i32", "i32"], ["i32"]),
+    "mpGetPedBounds": (46424, "CDynamicEntity::GetBoundBox(rage::spdAABB&) const", ["i64", "i64"], ["i64"]),
+    "mpPoseRagdollBody": (11824, "rage::fragInst::PoseArticulatedBodyFromBounds(signed char, signed char const*)", ["i64", "i32", "i64"], []),
+    "mpSyncRagdollSkeleton": (11820, "rage::fragInst::SyncSkeletonToArticulatedBody(bool)", ["i64", "i32"], []),
+    "mpPoseRagdollBounds": (11823, "rage::fragInst::PoseBoundsFromSkeleton(bool, bool, bool, signed char, signed char const*)", ["i64", "i32", "i32", "i32", "i32", "i64"], []),
+    "mpFireWaterLevel": (44122, "Water::GetWaterLevel(rage::Vector3 const&, float*, bool, float, float, bool*, CPhysical const*, bool)", ["i64", "i64", "f32", "f32", "i64", "i32"], ["i32"]),
+    "mpFireRiverLevel": (42790, "CWaterTestHelper::GetRiverHeightAtPosition(rage::Vector3 const&, float*, bool)", ["i64", "i64", "i32"], ["i32"]),
+    "mpGetArmour": (57222, "ped_commands::CommandGetPedArmour(int)", ["i32"], ["i32"]),
+    "mpSetArmour": (57166, "ped_commands::CommandSetPedArmour(int, int)", ["i32", "i32"], []),
+    # Character actions: signatures and native task ownership verified against the
+    # supported original WASM. Current blend outputs are separate f32 cells, not scrVector.
+    "mpIsFalling": (57239, "ped_commands::CommandIsPedFalling(int)", ["i32"], ["i32"]),
+    "mpIsClimbing": (57243, "ped_commands::CommandIsPedClimbing(int)", ["i32"], ["i32"]),
+    "mpIsVaulting": (57244, "ped_commands::CommandIsPedVaulting(int)", ["i32"], ["i32"]),
+    "mpIsSwimming": (57367, "ped_commands::CommandIsPedSwimming(int)", ["i32"], ["i32"]),
+    "mpIsUnderwater": (57368, "ped_commands::CommandIsPedSwimmingUnderWater(int)", ["i32"], ["i32"]),
+    "mpIsInCover": (57300, "ped_commands::CommandIsPedInCover(int, bool)", ["i32", "i32"], ["i32"]),
+    "mpIsCoverLeft": (57301, "ped_commands::CommandIsPedInCoverFacingLeft(int)", ["i32"], ["i32"]),
+    "mpIsHighCover": (57302, "ped_commands::CommandIsPedInHighCover(int)", ["i32"], ["i32"]),
+    "mpIsGoingIntoCover": (57303, "ped_commands::CommandIsPedGoingIntoCover(int)", ["i32"], ["i32"]),
+    "mpIsAimingFromCover": (57123, "ped_commands::CommandIsPedAimingFromCover(int)", ["i32"], ["i32"]),
+    "mpIsStrafing": (60840, "task_commands::CommandPedIsStrafing(int)", ["i32"], ["i32"]),
+    "mpGetTaskActive": (60645, "task_commands::CommandGetIsTaskActive(int, int)", ["i32", "i32"], ["i32"]),
+    "mpGetMoveBlend": (57666, "ped_commands::CommandGetPedCurrentMoveBlendRatio(int, float&, float&)", ["i32", "i64", "i64"], ["i32"]),
+    "mpGetDesiredMoveBlend": (60724, "task_commands::CommandGetPedDesiredMoveBlendRatio(int)", ["i32"], ["f32"]),
+    "mpSetDesiredMoveBlend": (60725, "task_commands::CommandSetPedDesiredMoveBlendRatio(int, float)", ["i32", "f32"], []),
+    "mpTaskClimb": (60718, "task_commands::CommandTaskClimb(int, bool)", ["i32", "i32"], []),
+    "mpTaskClimbLadder": (60719, "task_commands::CommandTaskClimbLadder(int, bool)", ["i32", "i32"], []),
+    "mpSetLadderState": (69804, "CTaskClimbLadder::SetTaskState(int)", ["i64", "i32"], []),
+    "mpTaskCover": (60747, "task_commands::CommandTaskPutPedDirectlyIntoCover(int, rage::scrVector const&, int, bool, float, bool, bool, int, bool)", ["i32", "i64", "i32", "i32", "f32", "i32", "i32", "i32", "i32"], []),
+    "mpTaskExitCover": (60750, "task_commands::CommandTaskExitCover(int, int, rage::scrVector const&)", ["i32", "i32", "i64"], []),
+    "mpTaskForceMotionState": (60810, "task_commands::CommandTaskForceMotionState(int, int, bool)", ["i32", "i32", "i32"], []),
+    "mpForceMotionState": (57665, "ped_commands::CommandForcePedMotionState(int, int, bool, int, bool)", ["i32", "i32", "i32", "i32", "i32"], ["i32"]),
+    "mpSetToRagdoll": (57461, "ped_commands::CommandSetPedToRagdoll(int, int, int, int, bool, bool, bool)", ["i32", "i32", "i32", "i32", "i32", "i32", "i32"], ["i32"]),
+    # This build's Copy ignores its source argument and constructs a new 336-byte
+    # task (type 3). Only locally created pointers may reach GiveCharacterTask; it
+    # owns the task on entry, including rejection. Delete is pre-handoff cleanup only.
+    "mpCreateCombatRollTask": (70057, "CTaskCombatRoll::Copy() const", ["i64"], ["i64"]),
+    "mpDeleteUnassignedCombatRollTask": (70056, "CTaskCombatRoll::~CTaskCombatRoll()_112597", ["i64"], []),
+    "mpGiveCharacterTask": (63902, "CScriptPeds::GivePedScriptedTask(int, rage::aiTask*, int, char const*)", ["i32", "i64", "i32", "i64"], []),
+    # Layered reload uses only a freshly allocated native task. Copy reads the
+    # verified controller/flags pair from a local template; AddSecondary owns it.
+    "mpGetEntityAddress": (8693, "rage::fwScriptGuid::GetBaseFromGuid(int)", ["i32"], ["i64"]),
+    "mpSetTaskTarget": (19294, "CAITarget::SetPosition(rage::Vector3 const&)", ["i64", "i64"], []),
+    "mpCoverWeaponReady": (66793, "CTaskCover::IsWeaponClipSetLoaded(bool) const", ["i64"], ["i32"]),
+    "mpSetCoverState": (66881, "CTaskInCover::SetState(int)", ["i64", "i32"], []),
+    "mpIsPed": (50057, "entity_commands::CommandIsEntityAPed(int)", ["i32"], ["i32"]),
+    # These thunks read/write only verified, locally resolved resident animation nodes.
+    "mpGetAnimationPhase": (18272, "rage::mvNodeAnimation::GetPhaseThunk(rage::mvParameter*, rage::crmtNode*, unsigned int)", ["i64", "i64", "i32"], []),
+    "mpSetAnimationPhase": (18266, "rage::mvNodeAnimation::ApplyPhaseThunk(rage::crmtNode*, rage::mvParameter const&, unsigned int)", ["i64", "i64", "i32"], []),
+    "mpGetAnimationRate": (18273, "rage::mvNodeAnimation::GetRateThunk(rage::mvParameter*, rage::crmtNode*, unsigned int)", ["i64", "i64", "i32"], []),
+    "mpSetAnimationRate": (18267, "rage::mvNodeAnimation::ApplyRateThunk(rage::crmtNode*, rage::mvParameter const&, unsigned int)", ["i64", "i64", "i32"], []),
+    "mpGetClipPhase": (18305, "rage::mvNodeClip::GetPhaseThunk(rage::mvParameter*, rage::crmtNode*, unsigned int)", ["i64", "i64", "i32"], []),
+    "mpSetClipPhase": (18298, "rage::mvNodeClip::ApplyPhaseThunk(rage::crmtNode*, rage::mvParameter const&, unsigned int)", ["i64", "i64", "i32"], []),
+    "mpGetClipRate": (18306, "rage::mvNodeClip::GetRateThunk(rage::mvParameter*, rage::crmtNode*, unsigned int)", ["i64", "i64", "i32"], []),
+    "mpSetClipRate": (18299, "rage::mvNodeClip::ApplyRateThunk(rage::crmtNode*, rage::mvParameter const&, unsigned int)", ["i64", "i64", "i32"], []),
+    "mpGetParameterizedPhase": (18378, "rage::mvNodePm::GetPhaseThunk(rage::mvParameter*, rage::crmtNode*, unsigned int)", ["i64", "i64", "i32"], []),
+    "mpSetParameterizedPhase": (18372, "rage::mvNodePm::ApplyPhaseThunk(rage::crmtNode*, rage::mvParameter const&, unsigned int)", ["i64", "i64", "i32"], []),
+    "mpGetParameterizedRate": (18380, "rage::mvNodePm::GetRateThunk(rage::mvParameter*, rage::crmtNode*, unsigned int)", ["i64", "i64", "i32"], []),
+    "mpSetParameterizedRate": (18374, "rage::mvNodePm::ApplyRateThunk(rage::crmtNode*, rage::mvParameter const&, unsigned int)", ["i64", "i64", "i32"], []),
+    "mpGetParameterizedDimensions": (17617, "rage::crpmParameterizedMotion::GetNumParameterDimensions() const", ["i64"], ["i32"]),
+    "mpGetParameterizedValue": (18381, "rage::mvNodePm::GetParameterValueThunk(rage::mvParameter*, rage::crmtNode*, unsigned int)", ["i64", "i64", "i32"], []),
+    "mpSetParameterizedValue": (18375, "rage::mvNodePm::ApplyParameterValueThunk(rage::crmtNode*, rage::mvParameter const&, unsigned int)", ["i64", "i64", "i32"], []),
+    "mpSetBlendWeight": (17917, "rage::crmtNodeBlend::SetWeight(float)", ["i64", "f32"], []),
+    "mpSetAdditiveBlendWeight": (17905, "rage::crmtNodePairWeighted::SetWeight(float)", ["i64", "f32"], []),
+    "mpGetBlendNodeWeight": (17966, "rage::crmtNodeN::GetWeight(unsigned int) const", ["i64", "i32"], ["f32"]),
+    "mpSetBlendNodeWeight": (17964, "rage::crmtNodeN::SetWeight(unsigned int, float)", ["i64", "i32", "f32"], []),
+    "mpGetBlendFilterName": (5539, "rage::crFrameFilterDictionaryStore::FindFrameFilterNameSlow(rage::crFrameFilter const*)", ["i64"], ["i64"]),
+    "mpCreateReloadTask": (77043, "CTaskReloadGun::Copy() const", ["i64"], ["i64"]),
+    "mpDeleteUnassignedReloadTask": (77041, "CTaskReloadGun::~CTaskReloadGun()_124963", ["i64"], []),
+    "mpAddSecondaryTask": (29870, "CPedIntelligence::AddTaskSecondary(rage::aiTask*, int)", ["i64", "i64"], []),
+    "mpClearSecondaryTask": (60659, "task_commands::CommandClearPedSecondaryTask(int)", ["i32"], []),
+    # SetAmmoInClip also changes inventory total by its clip delta. SetPedAmmo
+    # fills the equipped clip; authority reconciliation restores the shared pool
+    # with SetAmmoByType after setting the selected clip instead.
+    "mpSetAmmo": (62913, "weapon_commands::CommandSetPedAmmo(int, int, int, bool)", ["i32", "i32", "i32", "i32"], []),
+    "mpSetAmmoByType": (62947, "weapon_commands::CommandSetPedAmmoByType(int, int, int)", ["i32", "i32", "i32"], []),
+    "mpSetAmmoInClip": (62943, "weapon_commands::CommandSetAmmoInClip(int, int, int)", ["i32", "i32", "i32"], ["i32"]),
+    "mpRemoveWeapon": (62930, "weapon_commands::CommandRemoveWeaponFromPed(int, int)", ["i32", "i32"], []),
+    "mpRemoveAllWeapons": (62931, "weapon_commands::CommandRemoveAllPedWeapons(int, bool)", ["i32", "i32"], []),
+    "mpGetMaxAmmo": (62944, "weapon_commands::CommandGetMaxAmmo(int, int, int&)", ["i32", "i32", "i64"], ["i32"]),
+    "mpGetMaxAmmoInClip": (62941, "weapon_commands::CommandGetMaxAmmoInClip(int, int, bool)", ["i32", "i32", "i32"], ["i32"]),
+    "mpSetInfiniteAmmo": (62914, "weapon_commands::CommandSetPedInfiniteAmmo(int, bool, int)", ["i32", "i32", "i32"], []),
+    "mpSetInfiniteAmmoClip": (62915, "weapon_commands::CommandSetPedInfiniteAmmoClip(int, bool)", ["i32", "i32"], []),
+    "mpMakePedReload": (62967, "weapon_commands::CommandMakePedReload(int)", ["i32"], ["i32"]),
     # 只在活动脚本上下文发起异步形状查询；不导出内部 phBound/WorldProbe 指针接口。
     # 输入 scrVector: f32 @0/8/16；结果 Vector3: f32 @0/4/8，但原实现写满16字节。
     # Get 返回 0=无效,1=待完成,2=完成并消费句柄；material 为名称 Jenkins hash。
@@ -182,6 +268,8 @@ ENTITY_EXPORTS = {
     "mpSetPlayerControl": (58654, "player_commands::CommandSetPlayerControl(int, bool, int)", ["i32", "i32", "i32"], []),
     "mpTaskStandStill": (60564, "task_commands::CommandTaskStandStill(int, int)", ["i32", "i32"], []),
     "mpTaskGoStraight": (60577, "task_commands::CommandTaskGoStraightToCoord(int, rage::scrVector const&, float, int, float, float)", ["i32", "i64", "f32", "i32", "f32", "f32"], []),
+    # 联合移动/瞄准姿态；第 5 个参数 shoot 必须为 false，不能创建第二条实弹伤害路径。
+    "mpTaskGoToCoordWhileAiming": (60670, "task_commands::CommandTaskGoToCoordWhileAimingAtCoord(int, rage::scrVector const&, rage::scrVector const&, float, bool, float, float, bool, int, bool, int)", ["i32", "i64", "i64", "f32", "i32", "f32", "f32", "i32", "i32", "i32", "i32"], []),
     "mpGetModel": (50040, "entity_commands::CommandGetEntityModel(int)", ["i32"], ["i32"]),
     "mpHeading": (50032, "entity_commands::CommandGetEntityHeading(int)", ["i32"], ["f32"]),
     "mpCreatePed": (57110, "ped_commands::CommandCreatePed(int, int, rage::scrVector const&, float, bool, bool)", ["i32", "i32", "i64", "f32", "i32", "i32"], ["i32"]),
@@ -200,6 +288,13 @@ ENTITY_EXPORTS = {
     "mpFreeze": (50102, "entity_commands::CommandFreezeEntityPosition(int, bool)", ["i32", "i32"], []),
     "mpGetHealth": (50034, "entity_commands::CommandGetEntityHealth(int)", ["i32"], ["i32"]),
     "mpSetHealth": (50136, "entity_commands::CommandSetEntityHealth(int, int, int)", ["i32", "i32", "i32"], []),
+    # 原角色贴花；两个 f32 是区域 UV，不能传伤害值。默认 torso 仅作受伤表现，
+    # 不代表服务器已确定命中部位。Clear 清除上一代角色留下的可见伤痕。
+    "mpApplyCosmeticTorsoBlood": (57492, "ped_commands::CommandApplyPedBloodDamageByZone(int, int, float, float, int)", ["i32", "i32", "f32", "f32", "i32"], []),
+    "mpClearVisibleDamage": (57491, "ped_commands::CommandResetPedVisibleDamage(int)", ["i32"], []),
+    # 1 为 DeathFailIntroEffectShakeRef；0 释放，另影响原跟随镜头景深。
+    # 这是原生死亡镜头效果，不是完整的脚本俯视/拉远镜头序列。
+    "mpDeathCameraEffect": (49156, "camera_commands::CommandSetCamDeathFailEffectState(int)", ["i32"], []),
     "mpIsDead": (50068, "entity_commands::CommandIsEntityDead(int, bool)", ["i32", "i32"], ["i32"]),
     "mpIsShooting": (57158, "ped_commands::CommandIsPedShooting(int)", ["i32"], ["i32"]),
     "mpSelectedWeapon": (62955, "weapon_commands::CommandGetSelectedPedWeapon(int)", ["i32"], ["i32"]),
@@ -415,17 +510,23 @@ def build(audit: WasmAudit, entity_probe: bool = False, public_client: bool = Fa
     if public_client:
         checked_public_wrapper(audit)
         frontend_position = checked_frontend_tail(audit)
+    # All owned instructions come from required WAT sources. Invalid or missing
+    # sources fail before any output; the original engine checks remain intact.
+    owned_sources = load_online_sources()
     data = audit.data
     exports = export_map(entity_probe)
     hook_position = HOOK_INSTRUCTION_START + HOOK_INSTRUCTION_OFFSET
     # local.get 0；i32.const MAGIC；call 11；drop。沿用已有导入，不移动函数索引。
-    hook_bytes = b"\x20\x00\x41" + signed_leb(MAGIC) + b"\x10" + unsigned_leb(CALLBACK_IMPORT) + b"\x1a"
+    hook_bytes = owned_sources['script-tick.wat'].instructions
     # 回调只返回是否冻结此轮已审计脚本，br_if 0跳到原block末尾，不中断资源清理。
-    script_gate = b'\x20\x00\x41' + signed_leb(SCRIPT_GATE_MAGIC) + b'\x10' + unsigned_leb(CALLBACK_IMPORT) + b'\x0d\x00'
+    script_gate = owned_sources['public-script-gate.wat'].instructions
     if public_client:
         hook_position += 2  # 已核对的原block头后，一次插入桥回调与条件gate。
         hook_bytes += script_gate
-    frontend_bytes = b'\x42\x00\x41' + signed_leb(FRONTEND_MAGIC) + b'\x10' + unsigned_leb(CALLBACK_IMPORT) + b'\x1a'
+    frontend_bytes = owned_sources['frontend-callback.wat'].instructions
+    replacement = b'\x00' + owned_sources['public-model-wrapper.wat'].instructions + b'\x0b'
+    if public_client and len(replacement) != len(EXPECTED_MODEL_WRAPPER):
+        raise ValueError('自有角色包装器 WAT 编译后必须与已审计原函数体等长')
     source = Reader(data, 8)
     output = bytearray(data[:8])
     export_section_seen, code_section_seen, patched_bodies = False, False, 0
@@ -467,7 +568,7 @@ def build(audit: WasmAudit, entity_probe: bool = False, public_client: bool = Fa
                 elif public_client and index == PUBLIC_MODEL_WRAPPER:
                     # 脚本调用经包装器；JS 的 mpSetPlayerModel 直接调用 58625，仍可设置公共角色。
                     # void 包装器改为等长 nop；不更改函数索引、该包装器长度或另一个 CHANGE_PLAYER_PED 包装器。
-                    body = b"\x00" + b"\x01" * (len(EXPECTED_MODEL_WRAPPER) - 2) + b"\x0b"
+                    body = replacement
                     if body_size != len(body):
                         raise ValueError("单机角色包装器体长度不匹配")
                     result.extend(data[entry_start:body_start] + body)
@@ -496,6 +597,8 @@ def build(audit: WasmAudit, entity_probe: bool = False, public_client: bool = Fa
         "purpose": ("公共战局引擎副本：增加实体接口、隔离单机脚本 SET_PLAYER_MODEL 包装器与原生暂停菜单前端回调；不伪造原网络会话。" if public_client else "非生产实体复制实验：增加本地角色创建/属性/坐标/销毁接口，尚未证明实际游戏操作成功。" if entity_probe else "非生产只读探针：读取本地玩家、坐标和活动脚本上下文；未加入创建角色或写入实体的接口。"),
         "entity_probe": entity_probe,
         "public_client": public_client,
+        "owned_sources": {"compiler": COMPILER_VERSION,
+                          "files": [source.evidence() for source in owned_sources.values()]},
         "original": {"path": str(audit.path.resolve()), "sha256": ORIGINAL_SHA256, "bytes": len(data)},
         "prototype": {"sha256": hashlib.sha256(output).hexdigest(), "bytes": len(output)},
         "hook": {"function_index": HOOK_FUNCTION, "function_name": audit.names[HOOK_FUNCTION],
@@ -520,7 +623,6 @@ def build(audit: WasmAudit, entity_probe: bool = False, public_client: bool = Fa
             'magic_i32': FRONTEND_MAGIC, 'inserted_bytes_hex': frontend_bytes.hex(),
             'scope': '正常前端更新尾部仅调用自有菜单标题/详情；0为无语义payload，绝不作为游戏对象指针，绝不操作实体或伪造脚本上下文。'}
         wrapper_start, _ = audit.bodies[PUBLIC_MODEL_WRAPPER]
-        replacement = b"\x00" + b"\x01" * (len(EXPECTED_MODEL_WRAPPER) - 2) + b"\x0b"
         evidence["public_model_patch"] = {
             **audit.descriptor(PUBLIC_MODEL_WRAPPER),
             "original_body_offset": wrapper_start,

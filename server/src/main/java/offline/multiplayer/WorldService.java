@@ -11,6 +11,7 @@ final class WorldService {
     private static final long UNARMED=0xa2719263L;
     private final WorldRegistry registry;
     private final CombatWorld combat;
+    private final EquipmentWorld equipment;
     private final WorldCollision collision;
     private final RoadNetwork roads;
     private final PedNavigation pedestrian;
@@ -22,7 +23,7 @@ final class WorldService {
     private final Set<String> claimedPopulationVehicles=new HashSet<>();
     private long populationRemoved,populationRefilled;
     private final Map<String,Long> npcShots=new HashMap<>();
-    private long worldShotEvents;
+    private long worldShotEvents,vehicleHealthCandidates;
     private record WorldCut(Snapshot entities,long tick,Map<String,Object> environment,Map<String,Object> law) {}
     private final Map<String,Offer> offers=new LinkedHashMap<>();
     private final Map<String,LinkedHashMap<String,CompletedRequest>> completedRequests=new HashMap<>();
@@ -47,15 +48,22 @@ final class WorldService {
         this(geometry,roads,PedNavigation.empty());
     }
     WorldService(StaticCollision geometry,RoadNetwork roads,PedNavigation pedestrian){
+        this(geometry,roads,pedestrian,VehicleCollision.empty());
+    }
+    WorldService(StaticCollision geometry,RoadNetwork roads,PedNavigation pedestrian,VehicleCollision vehicles){
+        this(geometry,roads,pedestrian,vehicles,PedCollision.empty());
+    }
+    WorldService(StaticCollision geometry,RoadNetwork roads,PedNavigation pedestrian,VehicleCollision vehicles,PedCollision peds){
         this.roads=Objects.requireNonNull(roads);
         this.pedestrian=Objects.requireNonNull(pedestrian);
         Set<Long> weapons=new HashSet<>(Set.of(0L,UNARMED));
         for(Map<String,Object> rule:CombatWorld.weaponRules())weapons.add(((Number)rule.get("weapon")).longValue());
         registry=new WorldRegistry(UUID.randomUUID().toString(),Map.of(
-            Kind.PED,Set.of(0x705e61f2L,0x9c9effd8L,0xc99f21c4L,0xd1feb884L,0x2307a353L,0x2799efd8L,0xc79f6928L,0x9cf26183L,WorldLaw.COP_MODEL),
+            Kind.PED,Set.of(0x705e61f2L,0x9c9effd8L,0xc99f21c4L,0xd1feb884L,0x2307a353L,0x2799efd8L,0xc79f6928L,0x8247d331L,0x9cf26183L,WorldLaw.COP_MODEL),
             Kind.VEHICLE,Set.of(BLISTA,ASEA,WorldLaw.POLICE_MODEL)),weapons,new Limits(256,4096,4096,1000,5000));
         collision=new WorldCollision(registry.worldEpoch());collision.geometry(geometry);
-        combat=new CombatWorld(registry,collision);
+        combat=new CombatWorld(registry,collision,vehicles,peds);
+        equipment=new EquipmentWorld(registry);combat.setEquipment(equipment);
         law=new WorldLaw(registry.worldEpoch());
         ai=new WorldAi(registry.worldEpoch(),roads,pedestrian,collision);
         try{registry.createTrusted(Kind.VEHICLE,BLISTA,null,Components.vehicle(
@@ -69,7 +77,12 @@ final class WorldService {
     void physicsParticipant(String id,boolean enabled){collision.observer(id,enabled && combat.isEntryReady(id));}
     void collisionResult(String id,Map<String,Object> message)throws Problem{collision.accept(id,message,now());}
     List<Map<String,Object>> collisionQueries(){return collision.drain();}
-    Map<String,Object> collisionStatus(){return collision.status();}
+    boolean pedGeometryReady(){return combat.pedGeometryStatus().get("models") instanceof Number count && count.intValue()>0;}
+    Map<String,Object> collisionStatus(){
+        Map<String,Object> status=collision.status();status.put("vehicle_geometry",combat.vehicleGeometryStatus());status.put("ped_geometry",combat.pedGeometryStatus());
+        status.put("vehicle_damage_authority","leased_native_health_candidate");status.put("vehicle_health_candidates",vehicleHealthCandidates);
+        return status;
+    }
     private void ensurePopulation(String actor){
         Entity player=registry.playerEntity(actor);if(player==null)return;Vector origin=position(player);
         String cell=(int)Math.floor(origin.x()/256)+":"+(int)Math.floor(origin.y()/256);
@@ -189,6 +202,7 @@ final class WorldService {
     }
     Map<String,Object> join(String id){
         Map<String,Object> profile=combat.join(id,now());
+        equipment.join(id,now());
         Entity entity=registry.playerEntity(id);
         profile.put("entity_id",entity.entityId());profile.put("world_epoch",epoch());profile.put("owner_epoch",entity.ownerEpoch());
         profile.put("session_policy",sessionPolicy());
@@ -212,6 +226,7 @@ final class WorldService {
     }
     void setConnected(String id,boolean connected){
         combat.setConnected(id,connected);
+        equipment.setConnected(id,connected,now());
         if(!connected){
             collision.observer(id,false);
             worldParticipants.remove(id);
@@ -223,7 +238,7 @@ final class WorldService {
     }
     void remove(String id){
         collision.observer(id,false);
-        Entity entity=registry.playerEntity(id);combat.remove(id);
+        Entity entity=registry.playerEntity(id);combat.remove(id);equipment.remove(id);
         if(entity!=null)try{registry.disconnectOwnerTrusted(id,now());entity=registry.playerEntity(id);
             registry.deleteTrusted(entity.entityId(),entity.revision(),now());}
         catch(WorldRegistry.Rejection error){throw new IllegalStateException(error);}
@@ -232,6 +247,10 @@ final class WorldService {
         lifeReports.keySet().removeIf(key->key.startsWith(id+":"));
     }
     Map<String,Object> profile(String id){return combat.profile(id);}
+    Map<String,Object> equipmentState(String id){return equipment.snapshot(id,now());}
+    Map<String,Object> equipmentRequest(String id,Map<String,Object> input)throws Problem,EquipmentWorld.Rejection{
+        requireEntryReady(id);return equipment.request(id,input,now());
+    }
     Map<String,Object> meleeStats(){return map("melee_requests_received",meleeRequests,"melee_events_approved",meleeEvents,"melee_hits",meleeHits);}
     Map<String,Object> populationStats(){return map("slots",population.slots().size(),"cells",populationCells.size(),
         "entities",populationEntities.size(),"removed",populationRemoved,"refilled",populationRefilled,
@@ -244,6 +263,7 @@ final class WorldService {
     Map<String,Object> combatState(){return combat.combatState();}
     Map<String,Object> worldState(){return combat.worldState();}
     Map<String,Object> projectileState(){return combat.projectileState(now());}
+    void publishedBaseline(String id,long tick){combat.publishedBaseline(id,tick);}
     CombatWorld.Outcome updateState(String id,Map<String,Object> message,long unused)throws CombatWorld.Rejection{
         CombatWorld.Outcome result=combat.updateState(id,message,now());
         if(result.accepted() && worldParticipants.contains(id)){ensurePopulation(id);assignPopulation();}
@@ -275,6 +295,7 @@ final class WorldService {
     }
     List<Map<String,Object>> maintain(long unused){
         List<Map<String,Object>> events=combat.maintain(now());
+        events.addAll(equipment.tick(now()));
         recordCombatEvents(events);
         for(Map<String,Object> event:events)if("respawn".equals(event.get("type"))){
             Entity player=registry.playerEntity((String)event.get("player_id"));
@@ -463,8 +484,9 @@ final class WorldService {
     }
     void entityInput(String actor,Map<String,Object> input)throws Problem,WorldRegistry.Rejection{
         requireEntryReady(actor);
-        fields(input,"type","world_epoch","entity_id","owner_epoch","input_seq","based_on_revision","transform","view");epoch(input);
+        fields(input,"type","world_epoch","entity_id","owner_epoch","input_seq","based_on_revision","transform","view","ped_pose");epoch(input);
         Proposal proposal=parseProposal(input);submitBatch(actor,List.of(proposal));
+        if(input.containsKey("ped_pose"))combat.observePose(registry.entity(proposal.entityId()),input.get("ped_pose"),now());
     }
     void entityBatch(String actor,Map<String,Object> input)throws Problem,WorldRegistry.Rejection{
         requireEntryReady(actor);
@@ -472,9 +494,11 @@ final class WorldService {
         if(!(input.get("updates")instanceof List<?> values)||values.isEmpty()||values.size()>24)
             throw new Problem("invalid_batch","更新批次必须包含1–24个实体");
         List<Proposal> proposals=new ArrayList<>();
-        for(Object value:values){Map<String,Object> update=object(value);fields(update,"entity_id","owner_epoch","input_seq","based_on_revision","transform","view");
+        for(Object value:values){Map<String,Object> update=object(value);fields(update,"entity_id","owner_epoch","input_seq","based_on_revision","transform","view","ped_pose");
             proposals.add(parseProposal(update));}
         submitBatch(actor,proposals);
+        for(int i=0;i<values.size();i++){Map<String,Object> update=object(values.get(i));
+            if(update.containsKey("ped_pose"))combat.observePose(registry.entity(proposals.get(i).entityId()),update.get("ped_pose"),now());}
     }
     private void submitBatch(String actor,List<Proposal> proposals)throws WorldRegistry.Rejection{
         long tick=now();Set<String> vehicleIds=new HashSet<>(),readyDependents=new LinkedHashSet<>();
@@ -500,8 +524,12 @@ final class WorldService {
                 view=new PedView(entity.components().ped().appearance(),actions(object(value.get("actions"))),
                     entity.components().ped().weapon(),bool(value.get("shooting")),value.containsKey("aim_target")?vector(value.get("aim_target")):null);}
         }
+        Transform transform=transform(input.get("transform"));
+        if(entity.kind()==Kind.PED && entity.components().combat()!=null && entity.components().combat().alive()
+            && !combat.validPose(entity.model(),transform,input.get("ped_pose")))
+            throw new Problem("invalid_ped_pose","角色骨骼姿态尚未通过校验");
         return new Proposal(epoch(),id,ownerEpoch,integer(input.get("input_seq"),0,9_007_199_254_740_991L),
-            integer(input.get("based_on_revision"),0,9_007_199_254_740_991L),transform(input.get("transform")),view);
+            integer(input.get("based_on_revision"),0,9_007_199_254_740_991L),transform,view);
     }
     List<Map<String,Object>> interaction(String actor,Map<String,Object> input)throws Problem,WorldRegistry.Rejection{
         requireEntryReady(actor);
@@ -626,7 +654,7 @@ final class WorldService {
     }
     List<Map<String,Object>> simulation(String actor,Map<String,Object> input)throws Problem,WorldRegistry.Rejection{
         requireEntryReady(actor);
-        fields(input,"type","world_epoch","entity_id","owner_epoch","input_seq","kind","reason","health","engine_health","body_health","target_entity_id","target_generation");epoch(input);
+        fields(input,"type","world_epoch","entity_id","owner_epoch","input_seq","kind","reason","health","engine_health","body_health","target_entity_id","target_generation","generation","vehicle_entity_id","vehicle_generation","vehicle_owner_epoch","seat","ped_pose");epoch(input);
         Entity entity=required(text(input.get("entity_id"),128));String kind=text(input.get("kind"),32);
         long ownerEpoch=integer(input.get("owner_epoch"),0,9_007_199_254_740_991L),seq=integer(input.get("input_seq"),0,9_007_199_254_740_991L);
         if(!actor.equals(entity.ownerId()) || entity.ownerEpoch()!=ownerEpoch || entity.leaseUntilTick()<=now() || offers.containsKey(entity.entityId()))
@@ -634,7 +662,16 @@ final class WorldService {
         String key=actor+":"+entity.entityId()+":"+ownerEpoch;
         if(seq<=lifeReports.getOrDefault(key,-1L))throw new Problem("stale_input","候选结果序号过期");
         List<Map<String,Object>> events=new ArrayList<>();
-        if("life_report".equals(kind)){
+        if("ped_pose".equals(kind)){
+            fields(input,"type","world_epoch","entity_id","owner_epoch","input_seq","kind","generation","ped_pose");
+            if(entity.playerId()!=null || entity.kind()!=Kind.PED || entity.components().combat()==null || !entity.components().combat().alive())
+                throw new Problem("invalid_target","姿态候选只适用于当前活动的共同NPC");
+            if(entity.generation()!=integer(input.get("generation"),1,9_007_199_254_740_991L))
+                throw new Problem("stale_generation","NPC生命周期已变化");
+            if(!combat.observePose(entity,input.get("ped_pose"),now()))
+                throw new Problem("invalid_ped_pose","角色骨骼姿态尚未通过校验");
+            registry.touchTrusted(entity.entityId(),entity.revision(),now());
+        }else if("life_report".equals(kind)){
             fields(input,"type","world_epoch","entity_id","owner_epoch","input_seq","kind","reason","health");
             if(!actor.equals(entity.playerId()))throw new Problem("invalid_target","生命候选只能报告自己的玩家角色");
             String reason=text(input.get("reason"),32);if(!Set.of("environmental","dead","arrest").contains(reason))throw new Problem("invalid_reason","不支持的本地生命候选原因");
@@ -643,7 +680,7 @@ final class WorldService {
             if("arrest".equals(reason) || "dead".equals(reason))health=0;
             if("arrest".equals(reason) && !law.reportArrestCandidate(entity,entity.generation(),registry.snapshot().entities(),now()))
                 throw new Problem("unconfirmed_arrest","本地警察逮捕未获共同世界确认");
-            registry.setCombatTrusted(entity.entityId(),new Combat(health,200,life.kills(),life.deaths()+(life.alive() && health==0?1:0),health==0?(life.alive()?now()+4000:life.respawnAtTick()):0),entity.revision(),now());
+            registry.setCombatTrusted(entity.entityId(),new Combat(health,200,life.kills(),life.deaths()+(life.alive() && health==0?1:0),health==0?(life.alive()?now()+4000:life.respawnAtTick()):0,life.armour()),entity.revision(),now());
             if(health==0 && life.alive())events.add(map("type","death","player_id",actor,"killer_id",null,"kills",0,
                 "deaths",life.deaths()+1,"respawn_at",now()+4000,"revision",registry.entity(entity.entityId()).revision()));
             events.add(combatState());
@@ -652,13 +689,16 @@ final class WorldService {
             if(entity.playerId()!=null || entity.kind()!=Kind.PED || entity.components().combat()==null)throw new Problem("invalid_target","该候选只能作用于本租约NPC");
             int health=(int)integer(input.get("health"),0,200);Combat life=entity.components().combat();
             if(health>life.health())throw new Problem("health_increase_denied","模拟候选不能恢复NPC生命值");
-            registry.setCombatBatchTrusted(Map.of(entity.entityId(),new Combat(health,200,life.kills(),life.deaths()+(life.alive()&&health==0?1:0),0)),now());
+            registry.setCombatBatchTrusted(Map.of(entity.entityId(),new Combat(health,200,life.kills(),life.deaths()+(life.alive()&&health==0?1:0),0,life.armour())),now());
         }else if("vehicle_damage".equals(kind)){
+            // Compatibility path for native collision/fire/weapon health observations.
+            // This owner-scoped, monotonic candidate is not server weapon-damage proof:
+            // the pristine engine's body/engine/tank formulas are not all verified yet.
             fields(input,"type","world_epoch","entity_id","owner_epoch","input_seq","kind","engine_health","body_health");
             if(entity.kind()!=Kind.VEHICLE)throw new Problem("invalid_target","载具损伤候选必须作用于载具");
             double engine=number(input.get("engine_health"),-4000,1000),body=number(input.get("body_health"),0,1000);
             if(engine>entity.components().vehicle().engineHealth() || body>entity.components().vehicle().bodyHealth())throw new Problem("health_increase_denied","模拟候选不能修复载具");
-            registry.setVehicleHealthTrusted(entity.entityId(),engine,body,entity.revision(),now());
+            registry.setVehicleHealthTrusted(entity.entityId(),engine,body,entity.revision(),now());vehicleHealthCandidates++;
         }else if("npc_shot".equals(kind)){
             fields(input,"type","world_epoch","entity_id","owner_epoch","input_seq","kind","target_entity_id","target_generation");
             if(entity.playerId()!=null || entity.kind()!=Kind.PED || entity.components().combat()==null || !entity.components().combat().alive()
@@ -673,11 +713,37 @@ final class WorldService {
             if(position(entity).distance(position(victim))>40)throw new Problem("too_far","警员射击距离超出已确认位置范围");
             if(now()-npcShots.getOrDefault(entity.entityId(),Long.MIN_VALUE/2)<1500)throw new Problem("rate_limited","共同警员射击冷却尚未结束");
             npcShots.put(entity.entityId(),now());
-            try{events.addAll(combat.npcShot(entity,victim,10,now()));}
+            try{events.addAll(combat.npcShot(entity,victim,now()));}
             catch(CombatWorld.Rejection problem){throw new Problem(problem.code,problem.getMessage());}
             events.add(map("type","world_shot_event","schema_version",2,"world_epoch",epoch(),"event_id","s:"+epoch()+":"+(++worldShotEvents),
                 "attacker_entity_id",entity.entityId(),"attacker_generation",entity.generation(),"target_entity_id",victim.entityId(),"target_generation",generation,
                 "weapon",entity.components().ped().weapon(),"origin",position(entity).values(),"target",position(victim).values(),"world_tick",now()));
+        }else if("npc_exit_vehicle".equals(kind)){
+            fields(input,"type","world_epoch","entity_id","owner_epoch","input_seq","kind","generation","vehicle_entity_id","vehicle_generation","vehicle_owner_epoch","seat");
+            if(entity.playerId()!=null || entity.kind()!=Kind.PED || entity.components().attachment()==null)
+                throw new Problem("invalid_target","离车候选只能作用于已入座的服务器NPC");
+            long generation=integer(input.get("generation"),1,9_007_199_254_740_991L);
+            if(entity.generation()!=generation)throw new Problem("stale_generation","NPC生命周期已变化");
+            String vehicleId=text(input.get("vehicle_entity_id"),128),seat=text(input.get("seat"),32);
+            if(!seat.matches("driver|passenger:(?:[0-9]|1[0-5])"))throw new Problem("invalid_seat","NPC座位无效");
+            Attachment attachment=entity.components().attachment();
+            if(!vehicleId.equals(attachment.entityId()) || !seat.equals(attachment.seat()))
+                throw new Problem("stale_generation","NPC座位已变化");
+            Entity vehicle=required(vehicleId);
+            long vehicleGeneration=integer(input.get("vehicle_generation"),1,9_007_199_254_740_991L);
+            if(vehicle.kind()!=Kind.VEHICLE || vehicle.generation()!=vehicleGeneration)
+                throw new Problem("stale_generation","载具生命周期已变化");
+            long vehicleOwnerEpoch=integer(input.get("vehicle_owner_epoch"),0,9_007_199_254_740_991L);
+            if(!actor.equals(vehicle.ownerId()) || vehicle.leaseUntilTick()<=now() || offers.containsKey(vehicle.entityId())
+                || vehicle.ownerEpoch()!=vehicleOwnerEpoch
+                || vehicle.components().vehicle().destroyed()
+                || !entity.entityId().equals(vehicle.components().vehicle().seats().get(seat)))
+                throw new Problem("stale_owner","载具当前不属于同一活动模拟所有者");
+            // This is a bounded native observation candidate, never proof from
+            // the client. Registry.detach performs the atomic seat-map update,
+            // clears a driver's vehicle lease and emits the correction motion.
+            registry.releaseNpcSeatTrusted(entity.entityId(),now());
+            maintainAi();
         }else throw new Problem("unsupported_simulation","不支持此类模拟候选");
         lifeReports.put(key,seq);while(lifeReports.size()>2048)lifeReports.remove(lifeReports.keySet().iterator().next());return events;
     }
@@ -685,12 +751,12 @@ final class WorldService {
         if((attacker.playerId()!=null && !combat.isEntryReady(attacker.playerId()))
             || (victim.playerId()!=null && !combat.isEntryReady(victim.playerId())))return List.of();
         Combat life=victim.components().combat(),a=attacker.components().combat();int amount=Math.min(damage,life.health()),health=life.health()-amount;
-        Map<String,Combat> changes=new LinkedHashMap<>();changes.put(victim.entityId(),new Combat(health,life.maxHealth(),life.kills(),life.deaths()+(health==0?1:0),health==0 && victim.playerId()!=null?tick+4000:0));
-        if(health==0)changes.put(attacker.entityId(),new Combat(a.health(),a.maxHealth(),a.kills()+1,a.deaths(),a.respawnAtTick()));
+        Map<String,Combat> changes=new LinkedHashMap<>();changes.put(victim.entityId(),new Combat(health,life.maxHealth(),life.kills(),life.deaths()+(health==0?1:0),health==0 && victim.playerId()!=null?tick+4000:0,life.armour()));
+        if(health==0)changes.put(attacker.entityId(),new Combat(a.health(),a.maxHealth(),a.kills()+1,a.deaths(),a.respawnAtTick(),a.armour()));
         registry.setCombatBatchTrusted(changes,tick);List<Map<String,Object>> events=new ArrayList<>();
         if(attacker.playerId()!=null)law.reportAcceptedDamage(registry.entity(attacker.entityId()),registry.entity(victim.entityId()),amount,now());
         ai.reportAcceptedDamage(registry.entity(attacker.entityId()),registry.entity(victim.entityId()),amount,now());
-        if(victim.playerId()!=null){events.add(map("type","damage","victim_id",victim.playerId(),"attacker_id",attacker.playerId(),"health",health,"damage",amount,"revision",registry.entity(victim.entityId()).revision()));
+        if(victim.playerId()!=null){events.add(map("type","damage","victim_id",victim.playerId(),"attacker_id",attacker.playerId(),"health",health,"armour",life.armour(),"armour_damage",0,"damage",amount,"revision",registry.entity(victim.entityId()).revision()));
             if(health==0)events.add(map("type","death","player_id",victim.playerId(),"killer_id",attacker.playerId(),"kills",a.kills()+1,"deaths",life.deaths()+1,"respawn_at",tick+4000,"revision",registry.entity(victim.entityId()).revision()));}
         events.add(combatState());return events;
     }
@@ -700,6 +766,7 @@ final class WorldService {
     }
     private WorldCut capture(){
         Snapshot snapshot=registry.snapshot();long tick=Math.max(snapshot.worldTick(),now());
+        combat.captureHistory(tick);
         return new WorldCut(snapshot,tick,environment.cut(tick),law.snapshot());
     }
     private Map<String,Object> snapshot(WorldCut captured){
@@ -718,12 +785,16 @@ final class WorldService {
         Components c=entity.components();Map<String,Object> components=map("transform",map("position",c.transform().position().values(),"rotation",c.transform().rotation().values(),
             "velocity",c.transform().velocity().values(),"angular_velocity",c.transform().angularVelocity().values()));
         if(c.ped()!=null){Map<String,Object> ped=map("weapon",c.ped().weapon(),"shooting",c.ped().shooting(),"actions",c.ped().actions().values());
-            if(c.ped().aimTarget()!=null)ped.put("aim_target",c.ped().aimTarget().values());components.put("ped",ped);if(c.ped().appearance()!=null)components.put("appearance",c.ped().appearance().values());}
+            if(c.ped().aimTarget()!=null)ped.put("aim_target",c.ped().aimTarget().values());
+            if(Boolean.TRUE.equals(c.ped().actions().motion().get("ragdoll"))){
+                Map<String,Object> pose=combat.acceptedPose(entity,now());if(pose!=null)ped.put("pose",pose);
+            }
+            components.put("ped",ped);if(c.ped().appearance()!=null)components.put("appearance",c.ped().appearance().values());}
         if(c.vehicle()!=null)components.put("vehicle",map("engine_health",c.vehicle().engineHealth(),"body_health",c.vehicle().bodyHealth(),"seats",c.vehicle().seats(),
             "engine_on",c.vehicle().view().engineOn(),"lights_on",c.vehicle().view().lightsOn()));
         if(c.object()!=null)components.put("object",map("dynamic",c.object().dynamic()));
         if(c.attachment()!=null)components.put("attachment",map("entity_id",c.attachment().entityId(),"seat",c.attachment().seat()));
-        if(c.combat()!=null)components.put("combat",map("health",c.combat().health(),"max_health",c.combat().maxHealth(),"alive",c.combat().alive(),"kills",c.combat().kills(),"deaths",c.combat().deaths(),"respawn_at_tick",c.combat().respawnAtTick()));
+        if(c.combat()!=null)components.put("combat",map("health",c.combat().health(),"max_health",c.combat().maxHealth(),"armour",c.combat().armour(),"alive",c.combat().alive(),"kills",c.combat().kills(),"deaths",c.combat().deaths(),"respawn_at_tick",c.combat().respawnAtTick()));
         WorldLaw.ResponseInfo response=law.responseForEntity(entity.entityId());
         Map<String,Object> value=map("entity_id",entity.entityId(),"kind",entity.kind().name().toLowerCase(Locale.ROOT),"player_id",entity.playerId(),"model",entity.model(),"revision",entity.revision(),
             "generation",entity.generation(),"owner_id",entity.ownerId(),"owner_epoch",entity.ownerEpoch(),"lease_until_tick",entity.leaseUntilTick(),"last_input_seq",entity.lastInputSequence(),
@@ -752,6 +823,18 @@ final class WorldService {
         if(!(c.get("rotation")instanceof List<?> r)||r.size()!=4)throw new Problem("invalid_message","旋转必须有四个数值");
         try{return new Transform(vector(c.get("position")),new Rotation(number(r.get(0),-1,1),number(r.get(1),-1,1),number(r.get(2),-1,1),number(r.get(3),-1,1)),vector(c.get("velocity")),vector(c.get("angular_velocity")));}
         catch(IllegalArgumentException error){throw new Problem("invalid_message",error.getMessage());}}
-    static Actions actions(Map<String,Object> value)throws Problem{fields(value,"aiming","reloading","jumping","ducking","sprinting");return new Actions(bool(value.get("aiming")),bool(value.get("reloading")),bool(value.get("jumping")),bool(value.get("ducking")),bool(value.get("sprinting")));}
+    static Actions actions(Map<String,Object> value)throws Problem{
+        Set<String> base=Set.of("aiming","reloading","jumping","ducking","sprinting");
+        Map<String,Object> motion=new LinkedHashMap<>();
+        for(Map.Entry<String,Object> entry:value.entrySet())if(!base.contains(entry.getKey())) {
+            if(!Actions.MOTION_FLAGS.contains(entry.getKey()) && !Actions.MOTION_RATIOS.contains(entry.getKey())
+                && !Set.of("animation_phases","animation_blends","ladder").contains(entry.getKey()))
+                throw new Problem("invalid_message","消息包含不允许的动作字段");
+            motion.put(entry.getKey(),entry.getValue());
+        }
+        try{return new Actions(bool(value.get("aiming")),bool(value.get("reloading")),bool(value.get("jumping")),
+            bool(value.get("ducking")),bool(value.get("sprinting")),motion);}
+        catch(IllegalArgumentException error){throw new Problem("invalid_message",error.getMessage());}
+    }
     static Map<String,Object> map(Object...values){Map<String,Object> result=new LinkedHashMap<>();for(int i=0;i<values.length;i+=2)result.put((String)values[i],values[i+1]);return result;}
 }

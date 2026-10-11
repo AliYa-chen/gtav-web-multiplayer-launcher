@@ -3,8 +3,8 @@
   "purpose": "玩家提供原引擎；启动器仅在外部缓存生成离线和公共战局运行副本。",
   "original_sha256": "11ca8d2c04c5e843d18ff4aea4899d72c86973c6b031df334e67c446b2ae83e0",
   "original_bytes": 63201802,
-  "online_sha256": "ada7ab8bc34aae4746911f3de9a45eb0a592b2dc87b0bd1e70a6c5b87956ff78",
-  "online_bytes": 63206305,
+  "online_sha256": "98192db040165d71e7deaf9458ef74d557646d865bd2f2a3661a0fadd09872ef",
+  "online_bytes": 63208040,
   "imported_functions": 85,
   "callback_import": 11,
   "exports": [
@@ -61,6 +61,767 @@
         "i64"
       ],
       "results": []
+    },
+    {
+      "name": "mpGetPedBoneIndex",
+      "function_index": 57639,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpGetPedBounds",
+      "function_index": 46424,
+      "parameters": [
+        "i64",
+        "i64"
+      ],
+      "results": [
+        "i64"
+      ]
+    },
+    {
+      "name": "mpPoseRagdollBody",
+      "function_index": 11824,
+      "parameters": [
+        "i64",
+        "i32",
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSyncRagdollSkeleton",
+      "function_index": 11820,
+      "parameters": [
+        "i64",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpPoseRagdollBounds",
+      "function_index": 11823,
+      "parameters": [
+        "i64",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpFireWaterLevel",
+      "function_index": 44122,
+      "parameters": [
+        "i64",
+        "i64",
+        "f32",
+        "f32",
+        "i64",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpFireRiverLevel",
+      "function_index": 42790,
+      "parameters": [
+        "i64",
+        "i64",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpGetArmour",
+      "function_index": 57222,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpSetArmour",
+      "function_index": 57166,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpIsFalling",
+      "function_index": 57239,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpIsClimbing",
+      "function_index": 57243,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpIsVaulting",
+      "function_index": 57244,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpIsSwimming",
+      "function_index": 57367,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpIsUnderwater",
+      "function_index": 57368,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpIsInCover",
+      "function_index": 57300,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpIsCoverLeft",
+      "function_index": 57301,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpIsHighCover",
+      "function_index": 57302,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpIsGoingIntoCover",
+      "function_index": 57303,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpIsAimingFromCover",
+      "function_index": 57123,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpIsStrafing",
+      "function_index": 60840,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpGetTaskActive",
+      "function_index": 60645,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpGetMoveBlend",
+      "function_index": 57666,
+      "parameters": [
+        "i32",
+        "i64",
+        "i64"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpGetDesiredMoveBlend",
+      "function_index": 60724,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "f32"
+      ]
+    },
+    {
+      "name": "mpSetDesiredMoveBlend",
+      "function_index": 60725,
+      "parameters": [
+        "i32",
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpTaskClimb",
+      "function_index": 60718,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpTaskClimbLadder",
+      "function_index": 60719,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetLadderState",
+      "function_index": 69804,
+      "parameters": [
+        "i64",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpTaskCover",
+      "function_index": 60747,
+      "parameters": [
+        "i32",
+        "i64",
+        "i32",
+        "i32",
+        "f32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpTaskExitCover",
+      "function_index": 60750,
+      "parameters": [
+        "i32",
+        "i32",
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpTaskForceMotionState",
+      "function_index": 60810,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpForceMotionState",
+      "function_index": 57665,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpSetToRagdoll",
+      "function_index": 57461,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpCreateCombatRollTask",
+      "function_index": 70057,
+      "parameters": [
+        "i64"
+      ],
+      "results": [
+        "i64"
+      ]
+    },
+    {
+      "name": "mpDeleteUnassignedCombatRollTask",
+      "function_index": 70056,
+      "parameters": [
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpGiveCharacterTask",
+      "function_index": 63902,
+      "parameters": [
+        "i32",
+        "i64",
+        "i32",
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpGetEntityAddress",
+      "function_index": 8693,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i64"
+      ]
+    },
+    {
+      "name": "mpSetTaskTarget",
+      "function_index": 19294,
+      "parameters": [
+        "i64",
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpCoverWeaponReady",
+      "function_index": 66793,
+      "parameters": [
+        "i64"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpSetCoverState",
+      "function_index": 66881,
+      "parameters": [
+        "i64",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpIsPed",
+      "function_index": 50057,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpGetAnimationPhase",
+      "function_index": 18272,
+      "parameters": [
+        "i64",
+        "i64",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetAnimationPhase",
+      "function_index": 18266,
+      "parameters": [
+        "i64",
+        "i64",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpGetAnimationRate",
+      "function_index": 18273,
+      "parameters": [
+        "i64",
+        "i64",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetAnimationRate",
+      "function_index": 18267,
+      "parameters": [
+        "i64",
+        "i64",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpGetClipPhase",
+      "function_index": 18305,
+      "parameters": [
+        "i64",
+        "i64",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetClipPhase",
+      "function_index": 18298,
+      "parameters": [
+        "i64",
+        "i64",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpGetClipRate",
+      "function_index": 18306,
+      "parameters": [
+        "i64",
+        "i64",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetClipRate",
+      "function_index": 18299,
+      "parameters": [
+        "i64",
+        "i64",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpGetParameterizedPhase",
+      "function_index": 18378,
+      "parameters": [
+        "i64",
+        "i64",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetParameterizedPhase",
+      "function_index": 18372,
+      "parameters": [
+        "i64",
+        "i64",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpGetParameterizedRate",
+      "function_index": 18380,
+      "parameters": [
+        "i64",
+        "i64",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetParameterizedRate",
+      "function_index": 18374,
+      "parameters": [
+        "i64",
+        "i64",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpGetParameterizedDimensions",
+      "function_index": 17617,
+      "parameters": [
+        "i64"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpGetParameterizedValue",
+      "function_index": 18381,
+      "parameters": [
+        "i64",
+        "i64",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetParameterizedValue",
+      "function_index": 18375,
+      "parameters": [
+        "i64",
+        "i64",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetBlendWeight",
+      "function_index": 17917,
+      "parameters": [
+        "i64",
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetAdditiveBlendWeight",
+      "function_index": 17905,
+      "parameters": [
+        "i64",
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpGetBlendNodeWeight",
+      "function_index": 17966,
+      "parameters": [
+        "i64",
+        "i32"
+      ],
+      "results": [
+        "f32"
+      ]
+    },
+    {
+      "name": "mpSetBlendNodeWeight",
+      "function_index": 17964,
+      "parameters": [
+        "i64",
+        "i32",
+        "f32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpGetBlendFilterName",
+      "function_index": 5539,
+      "parameters": [
+        "i64"
+      ],
+      "results": [
+        "i64"
+      ]
+    },
+    {
+      "name": "mpCreateReloadTask",
+      "function_index": 77043,
+      "parameters": [
+        "i64"
+      ],
+      "results": [
+        "i64"
+      ]
+    },
+    {
+      "name": "mpDeleteUnassignedReloadTask",
+      "function_index": 77041,
+      "parameters": [
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpAddSecondaryTask",
+      "function_index": 29870,
+      "parameters": [
+        "i64",
+        "i64"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpClearSecondaryTask",
+      "function_index": 60659,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetAmmo",
+      "function_index": 62913,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetAmmoByType",
+      "function_index": 62947,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetAmmoInClip",
+      "function_index": 62943,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpRemoveWeapon",
+      "function_index": 62930,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpRemoveAllWeapons",
+      "function_index": 62931,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpGetMaxAmmo",
+      "function_index": 62944,
+      "parameters": [
+        "i32",
+        "i32",
+        "i64"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpGetMaxAmmoInClip",
+      "function_index": 62941,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    {
+      "name": "mpSetInfiniteAmmo",
+      "function_index": 62914,
+      "parameters": [
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpSetInfiniteAmmoClip",
+      "function_index": 62915,
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpMakePedReload",
+      "function_index": 62967,
+      "parameters": [
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
     },
     {
       "name": "mpStartShapeTestLOS",
@@ -1035,6 +1796,24 @@
       "results": []
     },
     {
+      "name": "mpTaskGoToCoordWhileAiming",
+      "function_index": 60670,
+      "parameters": [
+        "i32",
+        "i64",
+        "i64",
+        "f32",
+        "i32",
+        "f32",
+        "f32",
+        "i32",
+        "i32",
+        "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
       "name": "mpGetModel",
       "function_index": 50040,
       "parameters": [
@@ -1201,6 +1980,34 @@
       "parameters": [
         "i32",
         "i32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpApplyCosmeticTorsoBlood",
+      "function_index": 57492,
+      "parameters": [
+        "i32",
+        "i32",
+        "f32",
+        "f32",
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpClearVisibleDamage",
+      "function_index": 57491,
+      "parameters": [
+        "i32"
+      ],
+      "results": []
+    },
+    {
+      "name": "mpDeathCameraEffect",
+      "function_index": 49156,
+      "parameters": [
         "i32"
       ],
       "results": []

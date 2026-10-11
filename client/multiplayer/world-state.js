@@ -1,12 +1,13 @@
 import { normalizeAppearance } from './appearance.js';
+import { cleanActionState } from './action-state.js';
+import { cleanPedPose } from './ped-pose-state.js';
 
 const integer = (value, min = 0, max = Number.MAX_SAFE_INTEGER) => Number.isSafeInteger(value) && value >= min && value <= max;
 const identifier = (value) => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,160}$/.test(value);
 const record = (value) => value && typeof value === 'object' && !Array.isArray(value);
 const vector = (value, bound = 16000) => Array.isArray(value) && value.length === 3
   && value.every((part) => Number.isFinite(part) && Math.abs(part) <= bound);
-const actions = (value) => record(value) && Object.keys(value).length === 5
-  && ['aiming', 'reloading', 'jumping', 'ducking', 'sprinting'].every((key) => typeof value[key] === 'boolean');
+const actions = (value) => cleanActionState(value) !== null;
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const weatherTypes = new Set(['EXTRASUNNY', 'CLEAR', 'CLOUDS', 'OVERCAST', 'RAIN', 'THUNDER', 'CLEARING', 'SMOG', 'FOGGY']);
 
@@ -95,14 +96,16 @@ export function cleanWorldEntity(value) {
   if (value.kind === 'ped') {
     const ped = components.ped;
     if (!record(ped) || !integer(ped.weapon, 0, 0xffffffff) || typeof ped.shooting !== 'boolean' || !actions(ped.actions)
-      || (Object.hasOwn(ped, 'aim_target') && !vector(ped.aim_target))) return null;
-    if (Object.keys(ped).some((key) => !['weapon', 'shooting', 'actions', 'aim_target'].includes(key))) return null;
+      || (Object.hasOwn(ped, 'aim_target') && !vector(ped.aim_target))
+      || (Object.hasOwn(ped, 'pose') && !cleanPedPose(ped.pose))) return null;
+    if (Object.keys(ped).some((key) => !['weapon', 'shooting', 'actions', 'aim_target', 'pose'].includes(key))) return null;
   } else if (Object.hasOwn(components, 'ped')) return null;
   if (Object.hasOwn(components, 'appearance') && !normalizeAppearance(components.appearance)) return null;
   if (Object.hasOwn(components, 'combat')) {
     const life = components.combat;
     if (!record(life) || !integer(life.max_health, 1, 10000) || !integer(life.health, 0, life.max_health)
       || life.alive !== (life.health > 0) || !integer(life.kills) || !integer(life.deaths)
+      || (Object.hasOwn(life, 'armour') && (!Number.isFinite(life.armour) || life.armour < 0 || life.armour > 100))
       || !integer(life.respawn_at_tick) || (life.alive && life.respawn_at_tick !== 0)) return null;
   }
   if (value.kind === 'vehicle') {

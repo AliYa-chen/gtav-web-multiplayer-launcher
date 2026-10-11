@@ -110,11 +110,120 @@ public final class WorldRegistry {
         }
     }
 
-    public record Actions(boolean aiming, boolean reloading, boolean jumping, boolean ducking, boolean sprinting) {
+    public record Actions(boolean aiming, boolean reloading, boolean jumping, boolean ducking, boolean sprinting,
+                          Map<String,Object> motion) {
+        public static final Set<String> MOTION_FLAGS=Set.of("falling","climbing","climbing_ladder","vaulting","swimming","underwater",
+            "ragdoll","in_cover","cover_left","cover_high","cover_aiming","going_into_cover","strafing","rolling");
+        public static final Set<String> MOTION_RATIOS=Set.of("move_blend","move_x","move_y");
+        public Actions {
+            Map<String,Object> checked=new LinkedHashMap<>();
+            if(motion!=null)for(Map.Entry<String,Object> entry:motion.entrySet()) {
+                String key=entry.getKey();Object value=entry.getValue();
+                if(MOTION_FLAGS.contains(key)) {
+                    if(!(value instanceof Boolean))throw new IllegalArgumentException("扩展动作标志必须为布尔值");
+                    checked.put(key,value);
+                } else if(MOTION_RATIOS.contains(key)) {
+                    if(!(value instanceof Number number) || !Double.isFinite(number.doubleValue())
+                        || number.doubleValue() < ("move_blend".equals(key)?0:-3) || number.doubleValue()>3)
+                        throw new IllegalArgumentException("原生运动混合比超出范围");
+                    checked.put(key,number.doubleValue());
+                } else if("animation_phases".equals(key)) {
+                    if(!(value instanceof List<?> entries)||entries.size()>32)throw new IllegalArgumentException("动画相位数量无效");
+                    List<Map<String,Object>> phases=new ArrayList<>();Set<String> identities=new HashSet<>();
+                    for(Object raw:entries){
+                        if(!(raw instanceof Map<?,?> phase)||!phase.keySet().containsAll(Set.of("kind","name","phase"))
+                            || !Set.of("kind","name","phase","rate","parameters").containsAll(phase.keySet())
+                            || !(phase.get("kind") instanceof Number kind)||(kind.doubleValue()!=4&&kind.doubleValue()!=15&&kind.doubleValue()!=17)
+                            || !(phase.get("name") instanceof String name)||!name.matches("[\\x20-\\x7E]{1,160}")
+                            || !(phase.get("phase") instanceof Number time)||!Double.isFinite(time.doubleValue())||time.doubleValue()<0||time.doubleValue()>1
+                            || !identities.add(kind.intValue()+":"+name))throw new IllegalArgumentException("动画相位条目无效");
+                        Map<String,Object> sample=new LinkedHashMap<>();
+                        sample.put("kind",kind.intValue());sample.put("name",name);sample.put("phase",time.doubleValue());
+                        if(phase.containsKey("rate")){
+                            if(!(phase.get("rate") instanceof Number rate)||!Double.isFinite(rate.doubleValue())||Math.abs(rate.doubleValue())>16)
+                                throw new IllegalArgumentException("动画速率无效");
+                            sample.put("rate",rate.doubleValue());
+                        }
+                        if(phase.containsKey("parameters")){
+                            if(kind.intValue()!=17 || !(phase.get("parameters") instanceof List<?> values)
+                                || values.isEmpty() || values.size()>16)throw new IllegalArgumentException("步态参数数量无效");
+                            List<Double> parameters=new ArrayList<>();
+                            for(Object parameter:values){
+                                if(!(parameter instanceof Number number)||!Double.isFinite(number.doubleValue())||Math.abs(number.doubleValue())>65536)
+                                    throw new IllegalArgumentException("步态参数无效");
+                                parameters.add(number.doubleValue());
+                            }
+                            sample.put("parameters",List.copyOf(parameters));
+                        }
+                        phases.add(Collections.unmodifiableMap(sample));
+                    }
+                    checked.put(key,List.copyOf(phases));
+                } else if("animation_blends".equals(key)) {
+                    if(!(value instanceof List<?> entries)||entries.size()>16)throw new IllegalArgumentException("动画混合数量无效");
+                    List<Map<String,Object>> blends=new ArrayList<>();Set<String> identities=new HashSet<>();
+                    for(Object raw:entries){
+                        if(!(raw instanceof Map<?,?> blend)||!blend.keySet().containsAll(Set.of("kind","key","weights"))
+                            || !Set.of("kind","key","weights","rate").containsAll(blend.keySet())
+                            || !(blend.get("kind") instanceof Number number)||number.doubleValue()!=number.intValue()
+                            || !Set.of(5,6,13,22).contains(number.intValue())
+                            || !(blend.get("key") instanceof String identity)||!identity.matches("[\\x20-\\x7E]{1,1024}")
+                            || !identities.add(number.intValue()+":"+identity)
+                            || !(blend.get("weights") instanceof List<?> values)||values.isEmpty()||values.size()>8)
+                            throw new IllegalArgumentException("动画混合条目无效");
+                        int kind=number.intValue();boolean pair=kind==5||kind==6;
+                        if(pair&&values.size()!=1)throw new IllegalArgumentException("动画混合维度无效");
+                        List<Double> weights=new ArrayList<>();
+                        for(Object weight:values){
+                            if(!(weight instanceof Number scalar)||!Double.isFinite(scalar.doubleValue())||Math.abs(scalar.doubleValue())>16
+                                || (kind==5||kind==13)&&(scalar.doubleValue()<0||scalar.doubleValue()>1))throw new IllegalArgumentException("动画混合权重无效");
+                            weights.add(scalar.doubleValue());
+                        }
+                        Map<String,Object> sample=new LinkedHashMap<>();sample.put("kind",kind);sample.put("key",identity);sample.put("weights",List.copyOf(weights));
+                        if(blend.containsKey("rate")){
+                            if(!pair||!(blend.get("rate") instanceof Number rate)||!Double.isFinite(rate.doubleValue())||Math.abs(rate.doubleValue())>16)
+                                throw new IllegalArgumentException("动画混合速率无效");
+                            sample.put("rate",rate.doubleValue());
+                        }
+                        blends.add(Collections.unmodifiableMap(sample));
+                    }
+                    checked.put(key,List.copyOf(blends));
+                } else if("ladder".equals(key)) {
+                    if(!(value instanceof Map<?,?> ladder)||!ladder.keySet().equals(Set.of("model","geometry","effect","type","state","target")))
+                        throw new IllegalArgumentException("梯子身份字段无效");
+                    Map<String,Object> sample=new LinkedHashMap<>();
+                    for(String field:List.of("model","effect","type","state")){
+                        long maximum=switch(field){case "model"->0xffffffffL;case "effect"->65535;case "type"->2;default->15;};
+                        if(!(ladder.get(field) instanceof Number number)||!Double.isFinite(number.doubleValue())
+                            ||number.doubleValue()!=number.longValue()||number.longValue()<0||number.longValue()>maximum)
+                            throw new IllegalArgumentException("梯子身份数值无效");
+                        sample.put(field,number.longValue());
+                    }
+                    for(String field:List.of("geometry","target")){
+                        int count=field.equals("geometry")?12:3;
+                        if(!(ladder.get(field) instanceof List<?> values)||values.size()!=count)
+                            throw new IllegalArgumentException("梯子几何维度无效");
+                        List<Double> copy=new ArrayList<>();
+                        for(int index=0;index<count;index++){
+                            double maximum=count==12&&index<9?2:16000;
+                            if(!(values.get(index) instanceof Number number)||!Double.isFinite(number.doubleValue())||Math.abs(number.doubleValue())>maximum)
+                                throw new IllegalArgumentException("梯子几何数值无效");
+                            copy.add(number.doubleValue());
+                        }
+                        sample.put(field,List.copyOf(copy));
+                    }
+                    checked.put(key,Collections.unmodifiableMap(sample));
+                } else throw new IllegalArgumentException("未知扩展动作字段");
+            }
+            motion=immutable(checked);
+        }
+        public Actions(boolean aiming,boolean reloading,boolean jumping,boolean ducking,boolean sprinting) {
+            this(aiming,reloading,jumping,ducking,sprinting,Map.of());
+        }
         public static Actions idle() { return new Actions(false, false, false, false, false); }
         public Map<String, Object> values() {
-            return immutable(map("aiming", aiming, "reloading", reloading, "jumping", jumping,
-                "ducking", ducking, "sprinting", sprinting));
+            Map<String,Object> value=map("aiming", aiming, "reloading", reloading, "jumping", jumping,
+                "ducking", ducking, "sprinting", sprinting);
+            value.putAll(motion);return immutable(value);
         }
     }
 
@@ -125,10 +234,14 @@ public final class WorldRegistry {
         public PedView { unsigned(weapon); Objects.requireNonNull(actions); }
     }
     public record VehicleView(boolean engineOn, boolean lightsOn) implements ClientView {}
-    public record Combat(int health, int maxHealth, int kills, int deaths, long respawnAtTick) {
+    public record Combat(int health, int maxHealth, int kills, int deaths, long respawnAtTick, double armour) {
+        public Combat(int health, int maxHealth, int kills, int deaths, long respawnAtTick) {
+            this(health,maxHealth,kills,deaths,respawnAtTick,0);
+        }
         public Combat {
             if (maxHealth < 1 || maxHealth > 10000 || health < 0 || health > maxHealth || kills < 0 || deaths < 0
-                    || respawnAtTick < 0 || (health > 0 && respawnAtTick != 0))
+                    || respawnAtTick < 0 || (health > 0 && respawnAtTick != 0)
+                    || !Double.isFinite(armour) || armour < 0 || armour > 100)
                 throw new IllegalArgumentException("权威战斗状态无效");
         }
         public boolean alive() { return health > 0; }
@@ -386,6 +499,20 @@ public final class WorldRegistry {
         return setCombatBatchTrusted(Map.of(id,Objects.requireNonNull(combat)),nowTick);
     }
 
+    /** A confirmed combat rule can remove a head prop without accepting a new
+     * client appearance or changing the entity's life, lease or movement. */
+    public synchronized Commit clearHeadPropTrusted(String id,long expectedRevision,long nowTick) throws Rejection {
+        tick(nowTick);Entity old=require(id);revision(old,expectedRevision);
+        Components c=old.components;
+        if(c.ped==null || c.ped.appearance==null)throw reject("invalid_component","角色没有可移除的头饰");
+        Appearance before=c.ped.appearance;List<List<Integer>> props=new ArrayList<>(before.props);
+        props.set(0,List.of(-1,-1));
+        Appearance appearance=new Appearance(before.components,props,before.overlays,before.hair);
+        PedView ped=new PedView(appearance,c.ped.actions,c.ped.weapon,c.ped.shooting,c.ped.aimTarget);
+        Entity result=updated(old,new Components(c.transform,ped,c.vehicle,c.object,c.combat,c.attachment));
+        entities.put(id,result);return commit(Change.UPDATE,List.of(result),List.of());
+    }
+
     /** 多实体战斗结果一次提交；规则模块先计算伤害和计分，不能分批产生半次击杀。 */
     public synchronized Commit setCombatBatchTrusted(Map<String,Combat> values,long nowTick) throws Rejection {
         tick(nowTick); Map<String,Entity> updates=new LinkedHashMap<>();
@@ -620,7 +747,7 @@ public final class WorldRegistry {
         Map<String,Object> state=map("position",transform.position.values(),"heading",transform.rotation.heading(),
             "model",entity.model,"weapon",ped.weapon,"shooting",(combat==null || combat.alive()) && ped.shooting,
             "actions",ped.actions.values());
-        if (combat!=null) { state.put("health",combat.health); state.put("alive",combat.alive()); }
+        if (combat!=null) { state.put("health",combat.health); state.put("armour",combat.armour); state.put("alive",combat.alive()); }
         if (ped.appearance!=null) state.put("appearance",ped.appearance.values());
         if (ped.aimTarget!=null) state.put("aim_target",ped.aimTarget.values());
         return immutable(state);
